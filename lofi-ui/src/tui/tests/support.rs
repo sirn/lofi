@@ -120,11 +120,38 @@ pub(super) fn msg(m: Message) -> SessionEventKind {
     SessionEventKind::Message(m)
 }
 
+pub(super) fn grant_request(
+    dir: &str,
+    requested: lofi_types::Access,
+    current: Option<lofi_types::Access>,
+) -> (
+    lofi_core::ConfirmRequest,
+    tokio::sync::oneshot::Receiver<lofi_core::ConfirmResponse>,
+) {
+    let (respond, response) = tokio::sync::oneshot::channel();
+    (
+        lofi_core::ConfirmRequest {
+            id: 1,
+            command: dir.to_string(),
+            reason: std::sync::Arc::new(std::sync::Mutex::new(
+                lofi_core::ConfirmReason::OutsideRoot {
+                    dir: dir.to_string(),
+                    requested,
+                    current,
+                },
+            )),
+            active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            respond,
+        },
+        response,
+    )
+}
+
 pub(super) fn confirm_request(
     command: &str,
 ) -> (
     lofi_core::ConfirmRequest,
-    tokio::sync::oneshot::Receiver<bool>,
+    tokio::sync::oneshot::Receiver<lofi_core::ConfirmResponse>,
 ) {
     let (respond, response) = tokio::sync::oneshot::channel();
     (

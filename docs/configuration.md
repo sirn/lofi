@@ -808,10 +808,34 @@ Relative paths cannot leave the workspace root.
 
 An absolute path outside every allowed root opens one prompt.
 The prompt names the directory that the request uses: the directory itself, or the directory that holds the requested file.
-Approving allows reads and writes in that directory and its subdirectories.
-Lofi remembers an approved directory per workspace in `$XDG_STATE_HOME/lofi/states/<workspace-key>/state.json`, so a restart does not ask again.
+A grant is gradual: a read request offers read-only access first, and a write request offers read and write.
+A write into a read-only granted directory asks to widen it.
+Lofi remembers grants per workspace in `$XDG_STATE_HOME/lofi/states/<workspace-key>/state.json`, so a restart does not ask again.
 A refused prompt keeps the path rejected, and the next request asks again.
-Approval covers the file tools only. A `lofi.bash` command can reach any path the user can, and the shell policy gates it.
+Grants cover the file tools only. A `lofi.bash` command can reach any path the user can, and the shell policy gates it.
+
+### Allowed paths
+
+Declare allowed paths globally with `[[permissions]]` entries in `config.toml`.
+Each entry grants a directory tree outside the workspace root with an access level.
+`access` defaults to `read`: an entry must not widen to write because the field was left out.
+`~` expands to the home directory.
+A path that does not exist yet is resolved through its deepest existing ancestor, so a grant for a not-yet-created path still applies once it exists.
+
+```toml
+[[permissions]]
+path = "/nix/store"
+access = "read"
+
+[[permissions]]
+path = "~/notes"
+access = "write"
+```
+
+Grants combine additively: the strongest covering grant wins, so a nested write grant inside a read-only parent stays writable, and a child entry can never subtract access from its parent.
+Config grants apply to every workspace; remembered grants from prompts are per workspace.
+The `/paths` dialog lists both plus the builtin roots, and edits the remembered grants: `space` toggles read/write, `d` forgets a grant.
+Config rows say to edit `config.toml`; builtin rows are fixed by the session.
 
 ## Shell policy
 

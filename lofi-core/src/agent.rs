@@ -31,7 +31,30 @@ pub struct ConfirmRequest {
     pub command: String,
     pub reason: Arc<Mutex<lofi_code::ConfirmReason>>,
     pub active: Arc<AtomicBool>,
-    pub respond: oneshot::Sender<bool>,
+    pub respond: oneshot::Sender<ConfirmResponse>,
+}
+
+/// One answer to a [`ConfirmRequest`]. Shell prompts take `Allow`/`Deny`;
+/// directory grants take `Grant` with the access the user chose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmResponse {
+    Allow,
+    Deny,
+    Grant(lofi_types::Access),
+}
+
+impl ConfirmResponse {
+    /// Whether this answer grants write access to a directory.
+    #[must_use]
+    pub fn is_grant_write(self) -> bool {
+        matches!(self, Self::Grant(lofi_types::Access::Write))
+    }
+
+    /// Whether this answer grants read-only access to a directory.
+    #[must_use]
+    pub fn is_grant_read(self) -> bool {
+        matches!(self, Self::Grant(lofi_types::Access::Read))
+    }
 }
 
 mod agent_run;
@@ -73,6 +96,25 @@ pub(crate) use model::{parse_model_query, NO_MODELS_HINT};
 pub use model::{rebuild_agent, select_model, select_model_with_level};
 
 pub const SYSTEM_PROMPT: &str = include_str!("prompts/system.md");
+
+/// Resolves `[[permissions]]` entries into granted directories: `~` is
+/// expanded, then the deepest existing ancestor is canonicalized and the
+/// missing tail re-joined, so a grant for a not-yet-created path matches
+/// what a later resolution computes.
+pub(crate) fn granted_dirs(
+    permissions: &[lofi_types::PermissionEntry],
+) -> Vec<lofi_code::GrantedDir> {
+    permissions
+        .iter()
+        .map(|entry| {
+            let dir = crate::bash_env::expand_tilde(&entry.path);
+            lofi_code::GrantedDir {
+                dir: lofi_code::canonicalize_up(&dir).unwrap_or(dir),
+                access: entry.access,
+            }
+        })
+        .collect()
+}
 
 /// Maximum cumulative bytes of streamed text/thinking/tool-input retained
 /// for a single round, so a hostile or misbehaving endpoint sending many
@@ -148,6 +190,10 @@ pub struct Agent {
     /// every rebuilt agent so a model switch keeps the choice.
     policy_override: lofi_code::policy::PolicyOverride,
     skills_dir: Option<PathBuf>,
+    /// Config-sourced granted directories outside the workspace root, with
+    /// their access levels. Session approvals are remembered per workspace
+    /// in the state document instead, and flow through the grant hook.
+    grants: Vec<lofi_code::GrantedDir>,
     /// Session-scoped background jobs. Shared with every exec so a job
     /// spawned in one round is visible to the next. The host shuts down
     /// survivors when the session ends.
@@ -224,6 +270,7 @@ impl Agent {
             auto_mode_hints: auto_mode::hint_handle(),
             policy_override: lofi_code::policy::PolicyOverride::default(),
             skills_dir: None,
+            grants: Vec::new(),
             jobs: lofi_code::tools::JobRegistry::new(),
             timers: lofi_code::tools::TimerRegistry::new(),
             job_owner: None,
@@ -233,6 +280,21 @@ impl Agent {
             subagents: SubagentRegistry::default(),
             source: None,
         }
+    }
+
+    /// Attaches config-sourced granted directories outside the workspace
+    /// root. A model switch keeps them because every rebuild clones the
+    /// field.
+    #[must_use]
+    pub fn with_grants(mut self, grants: Vec<lofi_code::GrantedDir>) -> Self {
+        self.grants = grants;
+        self
+    }
+
+    /// The config-sourced grants, for the grant hook and the paths manager.
+    #[must_use]
+    pub fn grants(&self) -> &[lofi_code::GrantedDir] {
+        &self.grants
     }
 
     fn with_tmp_lease(mut self, lease: state::SessionTempDir) -> Self {
@@ -267,6 +329,7 @@ impl Agent {
             auto_mode_hints: self.auto_mode_hints.clone(),
             policy_override: self.policy_override.clone(),
             skills_dir: self.skills_dir.clone(),
+            grants: self.grants.clone(),
             jobs: self.jobs.clone(),
             timers: self.timers.clone(),
             job_owner: self.job_owner.clone(),
@@ -300,6 +363,7 @@ impl Agent {
             auto_mode_hints: self.auto_mode_hints.clone(),
             policy_override: self.policy_override.clone(),
             skills_dir: self.skills_dir.clone(),
+            grants: self.grants.clone(),
             jobs: self.jobs.clone(),
             timers: self.timers.clone(),
             job_owner: self.job_owner.clone(),
@@ -336,6 +400,7 @@ impl Agent {
             auto_mode_hints: self.auto_mode_hints.clone(),
             policy_override: self.policy_override.clone(),
             skills_dir,
+            grants: self.grants.clone(),
             jobs: self.jobs.clone(),
             timers: self.timers.clone(),
             job_owner: self.job_owner.clone(),
@@ -371,6 +436,7 @@ impl Agent {
             auto_mode_hints: executor.auto_mode_hints.clone(),
             policy_override: executor.policy_override.clone(),
             skills_dir: executor.skills_dir.clone(),
+            grants: executor.grants.clone(),
             jobs: executor.jobs.clone(),
             timers: executor.timers.clone(),
             job_owner: executor.job_owner.clone(),
@@ -448,6 +514,7 @@ impl Agent {
             auto_mode_hints: self.auto_mode_hints.clone(),
             policy_override: self.policy_override.clone(),
             skills_dir: self.skills_dir.clone(),
+            grants: self.grants.clone(),
             jobs: self.jobs.clone(),
             timers: self.timers.clone(),
             job_owner: self.job_owner.clone(),
@@ -481,6 +548,7 @@ impl Agent {
         self.auto_mode_hints = executor.auto_mode_hints;
         self.policy_override = executor.policy_override;
         self.skills_dir = executor.skills_dir;
+        self.grants = executor.grants;
         self.jobs = executor.jobs;
         self.timers = executor.timers;
         self.exec_worker = executor.exec_worker;

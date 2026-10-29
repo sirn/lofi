@@ -21,9 +21,10 @@ mod markdown;
 mod modals;
 mod prim;
 use modals::{
-    render_confirm_modal, render_info_modal, render_jobs_modal, render_model_picker, render_picker,
-    render_policy_picker, render_service_picker, render_slash_complete, render_subagents_modal,
-    render_theme_picker, render_thinking_picker, render_tree_picker,
+    render_confirm_modal, render_info_modal, render_jobs_modal, render_model_picker,
+    render_paths_picker, render_picker, render_policy_picker, render_service_picker,
+    render_slash_complete, render_subagents_modal, render_theme_picker, render_thinking_picker,
+    render_tree_picker,
 };
 
 #[allow(unused_imports)] // used by tests and render harnesses
@@ -131,6 +132,9 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     }
     if app.policy_picker.is_some() {
         render_policy_picker(f, area, app);
+    }
+    if app.paths_picker.is_some() {
+        render_paths_picker(f, area, app);
     }
     if app.service_picker.is_some() {
         render_service_picker(f, area, app);

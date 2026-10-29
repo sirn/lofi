@@ -66,6 +66,10 @@ impl App {
                 self.open_policy_picker();
                 true
             }
+            "/paths" => {
+                self.open_paths_picker();
+                true
+            }
             "/job" | "/jobs" => {
                 self.open_jobs_modal();
                 true
@@ -248,7 +252,11 @@ impl App {
         match self.session.cursor.as_ref() {
             Some(cursor) => {
                 lines.push(info_kv(t, "id", &cursor.id()));
-                lines.push(info_kv(t, "file", &cursor.path().display().to_string()));
+                lines.push(info_kv(
+                    t,
+                    "file",
+                    &crate::tui::text::abbreviate_path(cursor.path(), 60),
+                ));
                 lines.push(info_kv(t, "size", &format_bytes(cursor.len())));
             }
             None => {
@@ -274,7 +282,11 @@ impl App {
         ));
         lines.push(InfoLine::Text(Line::from("")));
         lines.push(info_section("Workspace"));
-        lines.push(info_kv(t, "root", &self.session.cwd.display().to_string()));
+        lines.push(info_kv(
+            t,
+            "root",
+            &crate::tui::text::abbreviate_path(&self.session.cwd, 60),
+        ));
         self.info = Some(InfoModal {
             title: "Session".to_string(),
             lines,

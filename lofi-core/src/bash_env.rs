@@ -54,7 +54,7 @@ fn baseline_from_parent() -> Vec<(String, String)> {
     out
 }
 
-fn expand_tilde(p: &std::path::Path) -> std::path::PathBuf {
+pub(crate) fn expand_tilde(p: &std::path::Path) -> std::path::PathBuf {
     let s = p.to_string_lossy();
     if s == "~" {
         return match std::env::var_os("HOME") {

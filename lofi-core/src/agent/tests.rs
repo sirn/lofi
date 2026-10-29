@@ -201,6 +201,7 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         auto_mode_hints: super::auto_mode::hint_handle(),
         policy_override: lofi_code::policy::PolicyOverride::default(),
         skills_dir: None,
+        grants: Vec::new(),
         jobs: lofi_code::tools::JobRegistry::new(),
         timers: lofi_code::tools::TimerRegistry::new(),
         job_owner: None,

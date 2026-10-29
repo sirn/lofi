@@ -195,6 +195,7 @@ pub fn rebuild_agent(
             &config.shell_policy,
         )
         .with_tmp_lease(tmp_lease)
+        .with_grants(super::granted_dirs(&config.permissions))
         .with_retry(crate::retry::RetryPolicy::from(config.retry))
     };
     let agent = agent.with_auto_continue(auto_continue);

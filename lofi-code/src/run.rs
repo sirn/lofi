@@ -181,6 +181,7 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
         )
         .with_policy_override(ctx.policy_override.clone())
         .with_approve_dir(ctx.approve_dir.clone())
+        .with_grants(ctx.grants.clone())
         .with_cancel(opts.cancel.clone())
         .with_truncate(ctx.truncate)
         .with_jobs(ctx.jobs.clone())

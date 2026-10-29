@@ -89,6 +89,8 @@ impl App {
             model_picker: None,
             thinking_picker: None,
             policy_picker: None,
+            paths_picker: None,
+            paths: None,
             policy_override: None,
             auto_mode_configured: false,
             service_picker: None,

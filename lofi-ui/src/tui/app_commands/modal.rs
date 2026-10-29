@@ -11,6 +11,15 @@ enum ModalSlot {
     Theme,
 }
 
+fn choice_label(choice: ConfirmResponse) -> &'static str {
+    match choice {
+        ConfirmResponse::Allow => "Allow",
+        ConfirmResponse::Deny => "Deny",
+        ConfirmResponse::Grant(lofi_types::Access::Read) => "Read only",
+        ConfirmResponse::Grant(lofi_types::Access::Write) => "Read & write",
+    }
+}
+
 impl App {
     pub(in crate::tui) fn queue_confirmation(&mut self, req: lofi_core::ConfirmRequest) {
         if Self::confirmation_ready(&req) {
@@ -90,6 +99,7 @@ impl App {
             || self.theme_picker.is_some()
             || self.jobs_modal.is_some()
             || self.subagents_modal.is_some()
+            || self.paths_picker.is_some()
             || !self.pending_confirms.is_empty()
     }
 
@@ -104,6 +114,7 @@ impl App {
         }
         if self.jobs_modal.is_some()
             || self.subagents_modal.is_some()
+            || self.paths_picker.is_some()
             || self.active_modal_slot().is_some()
         {
             return self.handle_modal_key(k);
@@ -129,6 +140,8 @@ impl App {
             self.confirm_view_h = 0;
             return true;
         }
+        let choices = self.confirm_choices();
+        let len = choices.len();
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let max_scroll = self.confirm_total.saturating_sub(self.confirm_view_h);
         let response = match k.code {
@@ -162,34 +175,73 @@ impl App {
                 None
             }
             KeyCode::Left | KeyCode::Char('h') => {
-                self.confirm_selected = 0;
+                self.confirm_selected = self.confirm_selected.saturating_sub(1);
                 None
             }
             KeyCode::Right | KeyCode::Char('l') => {
-                self.confirm_selected = 1;
+                self.confirm_selected = (self.confirm_selected + 1).min(len - 1);
                 None
             }
             KeyCode::Tab | KeyCode::BackTab => {
-                self.confirm_selected = 1 - self.confirm_selected.min(1);
+                self.confirm_selected = (self.confirm_selected + 1) % len;
                 None
             }
-            KeyCode::Enter => Some(self.confirm_selected == 0),
-            KeyCode::Char('a' | 'A' | 'y' | 'Y') => Some(true),
-            KeyCode::Char('d' | 'D' | 'n' | 'N') | KeyCode::Esc => Some(false),
-            KeyCode::Char('c') if ctrl => Some(false),
+            KeyCode::Enter => choices.get(self.confirm_selected.min(len - 1)).copied(),
+            KeyCode::Char('a' | 'A' | 'y' | 'Y') => choices.first().copied(),
+            KeyCode::Char('w' | 'W') => choices.iter().find(|c| c.is_grant_write()).copied(),
+            KeyCode::Char('r' | 'R') => choices.iter().find(|c| c.is_grant_read()).copied(),
+            KeyCode::Char('d' | 'D' | 'n' | 'N') | KeyCode::Esc => Some(ConfirmResponse::Deny),
+            KeyCode::Char('c') if ctrl => Some(ConfirmResponse::Deny),
             _ => None,
         };
-        if let Some(approved) = response {
+        if let Some(choice) = response {
             let req = self.pending_confirms.remove(0);
             req.active
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            let _ = req.respond.send(approved);
+            let _ = req.respond.send(choice);
             self.confirm_selected = 0;
             self.confirm_scroll = 0;
             self.confirm_total = 0;
             self.confirm_view_h = 0;
         }
         true
+    }
+
+    /// The button labels for the front confirmation's choices.
+    pub(in crate::tui) fn confirm_choice_labels(&self) -> Vec<&'static str> {
+        self.confirm_choices()
+            .into_iter()
+            .map(choice_label)
+            .collect()
+    }
+
+    /// The response choices the front confirmation offers, in button order.
+    /// A directory grant for a read offers read-only first, because that is
+    /// the least access the operation needs; a write offers only read and
+    /// write, because read-only cannot satisfy it.
+    fn confirm_choices(&self) -> Vec<ConfirmResponse> {
+        use lofi_types::Access;
+        let Some(req) = self.pending_confirms.first() else {
+            return Vec::new();
+        };
+        let reason = req
+            .reason
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match *reason {
+            lofi_core::ConfirmReason::OutsideRoot { requested, .. } => {
+                if requested == Access::Read {
+                    vec![
+                        ConfirmResponse::Grant(Access::Read),
+                        ConfirmResponse::Grant(Access::Write),
+                        ConfirmResponse::Deny,
+                    ]
+                } else {
+                    vec![ConfirmResponse::Grant(Access::Write), ConfirmResponse::Deny]
+                }
+            }
+            _ => vec![ConfirmResponse::Allow, ConfirmResponse::Deny],
+        }
     }
 
     /// Handle keys for the read-only information modal. Copy leaves the modal
@@ -289,6 +341,9 @@ impl App {
         }
         if self.subagents_modal.is_some() {
             return self.handle_subagents_key(k);
+        }
+        if self.paths_picker.is_some() {
+            return self.handle_paths_key(k);
         }
         let Some(slot) = self.active_modal_slot() else {
             return false;

@@ -16,7 +16,7 @@ pub mod patch;
 pub mod read;
 
 mod bash_util;
-mod fs;
+pub(crate) mod fs;
 pub mod jobs;
 pub mod memory;
 pub mod skills;
@@ -81,7 +81,9 @@ pub struct BuiltinTools {
     /// tool bound but unavailable (tests, nested sandboxes).
     memory: Option<PathBuf>,
     read_roots: Vec<PathBuf>,
-    /// Approves one directory for use outside the workspace root.
+    /// Granted directories outside the workspace root, with their access.
+    grants: Vec<crate::GrantedDir>,
+    /// Grants one directory for use outside the workspace root.
     approve_dir: Option<crate::ApproveDirFn>,
     cancel: Option<Arc<AtomicBool>>,
     /// Background jobs spawned by this session. Shared with the owning
@@ -158,6 +160,7 @@ impl BuiltinTools {
             skills_dir,
             memory: None,
             read_roots,
+            grants: Vec::new(),
             approve_dir: None,
             cancel: None,
             jobs: JobRegistry::new(),
@@ -224,10 +227,25 @@ impl BuiltinTools {
         self
     }
 
-    /// Installs the outside-workspace directory approval hook.
+    /// Installs the outside-workspace directory grant hook.
     #[must_use]
     pub fn with_approve_dir(mut self, approve_dir: Option<crate::ApproveDirFn>) -> Self {
         self.approve_dir = approve_dir;
+        self
+    }
+
+    /// Attaches granted directories, canonicalized through missing
+    /// trailing components so a grant for a not-yet-created path still
+    /// matches what a later resolution computes.
+    #[must_use]
+    pub fn with_grants(mut self, grants: Vec<crate::GrantedDir>) -> Self {
+        self.grants = grants
+            .into_iter()
+            .map(|g| crate::GrantedDir {
+                dir: canonicalize_up(&g.dir).unwrap_or(g.dir),
+                access: g.access,
+            })
+            .collect();
         self
     }
 
@@ -327,45 +345,87 @@ impl BuiltinTools {
         }))
     }
 
-    /// Resolves a read-only tool path against the workspace root and the
-    /// registered read roots. Returns the resolved path and the root that
-    /// contains it, which `ls`/`find`/`grep` strip from results.
+    /// The roots a read may use: the builtin read roots plus every granted
+    /// directory, whatever its level.
+    fn read_roots_with_grants(&self) -> Vec<PathBuf> {
+        let mut roots = self.read_roots.clone();
+        roots.extend(self.grants.iter().map(|g| g.dir.clone()));
+        roots
+    }
+
+    /// The roots a mutation may use without a prompt: write grants plus
+    /// the memory file.
+    fn write_roots(&self) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = self
+            .grants
+            .iter()
+            .filter(|g| g.access.allows(lofi_types::Access::Write))
+            .map(|g| g.dir.clone())
+            .collect();
+        if let Some(memory) = &self.memory {
+            roots.push(memory.clone());
+        }
+        roots
+    }
+
+    /// Resolves a read-only tool path against the workspace root, the
+    /// registered read roots, and every granted directory. Returns the
+    /// resolved path and the root that contains it, which
+    /// `ls`/`find`/`grep` strip from results.
     pub(super) async fn resolve_read(&self, p: &str) -> Result<(PathBuf, PathBuf)> {
-        let mut roots = Vec::with_capacity(1 + self.read_roots.len());
+        let mut roots = Vec::with_capacity(1 + self.read_roots.len() + self.grants.len());
         roots.push(self.root.clone());
-        roots.extend(self.read_roots.iter().cloned());
-        self.resolve_with_approval(p, roots).await
+        roots.extend(self.read_roots_with_grants());
+        self.resolve_with_approval(p, roots, lofi_types::Access::Read)
+            .await
     }
 
     /// Resolves a mutation path. Relative paths land under the workspace
-    /// root; a registered read root stays read-only without a prompt, except
-    /// the memory file, which stays writable. An absolute path outside every
-    /// root offers a one-directory approval first.
+    /// root; a builtin read root stays read-only without a prompt, except
+    /// the memory file, which stays writable. A write anywhere else —
+    /// inside a read-only grant or outside every root — offers a
+    /// one-directory write grant first: the host widens a covering
+    /// read-only grant or grants fresh access, and remembers the answer.
     pub(super) async fn resolve_mutate(&self, p: &str) -> Result<PathBuf> {
-        if let Ok((resolved, root)) = resolve_for_read(&self.root, &self.read_roots, p) {
-            if root != self.root && self.memory.as_ref() != Some(&root) {
-                return Err(Error::Tool(format!("path is read-only: {p}")));
-            }
+        // Writable without a prompt: the workspace root, write grants, and
+        // the memory file.
+        if let Ok((resolved, _)) = resolve_for_read(&self.root, &self.write_roots(), p) {
             return Ok(resolved);
         }
-        self.resolve_with_approval(p, vec![self.root.clone()])
+        // A builtin read root (tmp, skills) is read-only without a prompt:
+        // no grant names it, so a widening prompt has nothing to widen.
+        let builtin: Vec<PathBuf> = self
+            .read_roots
+            .iter()
+            .filter(|r| Some(*r) != self.memory.as_ref())
+            .cloned()
+            .collect();
+        if resolve_for_read(&self.root, &builtin, p).is_ok() {
+            return Err(Error::Tool(format!("path is read-only: {p}")));
+        }
+        self.resolve_with_approval(p, self.write_roots(), lofi_types::Access::Write)
             .await
             .map(|(resolved, _)| resolved)
     }
 
-    /// [`resolve_for_read`] with a one-directory approval for an absolute
-    /// path outside every root in `roots`. The approval is offered only for
-    /// the outside-roots rejection — it cannot fix a "cannot resolve" or
+    /// [`resolve_for_read`] with a one-directory grant for an absolute path
+    /// the roots in `roots` reject. The grant is offered only for the
+    /// outside-roots rejection — it cannot fix a "cannot resolve" or
     /// "invalid path" failure — and never for a filesystem-root candidate.
-    /// On approval the granted root is appended and the lookup runs again,
-    /// so the granted root also names the root that contains the result. A
-    /// refused or unavailable approval keeps the path rejected; relative
-    /// paths never reach the hook.
+    /// On grant the granted directory is appended and the lookup runs
+    /// again, so the granted root also names the root that contains the
+    /// result. A grant that does not allow `requested` is treated as a
+    /// refusal; a refused or unavailable approval keeps the path rejected;
+    /// relative paths never reach the hook.
     async fn resolve_with_approval(
         &self,
         p: &str,
-        mut roots: Vec<PathBuf>,
+        extra_roots: Vec<PathBuf>,
+        requested: lofi_types::Access,
     ) -> Result<(PathBuf, PathBuf)> {
+        let mut roots = Vec::with_capacity(1 + extra_roots.len());
+        roots.push(self.root.clone());
+        roots.extend(extra_roots);
         match resolve_for_read(&roots[0], &roots[1..], p) {
             Err(err)
                 if Path::new(p).is_absolute()
@@ -377,13 +437,19 @@ impl BuiltinTools {
                 let Some(candidate) = approval_candidate(Path::new(p)) else {
                     return Err(err);
                 };
-                let Some(granted) = approve(candidate.clone()).await else {
+                let Some(granted) = approve(crate::DirApproval {
+                    dir: candidate.clone(),
+                    requested,
+                })
+                .await
+                .filter(|g| g.access.allows(requested) && candidate.starts_with(&g.dir)) else {
                     return Err(Error::Tool(format!(
-                        "{OUTSIDE_ROOT_ERROR}: {p} (user refused {})",
+                        "{OUTSIDE_ROOT_ERROR}: {p} (user refused {} access to {})",
+                        requested.as_str(),
                         candidate.display()
                     )));
                 };
-                roots.push(granted);
+                roots.push(granted.dir);
                 resolve_for_read(&roots[0], &roots[1..], p)
             }
             result => result,
@@ -1138,23 +1204,111 @@ mod tests {
         assert!(files.contains("src/main.rs"), "files: {files:?}");
     }
 
-    /// An approval hook that records every requested candidate and answers
-    /// with `answer`.
+    /// A grant hook that records every requested candidate and answers with
+    /// a write grant for `answer`.
     fn recording_hook(
         answer: Option<PathBuf>,
         asked: Arc<Mutex<Vec<PathBuf>>>,
     ) -> crate::ApproveDirFn {
-        Arc::new(move |dir: PathBuf| {
+        Arc::new(move |approval: crate::DirApproval| {
             let answer = answer.clone();
             let asked = asked.clone();
             Box::pin(async move {
-                asked.lock().unwrap().push(dir);
-                answer
+                asked.lock().unwrap().push(approval.dir);
+                answer.map(|dir| crate::GrantedDir {
+                    dir,
+                    access: lofi_types::Access::Write,
+                })
             })
                 as std::pin::Pin<
-                    Box<dyn std::future::Future<Output = Option<PathBuf>> + Send + Sync>,
+                    Box<dyn std::future::Future<Output = Option<crate::GrantedDir>> + Send + Sync>,
                 >
         })
+    }
+
+    #[tokio::test]
+    async fn read_grant_reads_without_prompt_and_widens_through_the_hook() {
+        let (_dir, tools) = tools();
+        let outside = tempdir().unwrap();
+        std::fs::write(outside.path().join("b.txt"), "hello").unwrap();
+        let outside_root = outside.path().canonicalize().unwrap();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let tools = tools
+            .with_grants(vec![crate::GrantedDir {
+                dir: outside_root.clone(),
+                access: lofi_types::Access::Read,
+            }])
+            .with_approve_dir(Some(recording_hook(None, asked.clone())));
+
+        // A read under the grant resolves without the hook.
+        let path = outside.path().join("b.txt").to_string_lossy().into_owned();
+        let v = tools.read(&path, None, None).await.unwrap();
+        assert_eq!(v["content"], json!("hello"));
+        assert!(asked.lock().unwrap().is_empty());
+
+        // A write under the read-only grant asks for write access and is
+        // refused.
+        let err = tools
+            .write(json!({ "path": path, "text": "x" }))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("user refused write access"),
+            "got: {err}"
+        );
+        assert_eq!(*asked.lock().unwrap(), vec![outside_root]);
+    }
+
+    #[tokio::test]
+    async fn write_grant_allows_mutations_without_the_hook() {
+        let (_dir, tools) = tools();
+        let outside = tempdir().unwrap();
+        let outside_root = outside.path().canonicalize().unwrap();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let tools = tools
+            .with_grants(vec![crate::GrantedDir {
+                dir: outside_root.clone(),
+                access: lofi_types::Access::Write,
+            }])
+            .with_approve_dir(Some(recording_hook(None, asked.clone())));
+
+        let path = outside
+            .path()
+            .join("new.txt")
+            .to_string_lossy()
+            .into_owned();
+        let v = tools
+            .write(json!({ "path": path, "text": "x" }))
+            .await
+            .unwrap();
+        assert_eq!(v["ok"], json!(true));
+        assert!(asked.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_only_grant_without_hook_rejects_writes() {
+        let (_dir, tools) = tools();
+        let outside = tempdir().unwrap();
+        let outside_root = outside.path().canonicalize().unwrap();
+        // No hook: the read-only grant alone must reject the write.
+        let tools = tools.with_grants(vec![crate::GrantedDir {
+            dir: outside_root.clone(),
+            access: lofi_types::Access::Read,
+        }]);
+
+        let path = outside
+            .path()
+            .join("new.txt")
+            .to_string_lossy()
+            .into_owned();
+        let err = tools
+            .write(json!({ "path": path, "text": "x" }))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("path outside allowed roots"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]

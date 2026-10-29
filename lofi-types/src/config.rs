@@ -6,6 +6,53 @@ use serde::{Deserialize, Serialize};
 use crate::model::default_true;
 use crate::{ProviderConfig, ServiceTier, ThinkingLevel};
 
+/// Access a granted path allows. Write implies Read, so the variants
+/// order from least to most permissive and combine by maximum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Access {
+    Read,
+    Write,
+}
+
+impl Access {
+    #[must_use]
+    pub fn allows(self, requested: Access) -> bool {
+        self >= requested
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+        }
+    }
+}
+
+/// One allowed directory tree with its access level.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantedDir {
+    pub dir: std::path::PathBuf,
+    pub access: Access,
+}
+
+/// One [[permissions]] entry: a directory tree the file tools may use
+/// outside the workspace root, with its access level. The path may not
+/// exist yet; it is resolved through its deepest existing ancestor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionEntry {
+    pub path: PathBuf,
+    /// Defaults to read when omitted: a grant must not widen to write
+    /// because the field was left out.
+    #[serde(default = "default_permission_access")]
+    pub access: Access,
+}
+
+fn default_permission_access() -> Access {
+    Access::Read
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct AgentConfig {
     #[serde(default)]
@@ -625,6 +672,10 @@ pub struct Config {
     pub image: ImageConfig,
     #[serde(skip)]
     pub shell_policy: ShellPolicyConfig,
+    /// Allowed paths outside the workspace root, from [[permissions]]
+    /// entries. Grants combine additively with the per-workspace state.
+    #[serde(default)]
+    pub permissions: Vec<PermissionEntry>,
     #[serde(default)]
     pub retry: RetryConfig,
     #[serde(default)]
@@ -648,6 +699,7 @@ impl Default for Config {
             truncate: TruncateConfig::default(),
             image: ImageConfig::default(),
             shell_policy: ShellPolicyConfig::default(),
+            permissions: Vec::new(),
             retry: RetryConfig::default(),
             credential: CredentialConfig::default(),
             default_provider: None,

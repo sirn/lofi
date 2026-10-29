@@ -76,10 +76,14 @@ pub type JobAcquireFn = Arc<dyn Fn(u64) -> Option<JobReleaseFn> + Send + Sync>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmReason {
     Policy,
-    /// A tool path outside the workspace root wants one directory approved
-    /// for read and write.
+    /// A tool path outside the workspace root wants one directory granted.
+    /// `requested` is the access the failing operation needs; `current` is
+    /// the access a read-only grant already covering the directory holds,
+    /// when the prompt is a widening request.
     OutsideRoot {
         dir: String,
+        requested: lofi_types::Access,
+        current: Option<lofi_types::Access>,
     },
     AutoEvaluating {
         started_at: std::time::Instant,
@@ -115,17 +119,27 @@ pub type ConfirmFn = Arc<
         + Sync,
 >;
 
-/// Asks the host to approve one directory tree for use outside the workspace
-/// root. The input is the directory the request would use. The result is the
-/// granted root that covers it — a remembered or newly approved directory —
-/// or `None` when the user refuses. A granted root covers its
-/// subdirectories, and a host that persists approvals answers without
-/// prompting on later runs.
+pub use lofi_types::GrantedDir;
+
+/// A directory-grant request: the candidate directory and the access the
+/// failing operation needs. The host answers with a grant that must cover
+/// the directory and allow the requested access, or `None` when the user
+/// refuses.
+pub struct DirApproval {
+    pub dir: PathBuf,
+    pub requested: lofi_types::Access,
+}
+
+/// Asks the host to grant one directory tree for use outside the workspace
+/// root. The result is the granted root that covers it — a remembered or
+/// newly granted directory — or `None` when the user refuses. A granted
+/// root covers its subdirectories, and a host that persists grants answers
+/// without prompting on later runs.
 pub type ApproveDirFn = Arc<
     dyn Fn(
-            PathBuf,
+            DirApproval,
         )
-            -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<PathBuf>> + Send + Sync>>
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<GrantedDir>> + Send + Sync>>
         + Send
         + Sync,
 >;
@@ -209,10 +223,15 @@ pub struct ExecCtx {
     pub bash_env: BashEnv,
     pub shell_policy: crate::policy::ResolvedPolicy,
     pub confirm: Option<ConfirmFn>,
-    /// Approves one directory for use outside the workspace root. `None`
+    /// Grants one directory for use outside the workspace root. `None`
     /// where no confirmation channel exists (tests, nested sandboxes); a path
     /// outside every allowed root stays rejected there.
     pub approve_dir: Option<ApproveDirFn>,
+    /// Config-sourced grants outside the workspace root, canonicalized
+    /// through missing trailing components. Session approvals flow through
+    /// `approve_dir` instead, so a refused or removed grant stops applying
+    /// at once.
+    pub grants: Vec<GrantedDir>,
     pub auto_mode: Option<AutoModeFn>,
     /// Session-scoped `/policy` approval override shared with the owning
     /// agent.

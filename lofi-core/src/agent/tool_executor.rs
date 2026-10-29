@@ -22,6 +22,9 @@ pub struct ToolExecutor {
     pub(super) auto_mode_hints: lofi_code::AutoModeHintHandle,
     pub(super) policy_override: lofi_code::policy::PolicyOverride,
     pub(super) skills_dir: Option<PathBuf>,
+    /// Config-sourced granted directories outside the workspace root, with
+    /// their access levels.
+    pub(super) grants: Vec<lofi_code::GrantedDir>,
     /// Workspace memory file `lofi.memory` reports, resolved
     /// once from the workspace root.
     pub(super) memory: Option<PathBuf>,
@@ -90,6 +93,7 @@ impl ToolExecutor {
             auto_mode_hints: super::auto_mode::hint_handle(),
             policy_override: lofi_code::policy::PolicyOverride::default(),
             skills_dir: None,
+            grants: super::granted_dirs(&config.permissions),
             memory: state::workspace_memory_path(root).ok(),
             jobs: lofi_code::tools::JobRegistry::new(),
             timers: lofi_code::tools::TimerRegistry::new(),
@@ -130,6 +134,18 @@ impl ToolExecutor {
     #[must_use]
     pub fn subagents(&self) -> super::SubagentRegistry {
         self.subagents.clone()
+    }
+
+    /// The allowed-paths view the /paths dialog reads and edits.
+    #[must_use]
+    pub fn paths(&self) -> crate::paths::PathsHandle {
+        crate::paths::PathsHandle::new(
+            self.root.clone(),
+            Some(self.tmp_dir.clone()),
+            self.skills_dir.clone(),
+            self.memory.clone(),
+            self.grants.clone(),
+        )
     }
 
     /// Config and registry a subagent hook resolves model overrides with.
@@ -478,7 +494,7 @@ impl ToolExecutor {
                         if tx.send(req).is_err() {
                             return false;
                         }
-                        resp_rx.await.unwrap_or(false)
+                        matches!(resp_rx.await, Ok(ConfirmResponse::Allow))
                     })
                         as std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + Sync>>
                 }) as lofi_code::ConfirmFn
@@ -487,13 +503,21 @@ impl ToolExecutor {
                 let tx = tx.clone();
                 let counter = self.confirm_counter.clone();
                 let root = self.root.clone();
-                Arc::new(move |dir: PathBuf| {
+                let config_grants = self.grants.clone();
+                Arc::new(move |approval: lofi_code::DirApproval| {
                     let tx = tx.clone();
                     let counter = counter.clone();
                     let root = root.clone();
-                    Box::pin(async move { approve_outside_dir(&root, dir, &tx, &counter).await })
+                    let config_grants = config_grants.clone();
+                    Box::pin(async move {
+                        approve_outside_dir(&root, approval, &config_grants, &tx, &counter).await
+                    })
                         as std::pin::Pin<
-                            Box<dyn std::future::Future<Output = Option<PathBuf>> + Send + Sync>,
+                            Box<
+                                dyn std::future::Future<Output = Option<lofi_code::GrantedDir>>
+                                    + Send
+                                    + Sync,
+                            >,
                         >
                 }) as lofi_code::ApproveDirFn
             });
@@ -508,6 +532,7 @@ impl ToolExecutor {
                 shell_policy: self.shell_policy.clone(),
                 confirm,
                 approve_dir,
+                grants: self.grants.clone(),
                 auto_mode: self.auto_mode.clone(),
                 policy_override: self.policy_override.clone(),
                 skills_dir: self.skills_dir.clone(),
@@ -674,30 +699,62 @@ pub(super) fn upgrade_exec_image(
     Ok(Some(lofi_types::ToolResultImage { bytes, media_type }))
 }
 
-/// Asks the user to approve one directory tree for use outside the workspace
-/// root, and remembers an approval in the per-workspace state file so later
-/// sessions do not ask again. Returns the granted root: the remembered
-/// ancestor that already covers `dir`, or `dir` itself once approved. A
-/// refused prompt, or a closed confirmation channel, keeps the path rejected.
+/// Asks the user to grant one directory tree for use outside the workspace
+/// root, and remembers the grant in the per-workspace state file so later
+/// sessions do not ask again. A remembered grant that already allows the
+/// request answers at once. Returns the granted directory and its access;
+/// a refused prompt, or a closed confirmation channel, keeps the path
+/// rejected.
 async fn approve_outside_dir(
     root: &std::path::Path,
-    dir: PathBuf,
+    approval: lofi_code::DirApproval,
+    config_grants: &[lofi_code::GrantedDir],
     tx: &tokio::sync::mpsc::UnboundedSender<ConfirmRequest>,
     counter: &Arc<AtomicU64>,
-) -> Option<PathBuf> {
+) -> Option<lofi_code::GrantedDir> {
     // A state file that cannot be opened only costs the prompt: the grant
     // is then not remembered for the next session.
     let state = state::WorkspaceState::open(root).ok();
-    if let Some(granted) = state.as_ref().and_then(|s| s.approved_root_for(&dir)) {
-        return Some(granted);
+    if let Some(grant) = state
+        .as_ref()
+        .and_then(|s| s.grant_allowing(&approval.dir, approval.requested))
+    {
+        return Some(lofi_code::GrantedDir {
+            dir: grant.dir,
+            access: grant.access,
+        });
     }
+    // A configured grant that already allows the request answers at once.
+    if let Some(grant) = config_grants
+        .iter()
+        .filter(|g| approval.dir.starts_with(&g.dir))
+        .max_by_key(|g| g.access)
+        .filter(|g| g.access.allows(approval.requested))
+    {
+        return Some(grant.clone());
+    }
+    // The strongest covering grant, remembered or configured, names what
+    // a widening prompt starts from.
+    let current = state
+        .as_ref()
+        .and_then(|s| s.strongest_covering(&approval.dir))
+        .map(|g| g.access)
+        .or_else(|| {
+            config_grants
+                .iter()
+                .filter(|g| approval.dir.starts_with(&g.dir))
+                .map(|g| g.access)
+                .max()
+        });
     let id = counter.fetch_add(1, Ordering::SeqCst);
     let (resp_tx, resp_rx) = oneshot::channel();
     let req = ConfirmRequest {
         id,
-        command: dir.display().to_string(),
+        command: approval.dir.display().to_string(),
         reason: Arc::new(Mutex::new(lofi_code::ConfirmReason::OutsideRoot {
-            dir: dir.display().to_string(),
+            dir: approval.dir.display().to_string(),
+            requested: approval.requested,
+            current,
         })),
         active: Arc::new(AtomicBool::new(true)),
         respond: resp_tx,
@@ -705,15 +762,22 @@ async fn approve_outside_dir(
     if tx.send(req).is_err() {
         return None;
     }
-    if !resp_rx.await.unwrap_or(false) {
+    let ConfirmResponse::Grant(access) = resp_rx.await.ok()? else {
+        return None;
+    };
+    // A grant that cannot satisfy the request is a refusal.
+    if !access.allows(approval.requested) {
         return None;
     }
     // The grant is reused only by this call's retry; a failed save means
     // the next request asks again.
     if let Some(state) = &state {
-        let _ = state.remember_approved_root(&dir);
+        let _ = state.remember_grant(&approval.dir, access);
     }
-    Some(dir)
+    Some(lofi_code::GrantedDir {
+        dir: approval.dir,
+        access,
+    })
 }
 
 #[cfg(test)]
@@ -728,9 +792,84 @@ mod tests {
         state_home
     }
 
+    fn dir_approval(dir: &str, requested: lofi_types::Access) -> lofi_code::DirApproval {
+        lofi_code::DirApproval {
+            dir: PathBuf::from(dir),
+            requested,
+        }
+    }
+
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn approval_is_remembered_across_sessions() {
+    async fn grants_are_remembered_across_sessions() {
+        let _lock = state::STATE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _state_home = state_env();
+        let ws = tempfile::tempdir().unwrap();
+        let counter = Arc::new(AtomicU64::new(0));
+        let write = lofi_types::Access::Write;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ConfirmRequest>();
+        let responder = tokio::spawn(async move {
+            let req = rx.recv().await.unwrap();
+            assert_eq!(req.command, "/data/dir");
+            let reason = req
+                .reason
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(
+                matches!(*reason, lofi_code::ConfirmReason::OutsideRoot { requested, current: None, .. } if requested == write)
+            );
+            req.respond.send(ConfirmResponse::Grant(write)).unwrap();
+        });
+        let granted = approve_outside_dir(
+            ws.path(),
+            dir_approval("/data/dir", write),
+            &[],
+            &tx,
+            &counter,
+        )
+        .await;
+        responder.await.unwrap();
+        assert_eq!(
+            granted,
+            Some(lofi_code::GrantedDir {
+                dir: PathBuf::from("/data/dir"),
+                access: write
+            })
+        );
+
+        // A later session reads the state file: the call returns at once and
+        // no prompt opens on the channel.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ConfirmRequest>();
+        let second = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            approve_outside_dir(
+                ws.path(),
+                dir_approval("/data/dir/sub", write),
+                &[],
+                &tx,
+                &counter,
+            ),
+        )
+        .await
+        .expect("remembered grant must not wait for a prompt");
+        assert_eq!(
+            second,
+            Some(lofi_code::GrantedDir {
+                dir: PathBuf::from("/data/dir"),
+                access: write
+            })
+        );
+        assert!(rx.try_recv().is_err());
+
+        std::env::remove_var("LOFI_STATE_HOME");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn read_request_under_readonly_grant_never_prompts() {
         let _lock = state::STATE_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -738,34 +877,65 @@ mod tests {
         let ws = tempfile::tempdir().unwrap();
         let counter = Arc::new(AtomicU64::new(0));
 
+        // A config read grant answers at once even though the workspace
+        // state remembers nothing.
+        let config = vec![lofi_code::GrantedDir {
+            dir: PathBuf::from("/data/dir"),
+            access: lofi_types::Access::Read,
+        }];
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ConfirmRequest>();
+        let hit = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            approve_outside_dir(
+                ws.path(),
+                dir_approval("/data/dir/sub", lofi_types::Access::Read),
+                &config,
+                &tx,
+                &counter,
+            ),
+        )
+        .await
+        .expect("config grant must not wait for a prompt");
+        assert_eq!(
+            hit,
+            Some(lofi_code::GrantedDir {
+                dir: PathBuf::from("/data/dir"),
+                access: lofi_types::Access::Read
+            })
+        );
+        assert!(rx.try_recv().is_err());
+
+        // A write under the same read-only grant offers the widening prompt.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ConfirmRequest>();
         let responder = tokio::spawn(async move {
             let req = rx.recv().await.unwrap();
-            assert_eq!(req.command, "/data/dir");
-            assert!(matches!(
-                *req.reason
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-                lofi_code::ConfirmReason::OutsideRoot { .. }
-            ));
-            req.respond.send(true).unwrap();
+            let reason = req
+                .reason
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(
+                matches!(&*reason, lofi_code::ConfirmReason::OutsideRoot { requested, current: Some(c), .. } if *requested == lofi_types::Access::Write && *c == lofi_types::Access::Read)
+            );
+            req.respond
+                .send(ConfirmResponse::Grant(lofi_types::Access::Write))
+                .unwrap();
         });
-        let granted =
-            approve_outside_dir(ws.path(), PathBuf::from("/data/dir"), &tx, &counter).await;
-        responder.await.unwrap();
-        assert_eq!(granted, Some(PathBuf::from("/data/dir")));
-
-        // A later session reads the state file: the call returns at once and
-        // no prompt opens on the channel.
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ConfirmRequest>();
-        let second = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            approve_outside_dir(ws.path(), PathBuf::from("/data/dir/sub"), &tx, &counter),
+        let widened = approve_outside_dir(
+            ws.path(),
+            dir_approval("/data/dir", lofi_types::Access::Write),
+            &config,
+            &tx,
+            &counter,
         )
-        .await
-        .expect("remembered approval must not wait for a prompt");
-        assert_eq!(second, Some(PathBuf::from("/data/dir")));
-        assert!(rx.try_recv().is_err());
+        .await;
+        responder.await.unwrap();
+        assert_eq!(
+            widened,
+            Some(lofi_code::GrantedDir {
+                dir: PathBuf::from("/data/dir"),
+                access: lofi_types::Access::Write
+            })
+        );
 
         std::env::remove_var("LOFI_STATE_HOME");
     }
@@ -785,17 +955,23 @@ mod tests {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ConfirmRequest>();
             let responder = tokio::spawn(async move {
                 let req = rx.recv().await.unwrap();
-                req.respond.send(false).unwrap();
+                req.respond.send(ConfirmResponse::Deny).unwrap();
             });
-            let granted =
-                approve_outside_dir(ws.path(), PathBuf::from("/data/dir"), &tx, &counter).await;
+            let granted = approve_outside_dir(
+                ws.path(),
+                dir_approval("/data/dir", lofi_types::Access::Write),
+                &[],
+                &tx,
+                &counter,
+            )
+            .await;
             responder.await.unwrap();
             assert_eq!(granted, None);
         }
         assert_eq!(
             state::WorkspaceState::open(ws.path())
                 .unwrap()
-                .approved_root_for(std::path::Path::new("/data/dir")),
+                .grant_allowing(std::path::Path::new("/data/dir"), lofi_types::Access::Read),
             None
         );
 

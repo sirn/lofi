@@ -9,6 +9,7 @@ pub mod context_edit;
 pub mod image;
 mod lifecycle;
 pub mod models;
+pub mod paths;
 pub mod recall;
 pub mod retry;
 pub mod session;
@@ -17,8 +18,8 @@ pub mod state;
 
 pub use agent::{
     exec_input_code_and_label, exec_result_display, rebuild_agent, select_model, Agent, AgentEvent,
-    ConfirmRequest, RunControls, SubagentNotice, SubagentNoticeKind, SubagentOp, SubagentRegistry,
-    SubagentRunning, SubagentSupport, TurnInput, TurnRequest,
+    ConfirmRequest, ConfirmResponse, RunControls, SubagentNotice, SubagentNoticeKind, SubagentOp,
+    SubagentRegistry, SubagentRunning, SubagentSupport, TurnInput, TurnRequest,
 };
 pub use compact::{compact, compacted_history, CompactOptions, Compaction, HANDOFF_PREAMBLE};
 pub use lifecycle::{AgentLifecycle, HardCompactOutcome, LineageJobReconciliation};

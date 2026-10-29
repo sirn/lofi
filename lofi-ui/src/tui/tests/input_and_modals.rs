@@ -359,7 +359,7 @@ fn topmost_permission_dialog_handles_input_before_tree_picker() {
 
     handle_event(&plain_key(KeyCode::Char('d')), &mut a, None, &mut run);
 
-    assert_eq!(response.try_recv(), Ok(false));
+    assert_eq!(response.try_recv(), Ok(lofi_core::ConfirmResponse::Deny));
     assert!(a.pending_confirms.is_empty());
     assert!(a.tree_picker.is_some());
 
@@ -388,12 +388,138 @@ fn permission_dialog_requires_an_explicit_choice() {
     assert_eq!(a.confirm_selected, 1);
     a.handle_confirm_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(a.pending_confirms.is_empty());
-    assert_eq!(response.try_recv(), Ok(false));
+    assert_eq!(response.try_recv(), Ok(lofi_core::ConfirmResponse::Deny));
+}
+
+#[test]
+fn paths_modal_lists_rows_and_edits_only_state_rows() {
+    let mut a = app();
+    a.paths = Some(lofi_core::paths::PathsHandle::new(
+        std::path::PathBuf::from("/ws"),
+        None,
+        None,
+        None,
+        vec![lofi_types::GrantedDir {
+            dir: std::path::PathBuf::from("/nix/store"),
+            access: lofi_types::Access::Read,
+        }],
+    ));
+    a.open_paths_picker();
+    let picker = a.paths_picker.as_ref().unwrap();
+    // The workspace row, the config grant row, no state rows.
+    assert_eq!(picker.rows.len(), 2);
+    assert_eq!(picker.rows[1].source, lofi_core::paths::PathSource::Config);
+    assert_eq!(picker.rows[1].access, lofi_types::Access::Read);
+
+    // Toggling a config row is a no-op: the config file owns it.
+    a.handle_paths_key(&KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    assert_eq!(
+        a.paths_picker.as_ref().unwrap().rows[1].access,
+        lofi_types::Access::Read
+    );
+
+    // Forgetting a config row is a no-op too, and escape closes.
+    a.handle_paths_key(&KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+    assert_eq!(a.paths_picker.as_ref().unwrap().rows.len(), 2);
+    a.handle_paths_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(a.paths_picker.is_none());
+}
+
+#[test]
+fn paths_modal_keeps_columns_visible_for_long_paths() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let mut a = app();
+    let home = dirs::home_dir().unwrap();
+    a.paths = Some(lofi_core::paths::PathsHandle::new(
+        std::path::PathBuf::from("/ws"),
+        None,
+        None,
+        None,
+        vec![lofi_types::GrantedDir {
+            dir: home
+                .join("an/extremely/long/configured/directory/tree/that/cannot/fit/the/dialog"),
+            access: lofi_types::Access::Read,
+        }],
+    ));
+    a.open_paths_picker();
+
+    let mut term = Terminal::new(TestBackend::new(60, 20)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let buf = term.backend().buffer();
+    let rows: Vec<String> = (buf.area.top()..buf.area.bottom())
+        .map(|y| {
+            (buf.area.left()..buf.area.right())
+                .map(|x| buf[(x, y)].symbol())
+                .collect()
+        })
+        .collect();
+    let row = rows
+        .iter()
+        .find(|r| r.contains("read"))
+        .expect("access column stays visible");
+    assert!(row.contains("config"), "source column stays visible: {row}");
+    // Home paths render with ~ in every row, short or long.
+    assert!(
+        !row.contains(home.to_str().unwrap()),
+        "home prefix stays abbreviated: {row}"
+    );
+    assert!(row.contains('~'), "tilde form renders: {row}");
+}
+
+#[test]
+fn grant_dialog_offers_read_only_by_default_for_reads() {
+    let mut a = app();
+    let (req, mut response) = grant_request("/nix/store", lofi_types::Access::Read, None);
+    a.pending_confirms.push(req);
+
+    // Enter takes the selected choice: read only, the least access the
+    // operation needs.
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(a.pending_confirms.is_empty());
+    assert_eq!(
+        response.try_recv(),
+        Ok(lofi_core::ConfirmResponse::Grant(lofi_types::Access::Read))
+    );
+
+    // The write hotkey grants read and write without moving the selection.
+    let (req, mut response) = grant_request("/nix/store", lofi_types::Access::Read, None);
+    a.pending_confirms.push(req);
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+    assert!(a.pending_confirms.is_empty());
+    assert_eq!(
+        response.try_recv(),
+        Ok(lofi_core::ConfirmResponse::Grant(lofi_types::Access::Write))
+    );
+}
+
+#[test]
+fn grant_dialog_offers_only_write_for_writes() {
+    let mut a = app();
+    let (req, mut response) = grant_request("/nix/store", lofi_types::Access::Write, None);
+    a.pending_confirms.push(req);
+
+    // The read hotkey cannot answer a write request, so it stays open.
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+    assert_eq!(a.pending_confirms.len(), 1);
+
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(a.pending_confirms.is_empty());
+    assert_eq!(
+        response.try_recv(),
+        Ok(lofi_core::ConfirmResponse::Grant(lofi_types::Access::Write))
+    );
 }
 
 #[test]
 fn permission_dialog_action_keys_resolve_directly() {
-    for (key, expected) in [('a', true), ('y', true), ('d', false), ('n', false)] {
+    for (key, expected) in [
+        ('a', lofi_core::ConfirmResponse::Allow),
+        ('y', lofi_core::ConfirmResponse::Allow),
+        ('d', lofi_core::ConfirmResponse::Deny),
+        ('n', lofi_core::ConfirmResponse::Deny),
+    ] {
         let mut a = app();
         let (req, mut response) = confirm_request("dangerous command");
         a.pending_confirms.push(req);

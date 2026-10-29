@@ -148,6 +148,98 @@ impl App {
         }
     }
 
+    /// `/paths`: open the allowed-paths manager. Shows the workspace root,
+    /// the builtin read roots, the config grants, and the remembered state
+    /// grants. Only state rows are editable.
+    pub(in crate::tui) fn open_paths_picker(&mut self) {
+        let Some(paths) = &self.paths else {
+            self.notify(NotifyKind::Error, "no agent: /paths is unavailable");
+            return;
+        };
+        self.paths_picker = Some(PathsPickerState {
+            rows: paths.snapshot().rows,
+            selected: 0,
+        });
+    }
+
+    /// Applies a `/paths` row edit through the paths handle and refreshes
+    /// the modal's rows from the new snapshot.
+    fn paths_apply(
+        &mut self,
+        edit: impl FnOnce(&lofi_core::paths::PathsHandle) -> lofi_error::Result<()>,
+    ) {
+        let Some(paths) = self.paths.clone() else {
+            return;
+        };
+        if let Err(error) = edit(&paths) {
+            self.notify(NotifyKind::Error, format!("paths change failed: {error}"));
+        }
+        let rows = paths.snapshot().rows;
+        if let Some(picker) = &mut self.paths_picker {
+            picker.rows = rows;
+            picker.selected = picker.selected.min(picker.rows.len().saturating_sub(1));
+        }
+    }
+
+    /// Key handling for the `/paths` modal. `space`/`enter` toggles a state
+    /// row's access, `d` forgets it; other rows only navigate.
+    pub(in crate::tui) fn handle_paths_key(&mut self, k: &KeyEvent) -> bool {
+        let Some(picker) = self.paths_picker.as_mut() else {
+            return false;
+        };
+        let len = picker.rows.len();
+        if len == 0 {
+            if matches!(k.code, KeyCode::Esc | KeyCode::Char('q')) {
+                self.paths_picker = None;
+            }
+            return true;
+        }
+        let selected = picker.selected;
+        let row = picker.rows[selected].clone();
+        match k.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.paths_picker = None;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                picker.selected = selected.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                picker.selected = (selected + 1).min(len - 1);
+            }
+            KeyCode::Char('n') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                picker.selected = (selected + 1).min(len - 1);
+            }
+            KeyCode::Char('p') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                picker.selected = selected.saturating_sub(1);
+            }
+            KeyCode::Tab => {
+                picker.selected = (selected + 1) % len;
+            }
+            KeyCode::BackTab => {
+                picker.selected = if selected == 0 { len - 1 } else { selected - 1 };
+            }
+            KeyCode::Char(' ' | 't') | KeyCode::Enter
+                if row.source == lofi_core::paths::PathSource::State =>
+            {
+                let next = if row.access == lofi_types::Access::Read {
+                    lofi_types::Access::Write
+                } else {
+                    lofi_types::Access::Read
+                };
+                let dir = row.path.clone();
+                self.paths_apply(move |paths| paths.set_grant(&dir, next));
+            }
+            KeyCode::Char('d' | 'D' | 'x' | 'X')
+                if row.source == lofi_core::paths::PathSource::State =>
+            {
+                let dir = row.path.clone();
+                self.paths_apply(move |paths| paths.forget_grant(&dir));
+            }
+            _ => {}
+        }
+        true
+    }
+
     /// `/policy`: open the bash approval mode dialog. The choice is
     /// session-scoped and never written to `policy.toml`.
     pub(in crate::tui) fn open_policy_picker(&mut self) {

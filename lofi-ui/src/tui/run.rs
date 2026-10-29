@@ -367,6 +367,7 @@ pub(crate) async fn run_loop(
         // The `/policy` dialog writes the choice here; every exec in the
         // session reads it. Cloned (not moved) so model switches keep it.
         app.policy_override = Some(executor.policy_override());
+        app.paths = Some(executor.paths());
         app.auto_mode_configured = executor.has_auto_mode();
         agent = Some(a);
     }
@@ -634,6 +635,7 @@ pub(crate) async fn run_loop(
                                     app.jobs = Some(executor.jobs());
                                     app.timers = Some(executor.timers());
                                     app.policy_override = Some(executor.policy_override());
+                                    app.paths = Some(executor.paths());
                                     app.auto_mode_configured = executor.has_auto_mode();
                                     let new_subagents = Some(new_agent.subagents());
                                     // A switch that swaps the registry

@@ -84,7 +84,7 @@ pub(crate) use types::*;
 
 use crate::tui::view::HStack;
 use lofi_core::backend::{BackendFactory, BackendRef};
-use lofi_core::{AgentEvent, AgentLifecycle, HardCompactOutcome};
+use lofi_core::{AgentEvent, AgentLifecycle, ConfirmResponse, HardCompactOutcome};
 use lofi_error::{Error, Result};
 
 /// One picker for every transport. The factory resolves a query to a provider
@@ -189,6 +189,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/tree", "roll back to a past turn"),
     ("/model", "switch the active model"),
     ("/policy", "change bash approval mode for this session"),
+    ("/paths", "view and manage allowed paths"),
     ("/service", "switch the service tier"),
     ("/theme", "switch color scheme for this session"),
     ("/thinking", "switch the thinking level"),
@@ -276,6 +277,12 @@ pub(crate) struct App {
     model_picker: Option<ModelPickerState>,
     thinking_picker: Option<ThinkingPickerState>,
     policy_picker: Option<PolicyPickerState>,
+    /// `/paths` allowed-paths manager, reading and editing through the
+    /// session's paths handle.
+    paths_picker: Option<PathsPickerState>,
+    /// Allowed-paths view shared with the agent, wired when the session
+    /// starts.
+    paths: Option<lofi_core::paths::PathsHandle>,
     /// Shared handle to the session's bash approval override; written on
     /// `/policy` confirm. None until the startup agent is wired in.
     policy_override: Option<lofi_core::PolicyOverride>,

@@ -210,6 +210,29 @@ impl ThemePickerState {
     ];
 }
 
+/// `/paths` modal. Lists every allowed path with its access and source.
+/// Only state rows are editable: `space` toggles read/write, `d` forgets
+/// the grant. Config rows say to edit `config.toml`; builtin rows are
+/// fixed by the session.
+pub(crate) struct PathsPickerState {
+    pub(crate) rows: Vec<lofi_core::paths::PathRow>,
+    pub(crate) selected: usize,
+}
+
+impl Modal for PathsPickerState {
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn selected(&self) -> usize {
+        self.selected
+    }
+
+    fn set_selected(&mut self, n: usize) {
+        self.selected = n;
+    }
+}
+
 /// `/subagent` modal. Lists the subagents spawned by the live session:
 /// store rows (durable, survive restarts) merged with the registry's live
 /// overlay (in-flight runs). `Enter` opens a read-only transcript view.

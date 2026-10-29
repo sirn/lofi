@@ -599,6 +599,100 @@ pub(super) fn render_thinking_picker(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+pub(super) fn render_paths_picker(f: &mut Frame, area: Rect, app: &App) {
+    use ratatui::widgets::ListState;
+    let Some(picker) = &app.paths_picker else {
+        return;
+    };
+    let t = app.theme;
+    let title = " Allowed paths ";
+    let help = " ↑/↓ navigate  space toggle  d forget  state rows only  esc close ";
+    let total = picker.rows.len();
+    // Full, unclipped rows decide the desired width; the frame clamps it
+    // to the terminal below.
+    let content_w = picker
+        .rows
+        .iter()
+        .map(|row| {
+            format!(
+                "{}  {}  {}",
+                crate::tui::text::tilde_path(&row.path),
+                row.access.as_str(),
+                row.source.label()
+            )
+        })
+        .map(|r| prim::width(&r))
+        .max()
+        .unwrap_or(0);
+    let chrome_w = prim::width(title).max(prim::width(help));
+    let w = u16::try_from(content_w.max(chrome_w) + 4)
+        .unwrap_or(40)
+        .min(area.width);
+    let visible_rows = total.min(20);
+    let desired_frame_h = u16::try_from(visible_rows + 4).unwrap_or(24);
+    let popup = centered_modal(area, w, desired_frame_h);
+    f.render_widget(Clear, popup);
+    let frame = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
+    let scroll_area = modal_scroll_area(frame.content);
+    let content = scroll_area.content;
+    // Right columns stay fixed-width so access and source stay readable when
+    // a path is longer than the dialog is wide; the path column absorbs the
+    // shortfall by abbreviating middle components, then truncating.
+    let acc_w = prim::width("write");
+    let src_w = prim::width("workspace");
+    let path_w = (content.width as usize)
+        .saturating_sub(acc_w + src_w + 4)
+        .max(1);
+    let labels: Vec<String> = picker
+        .rows
+        .iter()
+        .map(|row| {
+            let mut path = prim::truncate(
+                &crate::tui::text::abbreviate_path(&row.path, path_w),
+                path_w,
+            );
+            path.push_str(&" ".repeat(path_w.saturating_sub(prim::width(&path))));
+            format!(
+                "{}  {:>acc_w$}  {:>src_w$}",
+                path,
+                row.access.as_str(),
+                row.source.label()
+            )
+        })
+        .collect();
+    // Only state rows change from here; the others state where they come
+    // from, so they render muted.
+    let items: Vec<ListItem> = picker
+        .rows
+        .iter()
+        .zip(&labels)
+        .map(|(row, label)| {
+            let style = if row.source == lofi_core::paths::PathSource::State {
+                t.text_style()
+            } else {
+                t.muted_style()
+            };
+            ListItem::new(Span::styled(label.clone(), style))
+        })
+        .collect();
+    let list = List::new(items)
+        .style(t.text_style())
+        .highlight_style(t.selected_item_style());
+    let mut state = ListState::default().with_selected(Some(picker.selected));
+    f.render_stateful_widget(list, content, &mut state);
+    if total > content.height as usize {
+        prim::render_scrollbar(
+            f,
+            scroll_area.gutter,
+            picker.selected,
+            content.height as usize,
+            total,
+            t.subtle,
+            t.user,
+        );
+    }
+}
+
 pub(super) fn render_policy_picker(f: &mut Frame, area: Rect, app: &App) {
     let Some(picker) = &app.policy_picker else {
         return;
@@ -749,10 +843,24 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    let explanation = match reason {
+    let explanation = match &reason {
         lofi_core::ConfirmReason::Policy => "Shell wants to run this command".to_string(),
-        lofi_core::ConfirmReason::OutsideRoot { dir } => {
-            format!("lofi wants to use {dir} and its subdirectories, read and write")
+        lofi_core::ConfirmReason::OutsideRoot {
+            dir,
+            requested,
+            current,
+        } => {
+            let dir =
+                crate::tui::text::abbreviate_path(std::path::Path::new(dir.as_str()), content_w);
+            let access = match requested {
+                lofi_types::Access::Read => "read",
+                lofi_types::Access::Write => "read and write",
+            };
+            if *current == Some(lofi_types::Access::Read) {
+                format!("{dir} and its subdirectories are read-only; grant write access too?")
+            } else {
+                format!("lofi wants {access} access to {dir} and its subdirectories")
+            }
         }
         lofi_core::ConfirmReason::AutoEvaluating { started_at } => {
             format!("Auto evaluation for {}s...", started_at.elapsed().as_secs())
@@ -776,9 +884,17 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
         }
     };
     let explanation_lines = prim::wrap(&explanation, content_w);
+    // A directory-grant request shows a path, not a command: abbreviate it
+    // so it fits the panel instead of wrapping. Shell commands stay whole.
+    let command = match &reason {
+        lofi_core::ConfirmReason::OutsideRoot { dir, .. } => {
+            crate::tui::text::abbreviate_path(std::path::Path::new(dir.as_str()), content_w)
+        }
+        _ => req.command.clone(),
+    };
     // Commands are preformatted source: preserve leading blank lines and
     // indentation instead of treating them as flow text.
-    let cmd_lines = prim::wrap_pre(&req.command, content_w);
+    let cmd_lines = prim::wrap_pre(&command, content_w);
     // Keep the dialog compact even on a tall terminal. The command panel is
     // a viewport rather than a truncation point, so every wrapped row remains
     // reachable with the scrolling keys.
@@ -895,12 +1011,15 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
         };
         Span::styled(format!(" {label} "), style)
     };
-    let actions = Line::from(vec![
-        button("Allow", app.confirm_selected == 0),
-        Span::raw("  "),
-        button("Deny", app.confirm_selected == 1),
-    ])
-    .alignment(Alignment::Right);
+    let labels = app.confirm_choice_labels();
+    let mut spans: Vec<Span> = Vec::new();
+    for (i, label) in labels.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(button(label, app.confirm_selected == i));
+    }
+    let actions = Line::from(spans).alignment(Alignment::Right);
     f.render_widget(Paragraph::new(actions), rows[5]);
 }
 

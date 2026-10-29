@@ -111,7 +111,8 @@ pub(super) fn resolve_under(root: &Path, p: &str) -> Result<PathBuf> {
 /// so a registered root for a not-yet-created file still matches the path a
 /// later resolution computes. Returns `None` when the walk-up runs out of
 /// components or the ancestor cannot be canonicalized.
-pub(super) fn canonicalize_up(path: &Path) -> Option<PathBuf> {
+#[must_use]
+pub fn canonicalize_up(path: &Path) -> Option<PathBuf> {
     let mut existing = path.to_path_buf();
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
     while !existing.exists() {
