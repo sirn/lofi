@@ -377,8 +377,35 @@ fn abbreviate_path_progressive() {
     assert_eq!(abbreviate_path(&p, 100), "~/Dev/src/proj");
     assert_eq!(abbreviate_path(&p, 10), "~/D/s/proj");
     assert_eq!(abbreviate_path(&p, 4), "proj");
-    let p2 = home.join("Dev/~sirn/lofi");
-    assert_eq!(abbreviate_path(&p2, 12), "~/D/~s/lofi");
+    let p2 = home.join("Dev/~user/lofi");
+    assert_eq!(abbreviate_path(&p2, 12), "~/D/~u/lofi");
+}
+
+#[test]
+fn abbreviate_path_falls_back_to_ellipsis_between_marker_and_tail() {
+    let home = dirs::home_dir().unwrap();
+    let p = home.join(".local/state/l/tmp/lofi-00000000-0000-4000-8000-000000000000/0123456789abcdef0123456789abcdef");
+    let tail = "0123456789abcdef0123456789abcdef";
+    // The whole tail fits: marker, ellipsis, tail.
+    assert_eq!(abbreviate_path(&p, 36), format!("~/…/{tail}"));
+    // The tail clips to the remaining width, marked with an ellipsis.
+    assert_eq!(abbreviate_path(&p, 10), "~/…/01234…");
+}
+
+#[test]
+fn abbreviate_path_shortens_the_middle_first_one_component_at_a_time() {
+    let home = dirs::home_dir().unwrap();
+    let p = home.join("Dev/src/gitlab.com/acme/lofi");
+    // Full width first.
+    assert_eq!(abbreviate_path(&p, 100), "~/Dev/src/gitlab.com/acme/lofi");
+    // The center middle component goes first, then left before right, then
+    // the leading component, then only the tail remains.
+    assert_eq!(abbreviate_path(&p, 21), "~/Dev/src/g/acme/lofi");
+    assert_eq!(abbreviate_path(&p, 19), "~/Dev/s/g/acme/lofi");
+    assert_eq!(abbreviate_path(&p, 16), "~/Dev/s/g/a/lofi");
+    assert_eq!(abbreviate_path(&p, 14), "~/D/s/g/a/lofi");
+    // No whole form fits: marker, ellipsis, tail.
+    assert_eq!(abbreviate_path(&p, 13), "~/…/lofi");
 }
 
 #[test]

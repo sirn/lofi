@@ -65,35 +65,101 @@ pub(super) fn abbrev_component(c: &str) -> String {
     }
 }
 
-pub(super) fn abbreviate_path(path: &std::path::Path, max: usize) -> String {
-    let full: String = match dirs::home_dir() {
+/// The path with the home directory shown as ~, without any abbreviation.
+/// Every path shown in the UI goes through this so home paths read the
+/// same everywhere.
+pub(super) fn tilde_path(path: &std::path::Path) -> String {
+    match dirs::home_dir() {
         Some(h) if path.starts_with(&h) => match path.strip_prefix(&h) {
             Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
             Ok(rest) => format!("~/{}", rest.to_string_lossy()),
             Err(_) => path.to_string_lossy().to_string(),
         },
         _ => path.to_string_lossy().to_string(),
-    };
+    }
+}
+
+pub(super) fn abbreviate_path(path: &std::path::Path, max: usize) -> String {
+    let full: String = tilde_path(path);
     let w = |s: &str| unicode_width::UnicodeWidthStr::width(s);
     if w(&full) <= max {
         return full;
     }
     let comps: Vec<&str> = full.split('/').collect();
-    let abbr = if comps.len() > 2 {
-        let first = comps[0];
-        let last = comps[comps.len() - 1];
-        let mid: Vec<String> = comps[1..comps.len() - 1]
-            .iter()
-            .map(|c| abbrev_component(c))
-            .collect();
-        format!("{}/{}/{}", first, mid.join("/"), last)
-    } else {
-        full.clone()
-    };
-    if w(&abbr) <= max {
-        return abbr;
+    // Abbreviate the components between the first and the last one at a
+    // time, from the center outward with the left side first, so the
+    // smallest change that fits wins. The leading component follows only
+    // once the whole middle is abbreviated.
+    if comps.len() > 2 {
+        let mut parts: Vec<String> = comps.iter().map(|c| (*c).to_string()).collect();
+        for idx in middle_out_order(parts.len() - 2) {
+            parts[idx + 1] = abbrev_component(&parts[idx + 1]);
+            let candidate = parts.join("/");
+            if w(&candidate) <= max {
+                return candidate;
+            }
+        }
+        parts[0] = abbrev_component(&parts[0]);
+        let candidate = parts.join("/");
+        if w(&candidate) <= max {
+            return candidate;
+        }
     }
-    comps.last().copied().unwrap_or("").to_string()
+    // Nothing whole fits: keep the leading marker and the tail around an
+    // ellipsis, then clip the tail to what remains.
+    let lead = comps.first().copied().unwrap_or("");
+    let tail = comps.last().copied().unwrap_or("");
+    if comps.len() > 1 {
+        let head = format!("{lead}/…/");
+        let head_w = w(&head);
+        if max > head_w {
+            let budget = max - head_w;
+            if w(tail) <= budget {
+                return format!("{head}{tail}");
+            }
+            return format!("{head}{}", clip_marked(tail, budget));
+        }
+    }
+    clip_marked(tail, max)
+}
+
+/// Clips the string to the given number of display columns, marking a cut
+/// with a trailing ellipsis.
+fn clip_marked(s: &str, max: usize) -> String {
+    let w = |t: &str| unicode_width::UnicodeWidthStr::width(t);
+    if w(s) <= max {
+        return s.to_string();
+    }
+    let budget = max.saturating_sub(1);
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + cw > budget {
+            break;
+        }
+        out.push(ch);
+        used += cw;
+    }
+    out.push('…');
+    out
+}
+
+/// Abbreviation order for the middle components: the center component
+/// first, then outward with the left side before the right at equal
+/// distance.
+fn middle_out_order(n: usize) -> Vec<usize> {
+    let center = n / 2;
+    let mut order = vec![center];
+    for dist in 1..n {
+        if center >= dist {
+            order.push(center - dist);
+        }
+        if center + dist < n {
+            order.push(center + dist);
+        }
+    }
+    order
 }
 
 pub(super) fn line_start_byte(s: &str, row: usize) -> usize {
