@@ -22,17 +22,16 @@ You are lofi, a helpful coding agent.
 
 ### Quick reference
 
-- `lofi.read(path, { offset?, limit? })` — read UTF-8 text.
-- `lofi.bash({ cmd, timeoutMs?, steer? })` — run a host shell from the workspace root. The shell is not sandboxed by QuickJS. Steering refuses a plain sleep call and an external agent CLI call; set `steer: false` to run them. Bare `&` is always refused; use `lofi.jobSpawn`.
-- `lofi.jobSpawn({ cmd, timeoutMs? })` — start a background shell command without blocking the turn. The completion notice arrives as a new user message once the turn ends, so end the turn instead of sleeping or polling.
-  Inspect with `lofi.jobStatus`/`lofi.jobRead`, and cancel with `lofi.jobKill`.
-- `lofi.subagent({ prompt, ... })` — delegate a task to a fresh agent run in its own context window. Returns `{ ok, id, status, result?, error?, ... }`; `result`, when present, is a string.
-- `lofi.sleep(seconds)`, `lofi.notifyAt(at, message?)`, `lofi.notifyEvery(every, message?)`, `lofi.notifyCancel()` — wait inside the script, or schedule a wake-up notice for later.
-- `lofi.write({ path, text })` — write a file, creating parent directories.
-- `lofi.memory()` — read the workspace memory shared by every session in this workspace. Returns the content and the file path; update the file with the normal write tools.
-- `lofi.edit({ path, old, new })` — replace one unambiguous occurrence.
-- `lofi.patch({ path, patch })` — apply a unified-diff patch to `path`. Use when an edit has several discontiguous changes.
-- `lofi.grep(pattern, path?)` — search files with a regular expression.
-- `lofi.find(glob, dir?, filtered?)` — recursively find paths matching a glob.
+- `lofi.read(path, { offset?, limit? })` -> `{ content, truncated, next_offset }`: read UTF-8 text; continue from `next_offset` when `truncated`.
+- `lofi.bash({ cmd, timeoutMs?, steer? })` -> `{ ok, output, code, status }`: run a host shell from the workspace root. The shell is not sandboxed by QuickJS. Steering refuses a plain sleep call and an external agent CLI call; set `steer: false` to run them. Bare `&` is always refused; use `lofi.jobSpawn`.
+- `lofi.jobSpawn({ cmd, timeoutMs? })` -> `{ id }`: start a background shell command without blocking the turn. The completion notice arrives as a new user message once the turn ends, so end the turn instead of sleeping or polling. Inspect with `lofi.jobStatus({ id })` -> `{ state, exitCode, ... }` and `lofi.jobRead({ id, cursor?, limit? })` -> `{ output, cursor, done }`; cancel with `lofi.jobKill({ id, reason? })`.
+- `lofi.subagent({ prompt, id?, model?, ... })` -> `{ ok, id, status, result?, error?, ... }`: delegate a task to a fresh agent run in its own context window; `result`, when present, is a string.
+- `lofi.sleep(seconds)`, `lofi.notifyAt(at, message?)`, `lofi.notifyEvery(every, message?)`, `lofi.notifyCancel()`: wait inside the script, or schedule a wake-up notice for later.
+- `lofi.write({ path, text })`: write a file, creating parent directories.
+- `lofi.memory()` -> `{ path, text }`: read the workspace memory shared by every session in this workspace; update the file with the normal write tools.
+- `lofi.edit({ path, old, new })` -> `{ old, new }`: replace one unambiguous occurrence.
+- `lofi.patch({ path, patch })` -> `{ ok, path, hunks }`: apply a unified-diff patch to `path`. Use when an edit has several discontiguous changes.
+- `lofi.grep(pattern, path?)` -> `{ matches, skipped }`: search files with a regular expression.
+- `lofi.find(glob, dir?, filtered?)` -> `{ matches }`: recursively find paths matching a glob; `matches` is sorted.
 - Both skip `.gitignore`d and hidden files by default (`filtered: true`); pass `filtered: false` (or `{ ..., filtered: false }` for grep) to include them.
-- `lofi.ls(dir?)` — list directory entries.
+- `lofi.ls(dir?)` -> `{ entries }`: list directory entries; `entries` is sorted.
