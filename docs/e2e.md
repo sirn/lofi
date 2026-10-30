@@ -67,7 +67,7 @@ Session tests restart the binary against durable JSON Lines transcripts. They co
 
 ### Terminal and job coverage
 
-Pseudo-terminal tests exercise input, paste, resize, OSC 11, OSC 52, and OSC 7501 handling, modal priority, transcript navigation, expanded details, and shell output while it is still running. Job tests cover both plain pipes and controlling terminals, including input writes, key encoding, `Ctrl+C`, `Ctrl+D`, terminal dimensions, idle detection, notices, timeout, kill, and shutdown cleanup.
+Pseudo-terminal tests exercise input, paste, resize, OSC 2, OSC 7, OSC 11, OSC 52, and OSC 7501 handling, modal priority, transcript navigation, expanded details, and shell output while it is still running. Job tests cover both plain pipes and controlling terminals, including input writes, key encoding, `Ctrl+C`, `Ctrl+D`, terminal dimensions, idle detection, notices, timeout, kill, and shutdown cleanup.
 
 ## Current boundaries
 

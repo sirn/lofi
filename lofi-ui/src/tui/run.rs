@@ -200,6 +200,10 @@ pub(crate) async fn run(
     tty_events::ensure_terminal_input().map_err(Error::Io)?;
     enable_raw_mode().map_err(Error::Io)?;
     let setup = (|| -> std::io::Result<_> {
+        // Name the window and report the cwd before the first frame: a
+        // terminal or a mux keeps the title it already holds until something
+        // replaces it.
+        window::announce(&session.cwd);
         let mut stdout = io::stdout();
         execute!(
             stdout,

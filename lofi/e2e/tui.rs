@@ -1053,6 +1053,48 @@ fn selecting_rendered_text_copies_the_original_markdown_over_osc52() {
     );
 }
 
+/// The title the launch writes: the program name and the workspace's last part.
+fn launch_title(fixture: &Fixture) -> String {
+    let name = fixture
+        .workspace
+        .file_name()
+        .expect("the workspace has a name");
+    format!("\x1b]2;lofi {}\x1b\\", name.to_string_lossy())
+}
+
+/// This machine's name, which the cwd report carries in its authority.
+fn hostname() -> String {
+    let mut buf = [0u8; 256];
+    #[allow(unsafe_code)]
+    // SAFETY: the call writes at most `buf.len()` bytes into a buffer that
+    // outlives it, and it touches no other state.
+    let done = unsafe { nix::libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+    assert_eq!(done, 0, "gethostname failed");
+    let end = buf.iter().position(|&byte| byte == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
+#[test]
+fn the_launch_names_the_window_and_reports_idle() {
+    let server = MockServer::start(vec![text_response("launch answer")]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    // The title goes out before the first frame, so a window that already
+    // holds another program's title gets lofi's name instead.
+    tui.wait_for(&launch_title(&fixture), WAIT);
+    // The cwd report names the workspace, so a new tab or pane opens there.
+    let cwd = format!(
+        "\x1b]7;file://{}{}\x1b\\",
+        hostname(),
+        fixture.workspace.display()
+    );
+    tui.wait_for(&cwd, WAIT);
+    // The launch reports its own record too: a status another program left
+    // lying around must not outlive the start of this one.
+    tui.wait_for("\x1b]7501;state=idle:app=lofi\x1b\\", WAIT);
+}
+
 #[test]
 fn program_status_reports_each_turn_transition() {
     let server = MockServer::start(vec![
@@ -1116,6 +1158,9 @@ fn program_status_travels_inside_the_tmux_passthrough() {
     let server = MockServer::start(vec![text_response("tmux status answer")]);
     let fixture = Fixture::new(&server);
     let mut tui = fixture.spawn_with_env(&[], &[("TMUX", "/tmp/tmux-0/default,1,0")]);
+    // The title stays out of the wrapper: OSC 2 is a sequence tmux knows, so
+    // tmux parses it and decides whether the window takes the name.
+    tui.wait_for(&launch_title(&fixture), WAIT);
     tui.clear_output();
 
     tui.submit("run a turn");

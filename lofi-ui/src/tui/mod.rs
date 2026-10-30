@@ -70,6 +70,7 @@ use futures::FutureExt as _;
 pub(crate) mod program_status;
 pub(crate) mod terminal_bg;
 pub(crate) mod theme;
+pub(crate) mod window;
 #[allow(clippy::wildcard_imports)]
 pub(crate) use modals::*;
 #[allow(clippy::wildcard_imports)]
