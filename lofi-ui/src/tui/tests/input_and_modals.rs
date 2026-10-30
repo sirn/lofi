@@ -317,6 +317,38 @@ fn auto_evaluation_is_deferred_until_the_ui_grace_expires() {
 }
 
 #[test]
+fn a_scheduled_auto_deny_shows_a_countdown_on_the_deny_button() {
+    let mut a = app();
+    let (mut req, _response) = confirm_request("rm generated.txt");
+    req.reason = std::sync::Arc::new(std::sync::Mutex::new(lofi_core::ConfirmReason::AutoAsk {
+        reason: "command deletes a file".to_string(),
+    }));
+    req.deny_at = std::sync::Arc::new(std::sync::Mutex::new(Some(
+        std::time::Instant::now() + std::time::Duration::from_secs(42),
+    )));
+    a.queue_confirmation(req);
+    a.refresh_confirmations();
+
+    assert_eq!(
+        a.confirm_choice_labels(),
+        vec!["Allow".to_string(), "Deny (42s)".to_string()]
+    );
+}
+
+#[test]
+fn a_prompt_without_a_deadline_keeps_a_plain_deny_button() {
+    let mut a = app();
+    let (req, _response) = confirm_request("touch queued.txt");
+    a.queue_confirmation(req);
+    a.refresh_confirmations();
+
+    assert_eq!(
+        a.confirm_choice_labels(),
+        vec!["Allow".to_string(), "Deny".to_string()]
+    );
+}
+
+#[test]
 fn elapsed_auto_evaluation_is_shown_by_the_ui() {
     let mut a = app();
     let (mut req, _response) = confirm_request("rm generated.txt");

@@ -109,6 +109,11 @@ pub struct ConfirmPrompt {
     /// clears it when an approval or override wins the race, allowing the UI
     /// to dismiss a stale request whose response future was cancelled.
     pub active: Arc<std::sync::atomic::AtomicBool>,
+    /// When auto mode denies this prompt on its own, set once the ask is
+    /// decided: the UI counts down to it and the tool layer races the user
+    /// answer against it. Stays `None` while evaluating, when no timeout is
+    /// configured, or on prompts outside auto mode.
+    pub deny_at: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
 }
 
 pub type ConfirmFn = Arc<
@@ -152,8 +157,8 @@ pub enum AutoModeOutcome {
     Ask {
         reason: String,
     },
-    /// The evaluator judged clear harm. Still only a prompt: auto mode never
-    /// denies a command, so the user keeps the final word.
+    /// The evaluator judged clear harm. Still only a prompt: the evaluator
+    /// never denies a command, so the user keeps the final word.
     HighRisk {
         reason: String,
     },
@@ -233,6 +238,9 @@ pub struct ExecCtx {
     /// at once.
     pub grants: Vec<GrantedDir>,
     pub auto_mode: Option<AutoModeFn>,
+    /// How long an auto-mode ask prompt waits for the user before auto mode
+    /// denies it on its own. `None` disables the auto-deny.
+    pub approval_timeout: Option<Duration>,
     /// Session-scoped `/policy` approval override shared with the owning
     /// agent.
     pub policy_override: crate::policy::PolicyOverride,

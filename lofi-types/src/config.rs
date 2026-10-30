@@ -385,9 +385,29 @@ pub struct AutoModeConfig {
     /// model alike.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// How long an auto-mode ask prompt waits for the user before auto mode
+    /// denies it on its own, so an unattended session does not hang on the
+    /// prompt. `0` disables the auto-deny; unset picks
+    /// [`Self::DEFAULT_APPROVAL_TIMEOUT_MS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_timeout_ms: Option<u64>,
 }
 
 impl AutoModeConfig {
+    /// The default auto-deny wait for an unanswered ask prompt: 120s.
+    pub const DEFAULT_APPROVAL_TIMEOUT_MS: u64 = 120_000;
+
+    /// The auto-deny duration for an ask prompt. `None` disables the
+    /// auto-deny; every other value, including the unset default, is a
+    /// bounded wait.
+    #[must_use]
+    pub fn approval_timeout(&self) -> Option<std::time::Duration> {
+        let ms = self
+            .approval_timeout_ms
+            .unwrap_or(Self::DEFAULT_APPROVAL_TIMEOUT_MS);
+        (ms > 0).then(|| std::time::Duration::from_millis(ms))
+    }
+
     /// The model query to resolve.
     ///
     /// The chat model query to resolve, when a chat evaluator is set. A

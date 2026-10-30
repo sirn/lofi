@@ -31,6 +31,9 @@ pub struct ConfirmRequest {
     pub command: String,
     pub reason: Arc<Mutex<lofi_code::ConfirmReason>>,
     pub active: Arc<AtomicBool>,
+    /// When auto mode denies this prompt on its own. `None` on prompts the
+    /// auto-deny does not cover; the UI counts down to a set value.
+    pub deny_at: Arc<Mutex<Option<std::time::Instant>>>,
     pub respond: oneshot::Sender<ConfirmResponse>,
 }
 

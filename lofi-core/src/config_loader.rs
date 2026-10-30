@@ -794,9 +794,11 @@ base_url = "https://example.invalid"
         let _g = env_lock();
         let _a = capture_env("LOFI__AUTO_MODE__MODEL");
         let _e = capture_env("LOFI__AUTO_MODE__ENABLE");
+        let _t = capture_env("LOFI__AUTO_MODE__APPROVAL_TIMEOUT_MS");
         let _r = capture_env("LOFI__RETRY__MAX_RETRIES");
         std::env::set_var("LOFI__AUTO_MODE__MODEL", "'other/model'");
         std::env::set_var("LOFI__AUTO_MODE__ENABLE", "true");
+        std::env::set_var("LOFI__AUTO_MODE__APPROVAL_TIMEOUT_MS", "90000");
         std::env::set_var("LOFI__RETRY__MAX_RETRIES", "7");
         let dir = std::env::temp_dir().join("lofi-policy-env-override-test");
         let _ = std::fs::remove_dir_all(&dir);
@@ -812,6 +814,7 @@ base_url = "https://example.invalid"
         let auto = cfg.shell_policy.auto_mode.as_ref().unwrap();
         assert_eq!(auto.model.as_deref(), Some("other/model"));
         assert!(auto.enable);
+        assert_eq!(auto.approval_timeout_ms, Some(90_000));
         // A var aimed at config.toml is an ignored unknown key in the
         // policy document and still applies to the config document.
         assert_eq!(cfg.retry.max_retries, 7);

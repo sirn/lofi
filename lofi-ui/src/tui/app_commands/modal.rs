@@ -207,11 +207,28 @@ impl App {
         true
     }
 
-    /// The button labels for the front confirmation's choices.
-    pub(in crate::tui) fn confirm_choice_labels(&self) -> Vec<&'static str> {
+    /// The button labels for the front confirmation's choices. A Deny that
+    /// auto mode will answer on its own carries the seconds left, so the
+    /// user can see the prompt will not wait forever.
+    pub(in crate::tui) fn confirm_choice_labels(&self) -> Vec<String> {
+        let auto_deny_in = self
+            .pending_confirms
+            .first()
+            .and_then(|req| {
+                *req.deny_at
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            })
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+            .map(|remaining| remaining.as_secs() + u64::from(remaining.subsec_millis() > 0));
         self.confirm_choices()
             .into_iter()
-            .map(choice_label)
+            .map(|choice| match (choice, auto_deny_in) {
+                (ConfirmResponse::Deny, Some(secs)) => {
+                    format!("Deny ({}s)", secs.max(1))
+                }
+                _ => choice_label(choice).to_string(),
+            })
             .collect()
     }
 

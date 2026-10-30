@@ -488,6 +488,7 @@ async fn the_configured_timeout_reaches_the_evaluator() {
         decision_model: None,
         max_tokens: None,
         timeout_ms: Some(20),
+        approval_timeout_ms: None,
     };
     let hints = crate::agent::auto_mode::hint_handle();
     let evaluate = crate::agent::auto_mode::build_auto_mode(
@@ -820,6 +821,7 @@ fn auto_mode_config(model: &str) -> lofi_types::Config {
         decision_model: None,
         max_tokens: None,
         timeout_ms: None,
+        approval_timeout_ms: None,
     });
     config
 }

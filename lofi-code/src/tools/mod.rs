@@ -102,6 +102,9 @@ pub struct BuiltinTools {
     shell_policy: crate::policy::ResolvedPolicy,
     confirm: Option<crate::ConfirmFn>,
     auto_mode: Option<crate::AutoModeFn>,
+    /// How long an auto-mode ask prompt waits for the user before auto mode
+    /// denies it on its own. `None` disables the auto-deny.
+    approval_timeout: Option<std::time::Duration>,
     /// Session-scoped `/policy` override shared with the owning agent so a
     /// dialog pick applies to every later exec in the session.
     policy_override: crate::policy::PolicyOverride,
@@ -185,6 +188,7 @@ impl BuiltinTools {
             shell_policy,
             confirm,
             auto_mode,
+            approval_timeout: None,
             policy_override: crate::policy::PolicyOverride::default(),
             skills_dir,
             memory: None,
@@ -335,6 +339,14 @@ impl BuiltinTools {
     #[must_use]
     pub fn auto_mode(&self) -> Option<&crate::AutoModeFn> {
         self.auto_mode.as_ref()
+    }
+
+    /// Set how long an auto-mode ask prompt waits before auto mode denies
+    /// it on its own. `None` (the default) disables the auto-deny.
+    #[must_use]
+    pub fn with_approval_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.approval_timeout = timeout;
+        self
     }
 
     #[must_use]

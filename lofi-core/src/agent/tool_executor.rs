@@ -489,6 +489,7 @@ impl ToolExecutor {
                             command: prompt.command,
                             reason: prompt.reason,
                             active: prompt.active,
+                            deny_at: prompt.deny_at,
                             respond: resp_tx,
                         };
                         if tx.send(req).is_err() {
@@ -534,6 +535,11 @@ impl ToolExecutor {
                 approve_dir,
                 grants: self.grants.clone(),
                 auto_mode: self.auto_mode.clone(),
+                approval_timeout: self
+                    .auto_mode_config
+                    .as_ref()
+                    .and_then(|config| config.shell_policy.auto_mode.as_ref())
+                    .and_then(lofi_types::AutoModeConfig::approval_timeout),
                 policy_override: self.policy_override.clone(),
                 skills_dir: self.skills_dir.clone(),
                 memory: self.memory.clone(),
@@ -757,6 +763,7 @@ async fn approve_outside_dir(
             current,
         })),
         active: Arc::new(AtomicBool::new(true)),
+        deny_at: Arc::new(Mutex::new(None)),
         respond: resp_tx,
     };
     if tx.send(req).is_err() {

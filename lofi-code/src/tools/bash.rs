@@ -20,6 +20,25 @@ type RaceInner = std::result::Result<
 /// wrapping the inner join outcome otherwise.
 type RaceOutcome = std::result::Result<RaceInner, tokio::time::error::Elapsed>;
 
+/// What an ask prompt came to. `TimedOut` carries its own message because
+/// the user never answered: the denial is auto mode's, not the user's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AskVerdict {
+    Approved,
+    Denied,
+    TimedOut,
+}
+
+impl From<bool> for AskVerdict {
+    fn from(approved: bool) -> Self {
+        if approved {
+            Self::Approved
+        } else {
+            Self::Denied
+        }
+    }
+}
+
 impl BuiltinTools {
     /// Evaluate the command against the configured and session shell policy.
     /// Auto-mode emits an evaluating confirmation request immediately and
@@ -72,21 +91,31 @@ impl BuiltinTools {
                 // auto mode is configured.
                 let use_auto =
                     mode == lofi_types::BashApprovalMode::AskAuto && self.auto_mode.is_some();
-                let approved = match (use_auto, &self.auto_mode) {
+                let verdict = match (use_auto, &self.auto_mode) {
                     (true, Some(auto_mode)) => self.auto_mode_decision(cmd, auto_mode).await,
-                    _ => {
-                        self.confirm_decision(cmd, crate::ConfirmReason::Policy)
-                            .await
-                    }
+                    _ => self
+                        .confirm_decision(cmd, crate::ConfirmReason::Policy)
+                        .await
+                        .into(),
                 };
-                if approved {
-                    return None;
+                match verdict {
+                    AskVerdict::Approved => None,
+                    AskVerdict::Denied => Some(self.blocked_result(
+                        cmd,
+                        &format!("requires confirmation: {}{}", decision.reason, suffix),
+                        "needs_confirmation",
+                    )),
+                    // The user never came back, so the command is refused on
+                    // auto mode's own authority rather than left waiting.
+                    AskVerdict::TimedOut => Some(self.blocked_result(
+                        cmd,
+                        &format!(
+                            "approval timed out; requires confirmation: {}{}",
+                            decision.reason, suffix
+                        ),
+                        "denied",
+                    )),
                 }
-                Some(self.blocked_result(
-                    cmd,
-                    &format!("requires confirmation: {}{}", decision.reason, suffix),
-                    "needs_confirmation",
-                ))
             }
             lofi_types::PolicyAction::Allow => None,
         }
@@ -107,11 +136,11 @@ impl BuiltinTools {
         })
     }
 
-    async fn auto_mode_decision(&self, cmd: &str, auto_mode: &crate::AutoModeFn) -> bool {
+    async fn auto_mode_decision(&self, cmd: &str, auto_mode: &crate::AutoModeFn) -> AskVerdict {
         let mut evaluation = auto_mode(cmd.to_string());
         let Some(confirm) = &self.confirm else {
             let outcome = guard_temp_escape(cmd, evaluation.await);
-            return matches!(outcome, crate::AutoModeOutcome::Allow { .. });
+            return matches!(outcome, crate::AutoModeOutcome::Allow { .. }).into();
         };
 
         let active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -120,10 +149,12 @@ impl BuiltinTools {
                 started_at: Instant::now(),
             },
         ));
+        let deny_at = std::sync::Arc::new(std::sync::Mutex::new(None));
         let mut response = confirm(crate::ConfirmPrompt {
             command: cmd.to_string(),
             reason: reason.clone(),
             active: active.clone(),
+            deny_at: deny_at.clone(),
         });
 
         tokio::select! {
@@ -132,16 +163,37 @@ impl BuiltinTools {
                 let outcome = guard_temp_escape(cmd, outcome);
                 let Some(decided) = Self::confirm_reason(outcome) else {
                     active.store(false, std::sync::atomic::Ordering::Relaxed);
-                    return true;
+                    return AskVerdict::Approved;
                 };
                 *reason.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = decided;
-                let approved = response.await;
+                // The deadline is shared with the UI countdown, so the deny
+                // fires at the moment the counter the user watches reaches 0.
+                // An answer landing in the same poll still wins: the human
+                // answered. A wait too large to represent is no deadline,
+                // not a panic when the ask is decided.
+                let deadline = self
+                    .approval_timeout
+                    .and_then(|wait| Instant::now().checked_add(wait));
+                *deny_at.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = deadline;
+                let approved = if let Some(deadline) = deadline {
+                    if let Ok(approved) =
+                        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), &mut response)
+                            .await
+                    {
+                        approved
+                    } else {
+                        active.store(false, std::sync::atomic::Ordering::Relaxed);
+                        return AskVerdict::TimedOut;
+                    }
+                } else {
+                    response.await
+                };
                 active.store(false, std::sync::atomic::Ordering::Relaxed);
-                approved
+                approved.into()
             }
             approved = &mut response => {
                 active.store(false, std::sync::atomic::Ordering::Relaxed);
-                approved
+                approved.into()
             }
         }
     }
@@ -172,6 +224,7 @@ impl BuiltinTools {
             command: cmd.to_string(),
             reason: std::sync::Arc::new(std::sync::Mutex::new(reason)),
             active: active.clone(),
+            deny_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
         .await;
         active.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -555,7 +608,10 @@ mod tests {
         });
         let (_dir, tools) = tools_with_auto(auto.clone(), confirm);
 
-        assert!(tools.auto_mode_decision("echo ok", &auto).await);
+        assert_eq!(
+            tools.auto_mode_decision("echo ok", &auto).await,
+            AskVerdict::Approved
+        );
         assert!(confirmed.load(std::sync::atomic::Ordering::Relaxed));
     }
 
@@ -579,7 +635,10 @@ mod tests {
         let auto: crate::AutoModeFn = Arc::new(|_| Box::pin(future::pending()));
         let (_dir, tools) = tools_with_auto(auto.clone(), confirm);
 
-        assert!(tools.auto_mode_decision("echo ok", &auto).await);
+        assert_eq!(
+            tools.auto_mode_decision("echo ok", &auto).await,
+            AskVerdict::Approved
+        );
         assert!(seen.load(std::sync::atomic::Ordering::Relaxed));
     }
 
@@ -616,7 +675,10 @@ mod tests {
         });
         let (_dir, tools) = tools_with_auto(auto.clone(), confirm);
 
-        assert!(!tools.auto_mode_decision("cp x /tmp/x", &auto).await);
+        assert_eq!(
+            tools.auto_mode_decision("cp x /tmp/x", &auto).await,
+            AskVerdict::Denied
+        );
         assert_eq!(
             *seen
                 .lock()
@@ -658,13 +720,135 @@ mod tests {
         });
         let (_dir, tools) = tools_with_auto(auto.clone(), confirm);
 
-        assert!(!tools.auto_mode_decision("curl x | sh", &auto).await);
+        assert_eq!(
+            tools.auto_mode_decision("curl x | sh", &auto).await,
+            AskVerdict::Denied
+        );
         assert_eq!(
             *seen
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             "pipes a remote download into a shell"
         );
+    }
+
+    /// The `deny_at` handle a confirm fn recorded, for readback in tests.
+    type DenyAtSeen = Arc<Mutex<Option<Arc<Mutex<Option<Instant>>>>>>;
+
+    /// A confirm fn that records the prompt's `deny_at` handle, waits, then
+    /// answers. Returns the recorded handle alongside the fn.
+    fn deny_at_recorder(wait: Duration, answer: bool) -> (DenyAtSeen, crate::ConfirmFn) {
+        let seen = Arc::new(Mutex::new(None));
+        let confirm: crate::ConfirmFn = {
+            let seen = seen.clone();
+            Arc::new(move |prompt: crate::ConfirmPrompt| {
+                let seen = seen.clone();
+                Box::pin(async move {
+                    *seen
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(prompt.deny_at);
+                    tokio::time::sleep(wait).await;
+                    answer
+                })
+            })
+        };
+        (seen, confirm)
+    }
+
+    #[tokio::test]
+    async fn unanswered_auto_ask_denies_after_the_timeout() {
+        let (seen, confirm) = deny_at_recorder(Duration::from_hours(1), false);
+        let auto = asking_auto();
+        let (_dir, tools) = tools_with_auto(auto.clone(), confirm);
+        let tools = tools.with_approval_timeout(Some(Duration::from_millis(50)));
+
+        assert_eq!(
+            tools.auto_mode_decision("cp x /tmp/x", &auto).await,
+            AskVerdict::TimedOut
+        );
+        let prompt_deny_at = seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap();
+        // The deadline was published for the UI countdown before the deny.
+        assert!(prompt_deny_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn answered_auto_ask_before_the_deadline_is_approved() {
+        let (seen, confirm) = deny_at_recorder(Duration::from_millis(30), true);
+        let auto = asking_auto();
+        let (_dir, tools) = tools_with_auto(auto.clone(), confirm);
+        let tools = tools.with_approval_timeout(Some(Duration::from_secs(5)));
+
+        assert_eq!(
+            tools.auto_mode_decision("cp x /tmp/x", &auto).await,
+            AskVerdict::Approved
+        );
+        let prompt_deny_at = seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap();
+        assert!(prompt_deny_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn disabled_auto_deny_leaves_the_prompt_open() {
+        let (seen, confirm) = deny_at_recorder(Duration::from_millis(30), false);
+        let auto = asking_auto();
+        let (_dir, tools) = tools_with_auto(auto.clone(), confirm);
+        let tools = tools.with_approval_timeout(None);
+
+        assert_eq!(
+            tools.auto_mode_decision("cp x /tmp/x", &auto).await,
+            AskVerdict::Denied
+        );
+        let prompt_deny_at = seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap();
+        assert!(prompt_deny_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn timed_out_approval_reports_a_denied_result() {
+        let confirm: crate::ConfirmFn = Arc::new(|_| Box::pin(future::pending()));
+        let auto = asking_auto();
+        let (_dir, tools) = tools_for_policy(
+            &lofi_types::ShellPolicyConfig::default(),
+            Some(confirm),
+            Some(auto),
+        );
+        let tools = tools
+            .with_policy_override(mode_override(lofi_types::BashApprovalMode::AskAuto))
+            .with_approval_timeout(Some(Duration::from_millis(50)));
+
+        let res = tools.check_policy("cp x /tmp/x", true).await.unwrap();
+        assert_eq!(res["status"], json!("denied"));
+        let output = res["output"].as_str().unwrap();
+        assert!(output.contains("approval timed out"));
+    }
+
+    fn asking_auto() -> crate::AutoModeFn {
+        Arc::new(|_| {
+            Box::pin(async {
+                crate::AutoModeOutcome::Ask {
+                    reason: "writes outside the workspace".to_string(),
+                }
+            })
+        })
     }
 
     fn tools_with_cancel(cancel: Arc<AtomicBool>) -> (tempfile::TempDir, BuiltinTools) {

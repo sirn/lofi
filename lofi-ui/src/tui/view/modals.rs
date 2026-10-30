@@ -1003,7 +1003,7 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
         );
     }
 
-    let button = |label: &'static str, selected: bool| {
+    let button = |label: &str, selected: bool| {
         let style = if selected {
             t.selected_item_style()
         } else {

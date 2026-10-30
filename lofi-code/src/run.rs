@@ -180,6 +180,7 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
             ctx.skills_dir.clone(),
         )
         .with_policy_override(ctx.policy_override.clone())
+        .with_approval_timeout(ctx.approval_timeout)
         .with_approve_dir(ctx.approve_dir.clone())
         .with_grants(ctx.grants.clone())
         .with_cancel(opts.cancel.clone())

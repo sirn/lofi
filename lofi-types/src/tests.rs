@@ -638,6 +638,30 @@ fn auto_mode_timeout_is_unset_by_default_and_keeps_an_explicit_value() {
 }
 
 #[test]
+fn auto_mode_approval_timeout_defaults_and_disables() {
+    // Unset picks the 120s default; 0 disables the auto-deny.
+    let cfg: AutoModeConfig =
+        serde_json::from_str(r#"{"enable":true,"model":"mock/alt"}"#).unwrap();
+    assert_eq!(
+        cfg.approval_timeout(),
+        Some(std::time::Duration::from_millis(
+            AutoModeConfig::DEFAULT_APPROVAL_TIMEOUT_MS
+        ))
+    );
+    let off: AutoModeConfig =
+        serde_json::from_str(r#"{"enable":true,"model":"mock/alt","approval_timeout_ms":0}"#)
+            .unwrap();
+    assert_eq!(off.approval_timeout(), None);
+    let set: AutoModeConfig =
+        serde_json::from_str(r#"{"enable":true,"model":"mock/alt","approval_timeout_ms":1500}"#)
+            .unwrap();
+    assert_eq!(
+        set.approval_timeout(),
+        Some(std::time::Duration::from_millis(1500))
+    );
+}
+
+#[test]
 fn bash_config_serde_round_trip() {
     let json = r#"{"strip_env":false,"pass_env":["GITHUB_TOKEN","NPM_TOKEN"],"env_file":"~/.config/lofi/secrets.env"}"#;
     let cfg: BashConfig = serde_json::from_str(json).unwrap();
