@@ -626,6 +626,23 @@ fn auto_mode_query_accepts_both_config_shapes() {
 }
 
 #[test]
+fn auto_mode_decision_thresholds_are_unset_by_default_and_parsed_when_named() {
+    let cfg: AutoModeConfig =
+        serde_json::from_str(r#"{"enable":true,"decision_model":"mock/jev"}"#).unwrap();
+    assert_eq!(cfg.decision, None);
+    let set: AutoModeConfig = serde_json::from_str(
+        r#"{"enable":true,"decision_model":"mock/jev","decision":{"known":0.45,"destructive":0.60}}"#,
+    )
+    .unwrap();
+    let decision = set.decision.unwrap();
+    assert!((decision.known.unwrap() - 0.45).abs() < 1e-9);
+    assert!((decision.destructive.unwrap() - 0.60).abs() < 1e-9);
+    assert_eq!(decision.exposure, None);
+    assert_eq!(decision.authorized, None);
+    assert_eq!(decision.wide_scope_mass, None);
+}
+
+#[test]
 fn auto_mode_timeout_is_unset_by_default_and_keeps_an_explicit_value() {
     // Unset means the default of the gate the model resolves to, so the
     // config stores None rather than a fixed number.

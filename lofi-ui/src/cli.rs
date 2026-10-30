@@ -39,6 +39,71 @@ struct Cli {
     docs_search: Option<String>,
     #[arg(long, value_name = "COMMAND")]
     policy_explain: Option<String>,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Work with the shell policy.
+    Policy {
+        #[command(subcommand)]
+        cmd: PolicyCommand,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum PolicyCommand {
+    /// Calibrate the decision gate against commands or records.
+    ///
+    /// Replays the gate's evaluation log, judges a corpus, or judges
+    /// saved records under the configured thresholds, and reports every
+    /// outcome and miss.
+    Calibrate {
+        /// JSONL evaluation archives to rejudge, no network call; the
+        /// default with no other input is every session's live log
+        #[arg(long, value_name = "FILE")]
+        replay: Vec<std::path::PathBuf>,
+        /// A labeled corpus to send through the live decision model
+        #[arg(long, value_name = "FILE")]
+        probe: Option<std::path::PathBuf>,
+        /// Saved JSONL records to judge offline
+        #[arg(long, value_name = "FILE")]
+        records: Vec<std::path::PathBuf>,
+        /// Grid-search thresholds over the records
+        #[arg(long)]
+        sweep: bool,
+        /// The decision model query; defaults to `auto_mode.decision_model`
+        #[arg(long, value_name = "QUERY")]
+        model: Option<String>,
+        /// The request text the corpus commands answer
+        #[arg(long, value_name = "TEXT")]
+        request: Option<String>,
+        /// The intent text `build_state` reads from the call
+        #[arg(long, value_name = "TEXT")]
+        intent: Option<String>,
+        /// Write the judged records as JSONL
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
+        /// Send each corpus line this many times
+        #[arg(long, value_name = "N", default_value_t = 1)]
+        repeat: usize,
+        /// Override the wide-scope-mass threshold
+        #[arg(long, value_name = "F")]
+        wide_scope_mass: Option<f64>,
+        /// Override the destructive threshold
+        #[arg(long, value_name = "F")]
+        destructive: Option<f64>,
+        /// Override the exposure threshold
+        #[arg(long, value_name = "F")]
+        exposure: Option<f64>,
+        /// Override the authorized threshold
+        #[arg(long, value_name = "F")]
+        authorized: Option<f64>,
+        /// Override the known threshold
+        #[arg(long, value_name = "F")]
+        known: Option<f64>,
+    },
 }
 
 /// # Errors
@@ -63,6 +128,10 @@ pub async fn run_cli() -> anyhow::Result<()> {
         .map_err(anyhow::Error::new)?;
     let _env_guard = lofi_core::config_loader::apply_env_specs(&env_pairs);
 
+    if let Some(command) = cli.command {
+        run_command(command).await?;
+        return Ok(());
+    }
     if cli.list_models {
         list_models().await?;
     } else if cli.list_sessions {
@@ -79,6 +148,55 @@ pub async fn run_cli() -> anyhow::Result<()> {
     } else {
         let opts = build_interactive_opts(&cli, root);
         Box::pin(crate::run_interactive(opts)).await?;
+    }
+    Ok(())
+}
+
+async fn run_command(command: Command) -> anyhow::Result<()> {
+    match command {
+        Command::Policy { cmd } => match cmd {
+            PolicyCommand::Calibrate {
+                replay,
+                probe,
+                records,
+                sweep,
+                model,
+                request,
+                intent,
+                out,
+                repeat,
+                wide_scope_mass,
+                destructive,
+                exposure,
+                authorized,
+                known,
+            } => {
+                let args = lofi_core::calibrate::CalibrateArgs {
+                    replay,
+                    probe,
+                    records,
+                    sweep,
+                    model,
+                    request,
+                    intent,
+                    out,
+                    repeat,
+                    thresholds: lofi_types::DecisionThresholdsConfig {
+                        wide_scope_mass,
+                        destructive,
+                        exposure,
+                        authorized,
+                        known,
+                    },
+                };
+                let config_path = lofi_core::config_loader::user_config_path()
+                    .context("resolve user config path")?;
+                lofi_core::calibrate::calibrate(args, &config_path)
+                    .await
+                    .map_err(anyhow::Error::new)
+                    .context("calibrate the decision gate")?;
+            }
+        },
     }
     Ok(())
 }

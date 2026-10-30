@@ -356,7 +356,7 @@ pub enum BashApprovalMode {
 /// This is distinct from YOLO mode: YOLO blindly allows anything not
 /// denied, while auto-mode makes a per-command safety judgment via an
 /// LLM call.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AutoModeConfig {
     #[serde(default)]
     pub enable: bool,
@@ -391,6 +391,35 @@ pub struct AutoModeConfig {
     /// [`Self::DEFAULT_APPROVAL_TIMEOUT_MS`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_timeout_ms: Option<u64>,
+    /// Thresholds for the decision-model gate, under
+    /// `auto_mode.decision`. Unset fields keep the calibrated defaults
+    /// in the decision module's `Thresholds::default`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<DecisionThresholdsConfig>,
+}
+
+/// One decision-gate threshold override, under `auto_mode.decision`.
+/// Every field is optional so a config names only what it moves; a set
+/// value replaces the calibrated default, not a floor or a ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct DecisionThresholdsConfig {
+    /// Probability mass on system or remote that counts as a wide blast
+    /// radius.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wide_scope_mass: Option<f64>,
+    /// Probability of destruction that counts as destructive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destructive: Option<f64>,
+    /// Probability of a security-sensitive effect that counts as exposure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exposure: Option<f64>,
+    /// Probability of authorization that lifts a remote-write risk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorized: Option<f64>,
+    /// Probability that the model knows the command well enough to judge
+    /// it. Below this the command asks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known: Option<f64>,
 }
 
 impl AutoModeConfig {
@@ -429,7 +458,7 @@ impl AutoModeConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ShellPolicyConfig {
     #[serde(default)]
     pub mode: ShellPolicyMode,

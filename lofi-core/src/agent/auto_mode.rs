@@ -194,12 +194,18 @@ fn attach_decision(
         .map_err(|error| Error::Config(format!("auto_mode.model: {error}")))?;
     let client = Arc::from(client);
     let hints = executor.auto_mode_hints.clone();
+    let thresholds = match auto_cfg.decision.as_ref() {
+        Some(over) => decision::Thresholds::from_config(over),
+        None => decision::Thresholds::default(),
+    };
     let gate = build_decision_auto_mode(
         client,
         &model.id,
+        thresholds,
         std::time::Duration::from_millis(auto_cfg.timeout_ms.unwrap_or(DECISION_TIMEOUT_MS)),
         &executor.root,
         executor.skills_dir.as_deref(),
+        &executor.subagents(),
         &hints,
     );
     // A chat stage answers what the decision model does not allow, so an
@@ -234,21 +240,32 @@ struct DecisionGate {
     client: Arc<dyn lofi_providers::Decision>,
     model: String,
     questions: std::collections::BTreeMap<String, lofi_types::DecisionQuestion>,
+    /// The configured thresholds. A file-level override moves only what
+    /// it names, so the rest stays at the calibrated defaults.
+    thresholds: decision::Thresholds,
     timeout: std::time::Duration,
     cwd: std::path::PathBuf,
     skill_dirs: Vec<std::path::PathBuf>,
+    /// The registry the turn loop stamps with the live transcript id, read
+    /// per append: the id arrives at the first turn, after the gate is
+    /// built, and `/new` and `/resume` switch it between turns.
+    session: super::SubagentRegistry,
 }
 
 /// Build the gate from an opened decision client. Mirrors
 /// `build_auto_mode`: the questions are static, the state is built per
-/// command, and the call runs under the decision deadline.
+/// command, and the call runs under the decision deadline. Each argument is
+/// a distinct piece of the one evaluation, so they stay positional.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn build_decision_auto_mode(
     client: Arc<dyn lofi_providers::Decision>,
     model: &str,
+    thresholds: decision::Thresholds,
     timeout: std::time::Duration,
     cwd: &std::path::Path,
     skills_dir: Option<&std::path::Path>,
+    session: &super::SubagentRegistry,
     hints: &AutoModeHintHandle,
 ) -> AutoModeFn {
     // Skill roots that actually exist are named in the state so a decision
@@ -265,9 +282,11 @@ pub fn build_decision_auto_mode(
         client,
         model: model.to_string(),
         questions: decision::questions(),
+        thresholds,
         timeout,
         cwd: cwd.to_path_buf(),
         skill_dirs,
+        session: session.clone(),
     });
 
     let hints = hints.clone();
@@ -370,7 +389,27 @@ async fn evaluate_decision(
     // transport failure falls back to the manual prompt.
     match tokio::time::timeout(gate.timeout, gate.client.decide(&request)).await {
         Ok(Ok(response)) => {
-            let outcome = decision::decide(&response.answers);
+            let outcome = decision::decide_with(&response.answers, &gate.thresholds);
+            // One record per judged command feeds calibration. The append
+            // is best-effort, so logging can never fail the gate, and an
+            // incomplete answer set is skipped rather than logged half.
+            // The record files under the session that ran the command, so a
+            // replay can read one conversation instead of all traffic.
+            if let Some(scores) = crate::eval_log::scores_from_answers(&response.answers) {
+                let session = crate::eval_log::session_key(
+                    gate.session.parent_session().as_deref(),
+                    &gate.cwd,
+                );
+                crate::eval_log::append(
+                    &session,
+                    &crate::eval_log::Record {
+                        label: crate::eval_log::outcome_label(&outcome).to_string(),
+                        command: command.to_string(),
+                        request: turn.prompt.clone(),
+                        scores,
+                    },
+                );
+            }
             // The outcome carries the threshold summary; the answers matter
             // most when the outcome fails on them.
             if matches!(outcome, AutoModeOutcome::Failed { .. }) {

@@ -1,11 +1,13 @@
 pub mod agent;
 pub mod backend;
 mod bash_env;
+pub mod calibrate;
 
 pub use lofi_code::docs;
 pub mod compact;
 pub mod config_loader;
 pub mod context_edit;
+mod eval_log;
 pub mod image;
 mod lifecycle;
 pub mod models;

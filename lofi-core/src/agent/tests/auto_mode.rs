@@ -496,6 +496,7 @@ async fn the_configured_timeout_reaches_the_evaluator() {
         max_tokens: None,
         timeout_ms: Some(20),
         approval_timeout_ms: None,
+        decision: None,
     };
     let hints = crate::agent::auto_mode::hint_handle();
     let evaluate = crate::agent::auto_mode::build_auto_mode(
@@ -564,6 +565,25 @@ fn noul_answer(p: f64) -> lofi_types::DecisionAnswer {
     lofi_types::DecisionAnswer::Noul { noul: p }
 }
 
+/// Gate tests append to the evaluation log. Redirect the state dir so
+/// fake commands never reach the real log, holding the shared env lock
+/// for the whole test.
+struct GateStateDir(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+impl Drop for GateStateDir {
+    fn drop(&mut self) {
+        std::env::remove_var("LOFI_STATE_HOME");
+    }
+}
+
+fn gate_state_dir(name: &str) -> GateStateDir {
+    let guard = crate::state::STATE_ENV_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("lofi-gate-state-{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::env::set_var("LOFI_STATE_HOME", &dir);
+    GateStateDir(guard)
+}
+
 fn decision_gate(
     fake: FakeDecision,
     timeout: std::time::Duration,
@@ -572,9 +592,11 @@ fn decision_gate(
     let gate = crate::agent::auto_mode::build_decision_auto_mode(
         fake.clone(),
         "jev-latest",
+        lofi_code::policy::decision::Thresholds::default(),
         timeout,
         std::path::Path::new("/repo"),
         None,
+        &super::super::SubagentRegistry::default(),
         &crate::agent::auto_mode::hint_handle(),
     );
     (gate, fake)
@@ -582,6 +604,7 @@ fn decision_gate(
 
 #[tokio::test]
 async fn the_decision_gate_allows_a_safe_command() {
+    let _state = gate_state_dir("allows");
     let mut answers = std::collections::BTreeMap::new();
     answers.insert(
         "scope".to_string(),
@@ -606,7 +629,75 @@ async fn the_decision_gate_allows_a_safe_command() {
 }
 
 #[tokio::test]
+async fn the_decision_gate_appends_its_evaluation_to_the_log() {
+    let _state = gate_state_dir("log");
+    let mut answers = std::collections::BTreeMap::new();
+    answers.insert(
+        "scope".to_string(),
+        choice_answer("workspace", &[("workspace", 1.0)], Some(0.9)),
+    );
+    answers.insert("destructive".to_string(), noul_answer(0.95));
+    answers.insert("exposure".to_string(), noul_answer(0.05));
+    answers.insert("authorized".to_string(), noul_answer(0.1));
+    answers.insert("recognized".to_string(), noul_answer(0.95));
+    let (gate, _) = decision_gate(
+        FakeDecision {
+            answers,
+            delay: std::time::Duration::ZERO,
+            calls: std::sync::Mutex::new(Vec::new()),
+        },
+        std::time::Duration::from_secs(5),
+    );
+    let outcome = gate(query("rm -rf build")).await;
+    // No session stamped: the gate files under the workspace key.
+    let session = crate::eval_log::session_key(None, std::path::Path::new("/repo"));
+    let log = crate::eval_log::log_path(&session).unwrap();
+    let text = std::fs::read_to_string(&log).unwrap();
+    let record: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
+    assert_eq!(record["command"], "rm -rf build");
+    assert_eq!(record["label"], "Ask");
+    assert!(matches!(outcome, AutoModeOutcome::Ask { .. }));
+}
+
+#[tokio::test]
+async fn the_decision_gate_files_its_record_under_the_live_session() {
+    let _state = gate_state_dir("session");
+    let registry = super::super::SubagentRegistry::default();
+    registry.set_parent_session("20260101_abcd");
+    let mut answers = std::collections::BTreeMap::new();
+    answers.insert(
+        "scope".to_string(),
+        choice_answer("workspace", &[("workspace", 1.0)], Some(0.9)),
+    );
+    answers.insert("destructive".to_string(), noul_answer(0.05));
+    answers.insert("exposure".to_string(), noul_answer(0.05));
+    answers.insert("authorized".to_string(), noul_answer(0.1));
+    answers.insert("recognized".to_string(), noul_answer(0.95));
+    let gate = crate::agent::auto_mode::build_decision_auto_mode(
+        std::sync::Arc::new(FakeDecision {
+            answers,
+            delay: std::time::Duration::ZERO,
+            calls: std::sync::Mutex::new(Vec::new()),
+        }),
+        "jev-latest",
+        lofi_code::policy::decision::Thresholds::default(),
+        std::time::Duration::from_secs(5),
+        std::path::Path::new("/repo"),
+        None,
+        &registry,
+        &crate::agent::auto_mode::hint_handle(),
+    );
+    let outcome = gate(query("cargo test")).await;
+    let log = crate::eval_log::log_path("20260101_abcd").unwrap();
+    let text = std::fs::read_to_string(&log).unwrap();
+    let record: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
+    assert_eq!(record["command"], "cargo test");
+    assert!(matches!(outcome, AutoModeOutcome::Allow { .. }));
+}
+
+#[tokio::test]
 async fn the_decision_gate_asks_on_a_destructive_command() {
+    let _state = gate_state_dir("asks");
     let mut answers = std::collections::BTreeMap::new();
     answers.insert(
         "scope".to_string(),
@@ -627,6 +718,73 @@ async fn the_decision_gate_asks_on_a_destructive_command() {
     assert!(matches!(
         gate(query("rm -rf build")).await,
         AutoModeOutcome::Ask { .. }
+    ));
+}
+
+#[tokio::test]
+async fn the_decision_gate_honors_configured_thresholds() {
+    let _state = gate_state_dir("thresholds");
+    // A command the model half-knows: below the calibrated known bar it
+    // asks, above it the gate judges the rest of the answers.
+    let answers = || {
+        let mut answers = std::collections::BTreeMap::new();
+        answers.insert(
+            "scope".to_string(),
+            choice_answer("workspace", &[("workspace", 1.0)], Some(0.9)),
+        );
+        answers.insert("destructive".to_string(), noul_answer(0.05));
+        answers.insert("exposure".to_string(), noul_answer(0.05));
+        answers.insert("authorized".to_string(), noul_answer(0.1));
+        answers.insert("recognized".to_string(), noul_answer(0.40));
+        answers
+    };
+    let strict = {
+        let fake = std::sync::Arc::new(FakeDecision {
+            answers: answers(),
+            delay: std::time::Duration::ZERO,
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        crate::agent::auto_mode::build_decision_auto_mode(
+            fake.clone(),
+            "jev-latest",
+            lofi_code::policy::decision::Thresholds {
+                known: 0.50,
+                ..lofi_code::policy::decision::Thresholds::default()
+            },
+            std::time::Duration::from_secs(5),
+            std::path::Path::new("/repo"),
+            None,
+            &super::super::SubagentRegistry::default(),
+            &crate::agent::auto_mode::hint_handle(),
+        )
+    };
+    assert!(matches!(
+        strict(query("cargo test")).await,
+        AutoModeOutcome::Ask { .. }
+    ));
+    let loose = {
+        let fake = std::sync::Arc::new(FakeDecision {
+            answers: answers(),
+            delay: std::time::Duration::ZERO,
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        crate::agent::auto_mode::build_decision_auto_mode(
+            fake.clone(),
+            "jev-latest",
+            lofi_code::policy::decision::Thresholds {
+                known: 0.30,
+                ..lofi_code::policy::decision::Thresholds::default()
+            },
+            std::time::Duration::from_secs(5),
+            std::path::Path::new("/repo"),
+            None,
+            &super::super::SubagentRegistry::default(),
+            &crate::agent::auto_mode::hint_handle(),
+        )
+    };
+    assert!(matches!(
+        loose(query("cargo test")).await,
+        AutoModeOutcome::Allow { .. }
     ));
 }
 
@@ -766,9 +924,11 @@ async fn a_transport_error_fails_the_gate_closed() {
     let gate = crate::agent::auto_mode::build_decision_auto_mode(
         std::sync::Arc::new(FailingDecision),
         "jev-latest",
+        lofi_code::policy::decision::Thresholds::default(),
         std::time::Duration::from_secs(5),
         std::path::Path::new("/repo"),
         None,
+        &super::super::SubagentRegistry::default(),
         &crate::agent::auto_mode::hint_handle(),
     );
     match gate(query("jj abandon")).await {
@@ -829,6 +989,7 @@ fn auto_mode_config(model: &str) -> lofi_types::Config {
         max_tokens: None,
         timeout_ms: None,
         approval_timeout_ms: None,
+        decision: None,
     });
     config
 }

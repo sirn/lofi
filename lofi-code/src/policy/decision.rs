@@ -3,9 +3,10 @@
 //!
 //! The chat evaluator stays the default; this module runs only when auto
 //! mode names a decision model. It holds the question set, the state the
-//! questions refer to, and the threshold policy. The thresholds are code
-//! constants on purpose: knobs nobody has calibrated are harder to debug
-//! than numbers in a log.
+//! questions refer to, and the threshold policy. The thresholds live in
+//! code constants on purpose: knobs nobody has calibrated are harder to
+//! debug than numbers in a log, and the calibration harness replays logged
+//! answers through the same `decide` code with other values.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -30,25 +31,64 @@ const MAX_CONTEXT_BYTES: usize = 2 * 1024;
 /// [`MAX_CONTEXT_BYTES`], because the whole context shares one budget.
 const MAX_INTENT_CONTEXT_BYTES: usize = 512;
 
-/// Probability mass on system or remote that counts as a wide blast
-/// radius. Mass, not the picked option: it is conservative when the model
-/// spreads its answer.
-const WIDE_SCOPE_MASS: f64 = 0.40;
-/// Probability of destruction that counts as destructive.
-const DESTRUCTIVE: f64 = 0.50;
-/// Probability of a security-sensitive effect that counts as exposure:
-/// a credential read or disclosure, a metadata, localhost, private, or
-/// Unix-socket call, forwarded agents or ports, running or installing
-/// downloaded code, or a link or save that sets up code to run. Exposure
-/// is never authorized, but auto mode exists to run the safe tail, so a
-/// hedged answer below an even chance must not ask.
-const EXPOSURE: f64 = 0.50;
-/// Probability of authorization that lifts a remote-write risk.
-const AUTHORIZED: f64 = 0.75;
-/// Probability that the model knows the command well enough to judge it.
-/// Below this the other answers are guesses, so the command asks: a chat
-/// evaluator or the user resolves what the decision model cannot.
-const KNOWN: f64 = 0.50;
+/// The threshold policy one decision is judged under. The defaults are
+/// code constants: knobs nobody has calibrated are harder to debug than
+/// numbers in a log, and the calibration harness replays recorded answers
+/// under other values through the same code.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Thresholds {
+    /// Probability mass on system or remote that counts as a wide blast
+    /// radius. Mass, not the picked option: it is conservative when the
+    /// model spreads its answer.
+    pub wide_scope_mass: f64,
+    /// Probability of destruction that counts as destructive.
+    pub destructive: f64,
+    /// Probability of a security-sensitive effect that counts as exposure:
+    /// a credential read or disclosure, a metadata, localhost, private, or
+    /// Unix-socket call, forwarded agents or ports, running or installing
+    /// downloaded code, or a link or save that sets up code to run.
+    /// Exposure is never authorized, but auto mode exists to run the safe
+    /// tail, so a hedged answer below an even chance must not ask.
+    pub exposure: f64,
+    /// Probability of authorization that lifts a remote-write risk.
+    pub authorized: f64,
+    /// Probability that the model knows the command well enough to judge
+    /// it. Below this the other answers are guesses, so the command asks:
+    /// a chat evaluator or the user resolves what the decision model
+    /// cannot. Calibrated against clef-flash, which self-scores
+    /// mainstream tools (jj, gh, cargo) at 0.28 to 0.49: an even-chance
+    /// bar asked on ordinary commands, while 0.30 still holds the
+    /// genuinely unknown tail behind the prompt.
+    pub known: f64,
+}
+
+impl Default for Thresholds {
+    fn default() -> Self {
+        Self {
+            wide_scope_mass: 0.40,
+            destructive: 0.50,
+            exposure: 0.50,
+            authorized: 0.75,
+            known: 0.30,
+        }
+    }
+}
+
+impl Thresholds {
+    /// Merge an `auto_mode.decision` config over the defaults: a set field
+    /// replaces its default, an unset field keeps it.
+    #[must_use]
+    pub fn from_config(over: &lofi_types::DecisionThresholdsConfig) -> Self {
+        let defaults = Self::default();
+        Self {
+            wide_scope_mass: over.wide_scope_mass.unwrap_or(defaults.wide_scope_mass),
+            destructive: over.destructive.unwrap_or(defaults.destructive),
+            exposure: over.exposure.unwrap_or(defaults.exposure),
+            authorized: over.authorized.unwrap_or(defaults.authorized),
+            known: over.known.unwrap_or(defaults.known),
+        }
+    }
+}
 
 /// The questions the gate asks. Five, not more: the endpoint bills the
 /// state against every question, so each extra question multiplies the
@@ -310,6 +350,17 @@ fn ceil_boundary(text: &str, at: usize) -> usize {
 /// override.
 #[must_use]
 pub fn decide(answers: &BTreeMap<String, DecisionAnswer>) -> AutoModeOutcome {
+    decide_with(answers, &Thresholds::default())
+}
+
+/// Apply an explicit threshold policy. The calibration harness calls this
+/// with values other than the default so a replayed decision differs from
+/// the gate's only by the numbers.
+#[must_use]
+pub fn decide_with(
+    answers: &BTreeMap<String, DecisionAnswer>,
+    thresholds: &Thresholds,
+) -> AutoModeOutcome {
     let (Some(scope), Some(destructive), Some(exposure), Some(authorized), Some(recognized)) = (
         answers.get("scope"),
         answers.get("destructive"),
@@ -381,42 +432,49 @@ pub fn decide(answers: &BTreeMap<String, DecisionAnswer>) -> AutoModeOutcome {
     let summary = format!(
         "scope={scope_choice} system={system_mass:.2} remote={remote_mass:.2} destructive={destroys:.2} exposure={exposes:.2} authorized={authorized_p:.2} known={known:.2}"
     );
+    // Every refusal carries the scores and the rule that fired, so a reader
+    // can see which threshold decided without the model's answers at hand.
+    let ask = |rule: &str| AutoModeOutcome::Ask {
+        reason: format!("{summary} {rule}"),
+    };
 
     // An unknown command asks before anything else: every other answer
     // describes a command the model is guessing at, so a narrow-looking
     // scope on an unknown CLI cannot stand.
-    if known < KNOWN {
-        return AutoModeOutcome::Ask {
-            reason: format!(
-                "{summary} the command is below {KNOWN} known and the answers cannot be trusted"
-            ),
-        };
+    if known < thresholds.known {
+        return ask(&format!(
+            "known is below the {:.2} bar, so the answers cannot be trusted",
+            thresholds.known
+        ));
     }
 
     // Exposure, destruction, and a system effect are never authorized. The
     // chat rubric lets a request lift only a matching remote write or a
     // read-only inspection under a granted escalation; asking on the rest
     // is never looser than chat.
-    if exposes >= EXPOSURE {
-        return AutoModeOutcome::Ask {
-            reason: format!("{summary} exposure at or above {EXPOSURE} is never authorized"),
-        };
+    if exposes >= thresholds.exposure {
+        return ask(&format!(
+            "exposure at or above {:.2} is never authorized",
+            thresholds.exposure
+        ));
     }
-    if destroys >= DESTRUCTIVE {
-        return AutoModeOutcome::Ask {
-            reason: format!("{summary} destruction at or above {DESTRUCTIVE} is never authorized"),
-        };
+    if destroys >= thresholds.destructive {
+        return ask(&format!(
+            "destruction at or above {:.2} is never authorized",
+            thresholds.destructive
+        ));
     }
-    let wide = system_mass + remote_mass >= WIDE_SCOPE_MASS
+    let wide = system_mass + remote_mass >= thresholds.wide_scope_mass
         || matches!(scope_choice.as_str(), "system" | "remote");
     if wide {
-        if scope_choice == "system" || system_mass >= WIDE_SCOPE_MASS {
-            return AutoModeOutcome::Ask {
-                reason: format!("{summary} a system effect is never authorized"),
-            };
+        if scope_choice == "system" || system_mass >= thresholds.wide_scope_mass {
+            return ask("a system effect is never authorized");
         }
-        if authorized_p < AUTHORIZED {
-            return AutoModeOutcome::Ask { reason: summary };
+        if authorized_p < thresholds.authorized {
+            return ask(&format!(
+                "a wide scope needs {:.2} authorization",
+                thresholds.authorized
+            ));
         }
     }
     AutoModeOutcome::Allow { reason: summary }
@@ -488,6 +546,60 @@ mod tests {
         for option in SCOPE_OPTIONS {
             assert!(criteria.contains_key(option), "scope is missing {option}");
         }
+    }
+
+    #[test]
+    fn decide_delegates_to_the_default_thresholds() {
+        let set = known_answers(
+            scope("remote", &[("remote", 0.7), ("system", 0.3)], Some(0.9)),
+            0.2,
+            0.3,
+            0.4,
+        );
+        assert_eq!(
+            format!("{:?}", decide(&set)),
+            format!("{:?}", decide_with(&set, &Thresholds::default()))
+        );
+    }
+
+    #[test]
+    fn from_config_replaces_only_named_fields() {
+        let over = lofi_types::DecisionThresholdsConfig {
+            known: Some(0.45),
+            ..lofi_types::DecisionThresholdsConfig::default()
+        };
+        let merged = Thresholds::from_config(&over);
+        assert!((merged.known - 0.45).abs() < 1e-9);
+        assert!((merged.destructive - Thresholds::default().destructive).abs() < 1e-9);
+        assert!((merged.wide_scope_mass - Thresholds::default().wide_scope_mass).abs() < 1e-9);
+        // An empty config keeps every default.
+        assert_eq!(
+            format!(
+                "{:?}",
+                Thresholds::from_config(&lofi_types::DecisionThresholdsConfig::default())
+            ),
+            format!("{:?}", Thresholds::default())
+        );
+    }
+
+    #[test]
+    fn an_overridden_threshold_changes_only_its_own_decision() {
+        let hedged = answers(
+            scope("workspace", &[("workspace", 1.0)], Some(0.9)),
+            0.0,
+            0.0,
+            0.0,
+            0.25,
+        );
+        assert!(matches!(decide(&hedged), AutoModeOutcome::Ask { .. }));
+        let looser = Thresholds {
+            known: 0.20,
+            ..Thresholds::default()
+        };
+        assert!(matches!(
+            decide_with(&hedged, &looser),
+            AutoModeOutcome::Allow { .. }
+        ));
     }
 
     #[test]
@@ -783,7 +895,7 @@ mod tests {
             0.0,
             0.0,
             0.2,
-            0.35,
+            0.29,
         ));
         let AutoModeOutcome::Ask { reason } = unknown else {
             panic!("an unknown command must ask");
@@ -797,7 +909,7 @@ mod tests {
             0.0,
             0.0,
             0.0,
-            0.49,
+            0.29,
         ));
         assert!(matches!(hedged, AutoModeOutcome::Ask { .. }));
     }

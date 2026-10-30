@@ -959,6 +959,20 @@ model = "openai/gpt-4o-mini"
 # max_tokens = 1024
 # timeout_ms = 30000
 # approval_timeout_ms = 120000
+# [auto_mode.decision]
+# known = 0.30
+# destructive = 0.50
+# exposure = 0.50
+# authorized = 0.75
+# wide_scope_mass = 0.40
+```
+
+An `[auto_mode.decision]` block tunes the decision gate's thresholds. Every field is optional; a set value replaces the calibrated default, an unset one keeps it. `known` is the probability of command recognition the gate needs before it judges on its own: a lower bar asks less, because fewer commands fall through to the chat stage or the prompt. Calibrate before you move it: every decision-model evaluation is appended to `logs/<session>/auto-mode.jsonl` under the state directory, named for the transcript it judged (or for the workspace when a run writes no transcript), and `lofi policy calibrate` replays every session's log, probes a labeled corpus through the live decision model, and grid-searches thresholds against saved records. A corpus line is `allow: <command>` or `ask: <command>`.
+
+```
+lofi policy calibrate
+lofi policy calibrate --probe corpus.txt --out records.jsonl
+lofi policy calibrate --records records.jsonl --sweep
 ```
 
 `model` is a model query: a provider key or a backend key, then a model, as everywhere else in the configuration. A config that still names `provider` and a bare `model` keeps working; the two fields join into one query. `model` is optional when `decision_model` is set; one of the two is required. A backend name runs the evaluation on that CLI backend, so a session on a CLI backend evaluates commands exactly like an HTTP one. When the evaluator runs on a provider, it uses that provider's `response_start_timeout_ms` as a hard ceiling; this applies to the chat evaluator, whose replies stream. `max_tokens` defaults to the selected model's output limit. `timeout_ms` caps one evaluation, because a stalled evaluator holds the command and the turn with it. A timeout is a failure, so the command falls back to the normal prompt. `approval_timeout_ms` caps the wait once auto mode escalates to the ask: a prompt the user does not answer within that time is denied on auto mode's own authority with `approval timed out` as the reason, so an unattended session does not hang on it. The clock runs from the escalation, so a prompt queued behind an earlier one loses part of its wait. `0` disables the auto-deny; unset picks `120000` (120s). The deny button counts down to it while the prompt is up. The timer covers the auto-mode ask prompts only; grant and credential prompts wait without limit, and a prompt without auto mode does too.
