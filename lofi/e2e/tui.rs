@@ -1566,7 +1566,7 @@ fn sigterm_leaves_the_terminal_ready_for_the_next_process() {
     tui.signal(Signal::SIGTERM);
     tui.wait_exit();
 
-    let next = fixture.output(&["--list-models"]);
+    let next = fixture.output(&["models"]);
     assert!(next.status.success());
     assert!(String::from_utf8_lossy(&next.stdout).contains("mock/chat"));
 }

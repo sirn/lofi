@@ -1392,7 +1392,7 @@ fn configured_backend_models_are_listed_without_native_credentials() {
         config.replace("no_auth = true", "no_auth = false"),
     )
     .unwrap();
-    let output = fixture.output(&["--list-models"]);
+    let output = fixture.output(&["models"]);
     assert!(
         output.status.success(),
         "{}",

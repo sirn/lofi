@@ -9,7 +9,7 @@
 //! transports put `model.id` verbatim into the wire `"model"` field. To keep
 //! that wire contract intact, **`Model.id` stays the raw provider-local id**
 //! (e.g. `gpt-4o`), and the qualified `provider/id` form used for unambiguous
-//! resolution and `--list-models` is composed from `Model.provider` +
+//! resolution and `lofi models` is composed from `Model.provider` +
 //! `Model.id` at lookup/display time.
 //! A provider's `auto_models` block names a models endpoint plus optional
 //! field mappings. Each entry is parsed into a `ModelConfig` whose `api` and

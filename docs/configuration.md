@@ -15,7 +15,7 @@ The configuration directory remains read-only.
 Configure a model provider or an agent backend.
 Provider models use Lofi's agent loop.
 Backend models use an external agent with Lofi's tools and shell policy.
-Both appear in `lofi --list-models` and the `/model` command.
+Both appear in `lofi models` and the `/model` command.
 
 ### Model provider
 
@@ -65,7 +65,7 @@ Shell approval uses Lofi's `policy.toml`.
 ### Run Lofi
 
 ```sh
-lofi --list-models
+lofi models
 lofi
 lofi --model claude/sonnet --print "Describe this project"
 ```
@@ -864,6 +864,8 @@ yolo = false
 Network clients are not automatically approved by the built-in restricted modes. Output redirects require confirmation by default. Both can be opted into with custom rules and redirect settings.
 
 `yolo = true` skips confirmation for `ask` and unmatched commands, but does not bypass explicit deny rules.
+
+`lofi policy explain <COMMAND>` evaluates a command against the policy and prints the action, the reason, and the matched rule, without running it.
 
 ### Custom rules
 

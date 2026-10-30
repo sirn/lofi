@@ -18,15 +18,11 @@ fn help_version_and_dispatch_precedence_are_stable() {
     let help = fixture.output(&["--help"]);
     assert!(help.status.success());
     let help = String::from_utf8_lossy(&help.stdout);
-    for flag in [
-        "--print",
-        "--env",
-        "--list-models",
-        "--continue",
-        "--resume",
-        "--no-session",
-    ] {
+    for flag in ["--print", "--env", "--continue", "--resume", "--no-session"] {
         assert!(help.contains(flag), "help omitted {flag}: {help}");
+    }
+    for command in ["models", "sessions", "docs", "policy", "mcp"] {
+        assert!(help.contains(command), "help omitted {command}: {help}");
     }
 
     let version = fixture.output(&["--version"]);
@@ -36,13 +32,7 @@ fn help_version_and_dispatch_precedence_are_stable() {
         format!("lofi {}\n", env!("CARGO_PKG_VERSION"))
     );
 
-    let precedence = fixture.output(&[
-        "--list-models",
-        "--list-sessions",
-        "--docs",
-        "--print",
-        "must not reach the provider",
-    ]);
+    let precedence = fixture.output(&["--print", "must not reach the provider", "models"]);
     assert!(precedence.status.success());
     assert!(String::from_utf8_lossy(&precedence.stdout).contains("mock/chat"));
     assert_eq!(server.request_count(), 0);
@@ -54,7 +44,7 @@ fn malformed_configuration_fails_before_network_or_tui_startup() {
     let fixture = Fixture::new(&server);
     std::fs::write(&fixture.config, "this is not = valid toml [").unwrap();
 
-    let output = fixture.output(&["--list-models"]);
+    let output = fixture.output(&["models"]);
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
     assert!(
@@ -128,32 +118,32 @@ fn informational_cli_commands_run_without_a_tty() {
     let server = MockServer::start(Vec::new());
     let fixture = Fixture::new(&server);
 
-    let docs = fixture.output(&["--docs"]);
+    let docs = fixture.output(&["docs"]);
     assert!(docs.status.success());
     assert!(String::from_utf8_lossy(&docs.stdout).contains("lofi.read"));
 
-    let search = fixture.output(&["--docs-search", "background job"]);
+    let search = fixture.output(&["docs", "search", "background job"]);
     assert!(search.status.success());
     assert!(String::from_utf8_lossy(&search.stdout).contains("lofi.jobSpawn"));
 
-    let no_matches = fixture.output(&["--docs-search", "definitely-no-such-api-entry"]);
+    let no_matches = fixture.output(&["docs", "search", "definitely-no-such-api-entry"]);
     assert!(no_matches.status.success());
     assert_eq!(
         String::from_utf8_lossy(&no_matches.stdout),
         "(no matches)\n"
     );
 
-    let policy = fixture.output(&["--policy-explain", "printf safe"]);
+    let policy = fixture.output(&["policy", "explain", "printf safe"]);
     assert!(policy.status.success());
     assert!(String::from_utf8_lossy(&policy.stdout).contains("action: allow"));
 
-    let models = fixture.output(&["--list-models"]);
+    let models = fixture.output(&["models"]);
     assert!(models.status.success());
     let models = String::from_utf8_lossy(&models.stdout);
     assert!(models.contains("mock/chat"));
     assert!(models.contains("responses/reasoning"));
 
-    let sessions = fixture.output(&["--list-sessions"]);
+    let sessions = fixture.output(&["sessions"]);
     assert!(sessions.status.success());
     assert_eq!(
         String::from_utf8_lossy(&sessions.stdout),
@@ -237,7 +227,7 @@ fn list_sessions_reports_a_completed_tui_session() {
     tui.submit("/quit");
     tui.wait_exit();
 
-    let sessions = fixture.output(&["--list-sessions"]);
+    let sessions = fixture.output(&["sessions"]);
     assert!(sessions.status.success());
     let stdout = String::from_utf8_lossy(&sessions.stdout);
     assert!(stdout.contains("mock/chat"));
@@ -376,7 +366,7 @@ context_window = 100000
 
     // A bare NAME that is unset in the parent is a config error before any
     // provider request.
-    let missing = fixture.output(&["-e", "LOFI_E2E_DEFINITELY_UNSET", "--list-models"]);
+    let missing = fixture.output(&["-e", "LOFI_E2E_DEFINITELY_UNSET", "models"]);
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("LOFI_E2E_DEFINITELY_UNSET"));
 }
@@ -445,7 +435,7 @@ fn unresolved_explicit_values_fail_naming_the_provider_and_field() {
     ];
     for (section, provider, field) in cases {
         std::fs::write(&fixture.config, format!("{base}\n{section}")).unwrap();
-        let output = fixture.output(&["--list-models"]);
+        let output = fixture.output(&["models"]);
         assert!(
             !output.status.success(),
             "unresolved {field} on {provider} must fail startup"

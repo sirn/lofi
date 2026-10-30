@@ -164,7 +164,7 @@ context_window = "context_length"
     )
     .unwrap();
 
-    let online = fixture.output(&["--list-models"]);
+    let online = fixture.output(&["models"]);
     assert!(
         online.status.success(),
         "{}",
@@ -181,7 +181,7 @@ context_window = "context_length"
         .contains("authorization:"));
     drop(server);
 
-    let cached = fixture.output(&["--list-models"]);
+    let cached = fixture.output(&["models"]);
     assert!(
         cached.status.success(),
         "{}",
@@ -353,7 +353,7 @@ action = "deny"
         ("fixture-tool read <<EOF", "action: deny"),
         ("fixture-tool read &", "action: deny"),
     ] {
-        let output = fixture.output(&["--policy-explain", command]);
+        let output = fixture.output(&["policy", "explain", command]);
         assert!(
             output.status.success(),
             "{}",

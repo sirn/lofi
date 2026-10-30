@@ -32,18 +32,25 @@ See [End-to-end testing](docs/e2e.md) for the current coverage map, architecture
 | Flag | Description |
 | --- | --- |
 | `-p`, `--print <PROMPT>` | Run one non-interactive turn and stream assistant text to stdout. |
-| `--list-models` | Print `provider/id — name` lines and exit. |
-| `--list-sessions` | Print saved sessions for this workspace and exit. |
 | `--model <SPEC>` | Select the model as `provider/model[:level][@tier]`. |
 | `-e`, `--env <NAME[=VALUE]>` | Set an environment variable for this instance (repeatable). A bare `NAME` forwards the parent shell's value. |
 | `-c`, `--continue` | Resume the most recent session for this workspace. |
 | `--resume <ID>` | Resume a specific session by id prefix. |
 | `--no-session` | Do not persist a transcript. |
-| `--docs` | Print the embedded API reference index. |
-| `--docs-search <QUERY>` | Search the embedded API reference. |
-| `--policy-explain <COMMAND>` | Evaluate a command against the shell policy without running it. |
 
-With no flags, `lofi` launches the interactive TUI against the current working directory as the workspace root.
+### Subcommands
+
+| Command | Description |
+| --- | --- |
+| `models` | Print `provider/id — name` lines and exit. |
+| `sessions` | Print the saved sessions of this workspace and exit. |
+| `docs` | Print the embedded API reference index. |
+| `docs search <QUERY>` | Search the embedded API reference. |
+| `policy explain <COMMAND>` | Evaluate a command against the shell policy without running it. |
+| `policy calibrate` | Replay, probe, or sweep the auto-mode decision gate. See [Automatic approval](docs/configuration.md#automatic-approval). |
+| `mcp serve` | Speak the exec bridge protocol on stdio; the harness spawns it for an agent backend. |
+
+With no flags or subcommand, `lofi` launches the interactive TUI against the current working directory as the workspace root.
 
 Model-generated shell commands run on the host through `sh -c`; QuickJS isolation does not sandbox native commands. The default policy asks for confirmation before every such command. See [Shell policy](docs/configuration.md#shell-policy) before selecting a more permissive approval mode.
 

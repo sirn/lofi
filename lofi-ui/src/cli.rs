@@ -13,47 +13,80 @@ use lofi_core::ModelRegistry;
     about = "A minimal coding agent harness with a code-mode sandbox"
 )]
 struct Cli {
+    /// Run one non-interactive turn and stream the assistant text
     #[arg(short = 'p', long, value_name = "PROMPT")]
     print: Option<String>,
+    /// Set an environment variable for this run; repeatable
     #[arg(short = 'e', long = "env", value_name = "NAME[=VALUE]")]
     env: Vec<String>,
-    #[arg(long)]
-    list_models: bool,
-    #[arg(long)]
-    list_sessions: bool,
+    /// Select the model as `provider/model[:level][@tier]`
     #[arg(long, value_name = "SPEC")]
     model: Option<String>,
+    /// Run on this CLI agent backend
     #[arg(long, value_name = "NAME")]
     backend: Option<String>,
-    #[arg(long, hide = true)]
-    exec_mcp: bool,
+    /// Resume the most recent session of this workspace
     #[arg(short = 'c', long = "continue")]
     continue_last: bool,
+    /// Resume a session by id prefix
     #[arg(long, value_name = "ID")]
     resume: Option<String>,
+    /// Do not persist a transcript
     #[arg(long)]
     no_session: bool,
-    #[arg(long)]
-    docs: bool,
-    #[arg(long, value_name = "QUERY")]
-    docs_search: Option<String>,
-    #[arg(long, value_name = "COMMAND")]
-    policy_explain: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(clap::Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)] // parsed once, then matched by value
 enum Command {
+    /// Print the configured models and exit.
+    Models,
+    /// Print the saved sessions of this workspace and exit.
+    Sessions,
     /// Work with the shell policy.
     Policy {
         #[command(subcommand)]
         cmd: PolicyCommand,
     },
+    /// Print the embedded API reference index, or search it.
+    Docs {
+        #[command(subcommand)]
+        cmd: Option<DocsCommand>,
+    },
+    /// Serve the exec bridge for a spawned agent backend.
+    Mcp {
+        #[command(subcommand)]
+        cmd: McpCommand,
+    },
 }
 
 #[derive(clap::Subcommand, Debug)]
+enum McpCommand {
+    /// Speak the lofi exec bridge protocol on stdio.
+    Serve,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum DocsCommand {
+    /// Search the embedded API reference.
+    Search {
+        /// The text to search for
+        #[arg(value_name = "QUERY")]
+        query: String,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)] // parsed once, then matched by value
 enum PolicyCommand {
+    /// Evaluate a command against the shell policy without running it.
+    Explain {
+        /// The command to evaluate
+        #[arg(value_name = "COMMAND")]
+        command: String,
+    },
     /// Calibrate the decision gate against commands or records.
     ///
     /// Replays the gate's evaluation log, judges a corpus, or judges
@@ -110,10 +143,6 @@ enum PolicyCommand {
 /// Returns command parsing, configuration, I/O, or agent startup failures.
 pub async fn run_cli() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    if cli.exec_mcp {
-        lofi_core::backend::run_stdio_proxy().await?;
-        return Ok(());
-    }
     let root = std::env::current_dir().context("determine working directory")?;
 
     // Apply --env specs to the process environment up front so every mode
@@ -129,20 +158,10 @@ pub async fn run_cli() -> anyhow::Result<()> {
     let _env_guard = lofi_core::config_loader::apply_env_specs(&env_pairs);
 
     if let Some(command) = cli.command {
-        run_command(command).await?;
+        run_command(command, &root).await?;
         return Ok(());
     }
-    if cli.list_models {
-        list_models().await?;
-    } else if cli.list_sessions {
-        list_sessions(&root)?;
-    } else if cli.docs {
-        print_docs_index()?;
-    } else if let Some(query) = cli.docs_search.clone() {
-        print_docs_search(&query)?;
-    } else if let Some(cmd) = cli.policy_explain.clone() {
-        policy_explain(&cmd)?;
-    } else if let Some(prompt) = cli.print.clone() {
+    if let Some(prompt) = cli.print.clone() {
         let opts = build_print_opts(&cli, prompt, root);
         crate::run_print(opts).await?;
     } else {
@@ -152,9 +171,19 @@ pub async fn run_cli() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_command(command: Command) -> anyhow::Result<()> {
+async fn run_command(command: Command, root: &std::path::Path) -> anyhow::Result<()> {
     match command {
+        Command::Models => list_models().await?,
+        Command::Sessions => list_sessions(root)?,
+        Command::Mcp {
+            cmd: McpCommand::Serve,
+        } => lofi_core::backend::run_stdio_proxy().await?,
+        Command::Docs { cmd } => match cmd {
+            None => print_docs_index()?,
+            Some(DocsCommand::Search { query }) => print_docs_search(&query)?,
+        },
         Command::Policy { cmd } => match cmd {
+            PolicyCommand::Explain { command } => policy_explain(&command)?,
             PolicyCommand::Calibrate {
                 replay,
                 probe,

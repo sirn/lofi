@@ -2258,7 +2258,7 @@ fn malformed_and_unsupported_transcripts_do_not_appear_in_session_listings() {
     )
     .unwrap();
 
-    let output = fixture.output(&["--list-sessions"]);
+    let output = fixture.output(&["sessions"]);
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "(no sessions)\n");
     assert_eq!(server.request_count(), 0);

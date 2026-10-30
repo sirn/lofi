@@ -22,7 +22,7 @@ impl Bridge {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let token = uuid::Uuid::new_v4().to_string();
-        let config = json!({"name":"lofi", "command":executable, "args":["--exec-mcp"],
+        let config = json!({"name":"lofi", "command":executable, "args":["mcp", "serve"],
             "env":[{"name":"LOFI_EXEC_ADDRESS","value":address.to_string()}, {"name":"LOFI_EXEC_TOKEN","value":token}]});
         let active = Arc::new(Mutex::new(None));
         let state = active.clone();
