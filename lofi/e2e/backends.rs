@@ -341,7 +341,7 @@ fn fake_claude_failure(output: &mut impl Write, id: &str, subtype: &str) {
 fn fake_claude_tool_then_error(mcp: &mut Mcp, output: &mut impl Write, id: &str, text: &str) {
     let result = mcp.call(
         "tools/call",
-        &json!({"name":"exec","arguments":{"code":fake_claude_code(text)}}),
+        &json!({"name":"exec","arguments":{"code":fake_claude_code(text),"description":"run code"}}),
     );
     assert!(result["isError"] != true, "{result}");
     fake_claude_stream(output, id, "claude answer");
@@ -431,7 +431,7 @@ fn fake_claude() {
         let code = fake_claude_code(text);
         let result = mcp.call(
             "tools/call",
-            &json!({"name":"exec","arguments":{"code":code}}),
+            &json!({"name":"exec","arguments":{"code":code,"description":"run code"}}),
         );
         let text = if result["isError"] == true {
             "exec denied"

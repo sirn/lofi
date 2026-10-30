@@ -61,8 +61,8 @@ The only tool advertised to the LLM is `exec`:
 ```jsonc
 {
   "code": "<TypeScript source>",
+  "description": "<what this call is trying to do>", // required; labels the call and guides the shell gate
   "strings": { "key": "value" }, // optional; exposed as `lofi_strings`
-  "display": { ... }              // optional UI metadata; ignored by the runtime
 }
 ```
 

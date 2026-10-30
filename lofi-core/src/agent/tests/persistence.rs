@@ -335,7 +335,8 @@ async fn repeated_tool_results_notify_after_pairing_and_recover_once() {
             },
             StreamingEvent::ToolUseInputDelta {
                 id: format!("t{id}"),
-                delta: serde_json::json!({ "code": "return 1" }).to_string(),
+                delta: serde_json::json!({ "code": "return 1", "description": "run code" })
+                    .to_string(),
             },
             StreamingEvent::ToolUseEnd {
                 id: format!("t{id}"),

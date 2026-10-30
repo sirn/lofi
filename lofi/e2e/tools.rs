@@ -179,7 +179,7 @@ fn anthropic_tool_response_without_arguments(call_id: &str) -> MockResponse {
 }
 
 #[test]
-fn anthropic_returns_missing_code_when_arguments_are_absent() {
+fn anthropic_returns_missing_description_when_arguments_are_absent() {
     let server = MockServer::start(vec![
         anthropic_tool_response_without_arguments("anthropic-empty-call"),
         anthropic_text_response("anthropic empty final answer"),
@@ -201,7 +201,7 @@ fn anthropic_returns_missing_code_when_arguments_are_absent() {
         .find(|block| block["type"] == "tool_result")
         .and_then(|block| block["content"].as_str())
         .expect("exec result in the second provider request");
-    assert!(result.contains("exec: missing required 'code' argument"));
+    assert!(result.contains("exec: missing required 'description' argument"));
 }
 
 #[test]
@@ -499,7 +499,7 @@ fn parallel_responses_response(calls: &[(&str, &str)]) -> MockResponse {
         let delta = serde_json::json!({
             "type": "response.function_call_arguments.delta",
             "item_id": item_id,
-            "delta": serde_json::json!({ "code": code }).to_string(),
+            "delta": serde_json::json!({ "code": code, "description": "run code" }).to_string(),
         });
         let done = serde_json::json!({
             "type": "response.output_item.done",
@@ -508,7 +508,7 @@ fn parallel_responses_response(calls: &[(&str, &str)]) -> MockResponse {
                 "id": item_id,
                 "call_id": call_id,
                 "name": "exec",
-                "arguments": serde_json::json!({ "code": code }).to_string(),
+                "arguments": serde_json::json!({ "code": code, "description": "run code" }).to_string(),
             },
         });
         for event in [added, delta, done] {
@@ -532,7 +532,7 @@ fn responses_tool_response_without_argument_deltas(
 ) -> MockResponse {
     let item_id = format!("item-{call_id}");
     let arguments = code
-        .map(|code| serde_json::json!({ "code": code }).to_string())
+        .map(|code| serde_json::json!({ "code": code, "description": "run code" }).to_string())
         .unwrap_or_default();
     let added = serde_json::json!({
         "type": "response.output_item.added",
@@ -653,7 +653,7 @@ fn openai_responses_executes_interleaved_parallel_calls() {
 }
 
 #[test]
-fn openai_responses_returns_missing_code_when_arguments_are_absent() {
+fn openai_responses_returns_missing_description_when_arguments_are_absent() {
     let server = MockServer::start(vec![
         responses_tool_response_without_argument_deltas("responses-empty-call", None),
         responses_response("empty responses thinking", "empty responses final answer"),
@@ -674,7 +674,7 @@ fn openai_responses_returns_missing_code_when_arguments_are_absent() {
         .find(|item| item["type"] == "function_call_output")
         .and_then(|item| item["output"].as_str())
         .expect("exec result in the second provider request");
-    assert!(output.contains("exec: missing required 'code' argument"));
+    assert!(output.contains("exec: missing required 'description' argument"));
 }
 
 #[test]

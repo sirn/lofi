@@ -168,10 +168,12 @@ pub enum AutoModeOutcome {
 }
 
 /// Turn context for one auto-mode evaluation, so a terse command can be
-/// judged against the request it answers. Every field is bounded by the turn
-/// loop that fills it: the request with
-/// [`crate::policy::auto_mode::bound_request`], the rest with
-/// [`crate::policy::auto_mode::bound`].
+/// judged against the request it answers. Every field is bounded where it
+/// is written: the turn loop fills the request with
+/// [`crate::policy::auto_mode::bound_request`] and the rest with
+/// [`crate::policy::auto_mode::bound`]. The exec call's stated intent is
+/// not part of this shared context; it travels per call on
+/// [`AutoModeQuery`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AutoModeHints {
     /// The request that started the current turn.
@@ -192,11 +194,37 @@ pub struct AutoModeHints {
 
 /// Shared handle: the turn loop writes the hints of the turn it starts, and
 /// the evaluator reads them when a command needs a decision.
-pub type AutoModeHintHandle = Arc<std::sync::Mutex<AutoModeHints>>;
+#[derive(Default)]
+pub struct AutoModeHintsHandle {
+    /// The current hints. Readers snapshot; the turn loop replaces them.
+    pub hints: std::sync::Mutex<AutoModeHints>,
+}
+
+impl AutoModeHintsHandle {
+    /// The hints as one evaluation sees them.
+    #[must_use]
+    pub fn snapshot(&self) -> AutoModeHints {
+        self.hints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+pub type AutoModeHintHandle = Arc<AutoModeHintsHandle>;
+
+/// One command the auto-mode gate judges: the shell command, plus the
+/// exec call's stated description for it, when there is one. The intent is
+/// agent-authored, so untrusted: it can raise a risk and never lower it.
+#[derive(Debug, Clone)]
+pub struct AutoModeQuery {
+    pub command: String,
+    pub intent: Option<String>,
+}
 
 pub type AutoModeFn = Arc<
     dyn Fn(
-            String,
+            AutoModeQuery,
         )
             -> std::pin::Pin<Box<dyn std::future::Future<Output = AutoModeOutcome> + Send + Sync>>
         + Send
@@ -238,6 +266,12 @@ pub struct ExecCtx {
     /// at once.
     pub grants: Vec<GrantedDir>,
     pub auto_mode: Option<AutoModeFn>,
+    /// The exec call's stated `description`, so the auto-mode gate judges
+    /// this call's shell commands with the call's own intent. Bounded to the
+    /// description cap (a 200-character head plus its cut marker) by the
+    /// executor before it is set. Agent-authored, so untrusted: it can
+    /// raise a risk and never lower it.
+    pub intent: Option<String>,
     /// How long an auto-mode ask prompt waits for the user before auto mode
     /// denies it on its own. `None` disables the auto-deny.
     pub approval_timeout: Option<Duration>,

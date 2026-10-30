@@ -342,7 +342,7 @@ pub fn delayed_tool_response(call_id: &str, code: &str, delay: Duration) -> Mock
 }
 
 pub fn tool_response(call_id: &str, code: &str) -> MockResponse {
-    let arguments = json!({ "code": code }).to_string();
+    let arguments = json!({ "code": code, "description": "run code" }).to_string();
     let event = json!({
         "choices": [{
             "delta": {
@@ -365,7 +365,7 @@ data: [DONE]
 }
 
 pub fn tool_response_with_usage(call_id: &str, code: &str, input_tokens: u64) -> MockResponse {
-    let arguments = json!({ "code": code }).to_string();
+    let arguments = json!({ "code": code, "description": "run code" }).to_string();
     let tool = json!({
         "choices": [{
             "delta": {
@@ -386,7 +386,7 @@ pub fn tool_response_with_usage(call_id: &str, code: &str, input_tokens: u64) ->
 }
 
 pub fn fragmented_tool_response(call_id: &str, code: &str) -> MockResponse {
-    let arguments = json!({ "code": code }).to_string();
+    let arguments = json!({ "code": code, "description": "run code" }).to_string();
     let split = arguments.len() / 2;
     let (first, second) = arguments.split_at(split);
     let start = json!({
@@ -451,7 +451,7 @@ pub fn parallel_tool_response(calls: &[(&str, &str)]) -> MockResponse {
                 "type": "function",
                 "function": {
                     "name": "exec",
-                    "arguments": json!({ "code": code }).to_string(),
+                    "arguments": json!({ "code": code, "description": "run code" }).to_string(),
                 }
             })
         })
@@ -470,7 +470,7 @@ pub fn parallel_responses_tool_response(calls: &[(&str, &str)]) -> MockResponse 
     let mut events = String::new();
     for (call_id, code) in calls {
         let item_id = format!("item-{call_id}");
-        let arguments = json!({ "code": code }).to_string();
+        let arguments = json!({ "code": code, "description": "run code" }).to_string();
         let added = json!({
             "type": "response.output_item.added",
             "item": {
@@ -518,7 +518,7 @@ data: [DONE]
 
 pub fn responses_tool_response(call_id: &str, code: &str) -> MockResponse {
     let item_id = format!("item-{call_id}");
-    let arguments = json!({ "code": code }).to_string();
+    let arguments = json!({ "code": code, "description": "run code" }).to_string();
     let split = arguments.len() / 2;
     let (first_delta, second_delta) = arguments.split_at(split);
     let added = json!({
@@ -573,7 +573,7 @@ data: [DONE]
 }
 
 pub fn anthropic_tool_response(call_id: &str, code: &str) -> MockResponse {
-    let arguments = json!({ "code": code }).to_string();
+    let arguments = json!({ "code": code, "description": "run code" }).to_string();
     let split = arguments.len() / 2;
     let (first_delta, second_delta) = arguments.split_at(split);
     let start = json!({
@@ -723,7 +723,7 @@ pub fn anthropic_redacted_thinking_tool_response(
         "index": 1,
         "content_block": { "type": "tool_use", "id": call_id, "name": "exec" },
     });
-    let arguments = json!({ "code": code }).to_string();
+    let arguments = json!({ "code": code, "description": "run code" }).to_string();
     let delta_tool = json!({
         "index": 1,
         "delta": { "type": "input_json_delta", "partial_json": arguments },
@@ -743,7 +743,7 @@ pub fn google_tool_response(call_id: &str, code: &str) -> MockResponse {
                     "functionCall": {
                         "id": call_id,
                         "name": "exec",
-                        "args": { "code": code },
+                        "args": { "code": code, "description": "run code" },
                     },
                     "thoughtSignature": "Z29vZ2xlLXNpZ25hdHVyZS1tYXJrZXI=",
                 }]
@@ -911,7 +911,7 @@ data: [DONE]
 
 pub fn thinking_tool_response(thinking: &str, call_id: &str, code: &str) -> MockResponse {
     let thinking = json!({ "choices": [{ "delta": { "reasoning_content": thinking } }] });
-    let arguments = json!({ "code": code }).to_string();
+    let arguments = json!({ "code": code, "description": "run code" }).to_string();
     let tool = json!({
         "choices": [{
             "delta": {

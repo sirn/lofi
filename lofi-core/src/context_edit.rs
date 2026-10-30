@@ -23,8 +23,8 @@ fn cleared_stub(event_id: &str) -> String {
     format!("[{event_id}]")
 }
 
-/// Rebuild a tool-call (`ToolUse`) input so the `display` label survives but
-/// the verbatim `code` is replaced with a `lofi.result`-recoverable stub.
+/// Rebuild a tool-call (`ToolUse`) input so the `description` label survives
+/// but the verbatim `code` is replaced with a `lofi.result`-recoverable stub.
 /// Keeps the call structurally valid (id/name unchanged) so tool-result
 /// pairing is preserved.
 fn trim_tool_use_input(input: &serde_json::Value, event_id: &str) -> serde_json::Value {
@@ -33,8 +33,11 @@ fn trim_tool_use_input(input: &serde_json::Value, event_id: &str) -> serde_json:
     match input {
         serde_json::Value::Object(obj) => {
             let mut out = serde_json::Map::new();
-            if let Some(display) = obj.get("display") {
-                out.insert("display".to_string(), display.clone());
+            if let Some(description) = obj.get("description").and_then(|d| d.as_str()) {
+                out.insert(
+                    "description".to_string(),
+                    serde_json::Value::String(crate::agent::cap_description(description)),
+                );
             }
             out.insert("code".to_string(), json!(stub));
             serde_json::Value::Object(out)
@@ -208,7 +211,7 @@ mod tests {
         ContentBlock::ToolUse {
             id: id.to_string(),
             name: "exec".to_string(),
-            input: serde_json::json!({ "code": code, "display": { "name": "do thing" } }),
+            input: serde_json::json!({ "code": code, "description": "do thing" }),
         }
     }
     fn exec_result(id: &str, content: &str) -> ContentBlock {
@@ -363,7 +366,45 @@ mod tests {
     }
 
     #[test]
-    fn trims_old_tool_call_code_keeps_display() {
+    fn an_oversized_description_is_capped_in_the_kept_input() {
+        let kept = vec![
+            (
+                "e1".to_string(),
+                Message {
+                    origin: None,
+                    role: Role::Assistant,
+                    blocks: vec![ContentBlock::ToolUse {
+                        id: "a".to_string(),
+                        name: "exec".to_string(),
+                        input: serde_json::json!({
+                            "code": "old-secret-code",
+                            "description": "d".repeat(10_000) + " end"
+                        }),
+                    }],
+                    kind: PromptKind::default(),
+                },
+            ),
+            (
+                "e2".to_string(),
+                Message {
+                    origin: None,
+                    role: Role::Assistant,
+                    blocks: vec![exec_call("b", "recent-code")],
+                    kind: PromptKind::default(),
+                },
+            ),
+        ];
+        let out = tail(&kept);
+        let ContentBlock::ToolUse { input: old, .. } = &out[0].blocks[0] else {
+            panic!()
+        };
+        let description = old.get("description").and_then(|v| v.as_str()).unwrap();
+        assert!(description.ends_with(" [...truncated]"));
+        assert!(description.chars().count() < 230);
+    }
+
+    #[test]
+    fn trims_old_tool_call_code_keeps_description() {
         let kept = vec![
             (
                 "e1".to_string(),
@@ -396,9 +437,7 @@ mod tests {
             panic!()
         };
         assert_eq!(
-            old.get("display")
-                .and_then(|v| v.get("name"))
-                .and_then(|v| v.as_str()),
+            old.get("description").and_then(|v| v.as_str()),
             Some("do thing")
         );
         let code = old.get("code").and_then(|v| v.as_str()).unwrap();

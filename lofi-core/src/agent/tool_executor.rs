@@ -65,6 +65,39 @@ pub struct ToolCallContext {
     pub alive: Option<Arc<AtomicBool>>,
 }
 
+/// Report one rejected tool call: emit the error `ToolEnd`, then record the
+/// `ToolResult`. Shared by every pre-execution rejection in `execute_tools`.
+async fn reject(
+    call: &ToolCallContext,
+    results: &mut Vec<ContentBlock>,
+    id: &str,
+    content: impl Into<String>,
+    dispatch: std::time::Instant,
+) -> Result<()> {
+    let content = content.into();
+    let elapsed_ms = dispatch.elapsed().as_millis() as u64;
+    if !emit(
+        call.events.as_ref(),
+        AgentEvent::ToolEnd {
+            id: id.to_string(),
+            result: content.clone(),
+            is_error: true,
+            elapsed_ms,
+        },
+    )
+    .await
+    {
+        return Err(Error::Cancelled);
+    }
+    results.push(ContentBlock::ToolResult {
+        tool_use_id: id.to_string(),
+        content,
+        is_error: true,
+        images: Vec::new(),
+    });
+    Ok(())
+}
+
 impl ToolExecutor {
     /// Create execution state without constructing a model provider.
     /// # Errors
@@ -305,7 +338,7 @@ impl ToolExecutor {
             record(ContentBlock::ToolUse {
                 id: id.into(),
                 name: "exec".into(),
-                input: input.clone(),
+                input: crate::agent::normalize_exec_input(input),
             })?;
         }
         let result = self
@@ -364,52 +397,37 @@ impl ToolExecutor {
         for (id, name, input) in tool_uses {
             let dispatch = std::time::Instant::now();
             if *name != "exec" {
-                let content = format!("unknown tool: {name}");
-                let elapsed_ms = dispatch.elapsed().as_millis() as u64;
-                if !emit(
-                    call.events.as_ref(),
-                    AgentEvent::ToolEnd {
-                        id: id.to_string(),
-                        result: content.clone(),
-                        is_error: true,
-                        elapsed_ms,
-                    },
+                reject(
+                    call,
+                    &mut results,
+                    id,
+                    format!("unknown tool: {name}"),
+                    dispatch,
                 )
-                .await
-                {
-                    return Err(Error::Cancelled);
-                }
-                results.push(ContentBlock::ToolResult {
-                    tool_use_id: id.to_string(),
-                    content,
-                    is_error: true,
-                    images: Vec::new(),
-                });
+                .await?;
                 continue;
             }
-            let (code, strings, display) = parse_exec_input(input);
-            if code.is_empty() {
-                let content = "exec: missing required 'code' argument".to_string();
-                let elapsed_ms = dispatch.elapsed().as_millis() as u64;
-                if !emit(
-                    call.events.as_ref(),
-                    AgentEvent::ToolEnd {
-                        id: id.to_string(),
-                        result: content.clone(),
-                        is_error: true,
-                        elapsed_ms,
-                    },
+            let (code, strings, description) = parse_exec_input(input);
+            if description.is_empty() {
+                reject(
+                    call,
+                    &mut results,
+                    id,
+                    "exec: missing required 'description' argument",
+                    dispatch,
                 )
-                .await
-                {
-                    return Err(Error::Cancelled);
-                }
-                results.push(ContentBlock::ToolResult {
-                    tool_use_id: id.to_string(),
-                    content,
-                    is_error: true,
-                    images: Vec::new(),
-                });
+                .await?;
+                continue;
+            }
+            if code.is_empty() {
+                reject(
+                    call,
+                    &mut results,
+                    id,
+                    "exec: missing required 'code' argument",
+                    dispatch,
+                )
+                .await?;
                 continue;
             }
             // The ToolInput event must land before we invoke the sandbox;
@@ -420,7 +438,7 @@ impl ToolExecutor {
                 AgentEvent::ToolInput {
                     id: id.to_string(),
                     code: code.clone(),
-                    label: exec_label(&display),
+                    label: Some(description.clone()),
                 },
             )
             .await
@@ -535,6 +553,10 @@ impl ToolExecutor {
                 approve_dir,
                 grants: self.grants.clone(),
                 auto_mode: self.auto_mode.clone(),
+                // The stated description travels with this call's context,
+                // so the gate judges this call's commands with this call's
+                // intent however the call's future is dropped or queued.
+                intent: Some(description.clone()),
                 approval_timeout: self
                     .auto_mode_config
                     .as_ref()

@@ -25,12 +25,15 @@ mod worker;
 mod tests;
 
 pub use compile::compile_ts;
-pub use contract::{exec_tool_input_schema, EXEC_TOOL_DESCRIPTION, EXEC_TOOL_NAME};
+pub use contract::{
+    exec_tool_input_schema, DESCRIPTION_CUT_MARKER, EXEC_TOOL_DESCRIPTION, EXEC_TOOL_NAME,
+    MAX_DESCRIPTION_CHARS,
+};
 pub use ctx::{
-    ApproveDirFn, AutoModeFn, AutoModeHintHandle, AutoModeHints, AutoModeOutcome, ConfirmFn,
-    ConfirmPrompt, ConfirmReason, DirApproval, ExecCtx, ExecImage, ExecOptions, ExecResult,
-    GrantedDir, JobAcquireFn, JobReleaseFn, ModelsFn, RecallFn, ResultFn, SubagentFn, SubagentOp,
-    ToolEvent, DEFAULT_GUEST_TIMEOUT,
+    ApproveDirFn, AutoModeFn, AutoModeHintHandle, AutoModeHints, AutoModeHintsHandle,
+    AutoModeOutcome, AutoModeQuery, ConfirmFn, ConfirmPrompt, ConfirmReason, DirApproval, ExecCtx,
+    ExecImage, ExecOptions, ExecResult, GrantedDir, JobAcquireFn, JobReleaseFn, ModelsFn, RecallFn,
+    ResultFn, SubagentFn, SubagentOp, ToolEvent, DEFAULT_GUEST_TIMEOUT,
 };
 pub use run::exec;
 pub use tools::fs::canonicalize_up;

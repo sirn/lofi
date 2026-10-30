@@ -242,6 +242,13 @@ impl crate::backend::Backend for ReplyBackend {
 /// Long enough that no reply in these tests reaches it.
 const EVALUATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+fn query(command: &str) -> lofi_code::AutoModeQuery {
+    lofi_code::AutoModeQuery {
+        command: command.to_string(),
+        intent: None,
+    }
+}
+
 async fn evaluate(reply: &'static str, hints: lofi_code::AutoModeHints) -> AutoModeOutcome {
     let evaluator: crate::backend::BackendRef = Arc::new(ReplyBackend {
         reply,
@@ -249,7 +256,7 @@ async fn evaluate(reply: &'static str, hints: lofi_code::AutoModeHints) -> AutoM
     });
     evaluate_command(
         &evaluator,
-        "jj abandon",
+        &query("jj abandon"),
         std::path::Path::new("/repo"),
         None,
         EVALUATION_TIMEOUT,
@@ -335,7 +342,7 @@ async fn run_prompt(agent: &Agent, messages: &mut Vec<Message>, prompt: &str) {
 }
 
 fn stored_hints(agent: &Agent) -> lofi_code::AutoModeHints {
-    agent.auto_mode_hints().lock().unwrap().clone()
+    agent.auto_mode_hints().snapshot()
 }
 
 #[test]
@@ -377,7 +384,7 @@ fn a_child_inherits_the_user_request_of_the_parent_session() {
     );
 
     // What the parent's turn loop stores for the current request.
-    *agent.auto_mode_hints().lock().unwrap() = lofi_code::AutoModeHints {
+    *agent.auto_mode_hints().hints.lock().unwrap() = lofi_code::AutoModeHints {
         prompt: Some("ship the 1.2 release".to_string()),
         ..lofi_code::AutoModeHints::default()
     };
@@ -386,14 +393,14 @@ fn a_child_inherits_the_user_request_of_the_parent_session() {
         &support,
         crate::agent::subagent::inherited_request(backend),
     );
-    let child_hints = executor.auto_mode_hints.lock().unwrap().clone();
+    let child_hints = executor.auto_mode_hints.snapshot();
     assert_eq!(
         child_hints.root_request.as_deref(),
         Some("ship the 1.2 release")
     );
 
     // A nested child inherits the root request, not its parent's task.
-    *agent.auto_mode_hints().lock().unwrap() = lofi_code::AutoModeHints {
+    *agent.auto_mode_hints().hints.lock().unwrap() = lofi_code::AutoModeHints {
         root_request: Some("ship the 1.2 release".to_string()),
         parent_task: Some("push the tag".to_string()),
         ..lofi_code::AutoModeHints::default()
@@ -500,7 +507,7 @@ async fn the_configured_timeout_reaches_the_evaluator() {
     );
 
     assert_eq!(
-        evaluate("jj abandon".to_string()).await,
+        evaluate(query("jj abandon")).await,
         AutoModeOutcome::Failed {
             reason: "evaluation timed out after 20 ms".into()
         }
@@ -593,7 +600,7 @@ async fn the_decision_gate_allows_a_safe_command() {
         std::time::Duration::from_secs(5),
     );
     assert!(matches!(
-        gate("cargo test".to_string()).await,
+        gate(query("cargo test")).await,
         AutoModeOutcome::Allow { .. }
     ));
 }
@@ -618,7 +625,7 @@ async fn the_decision_gate_asks_on_a_destructive_command() {
         std::time::Duration::from_secs(5),
     );
     assert!(matches!(
-        gate("rm -rf build".to_string()).await,
+        gate(query("rm -rf build")).await,
         AutoModeOutcome::Ask { .. }
     ));
 }
@@ -634,7 +641,7 @@ async fn the_decision_gate_falls_back_to_the_prompt_on_timeout() {
         std::time::Duration::from_millis(20),
     );
     assert_eq!(
-        gate("jj abandon".to_string()).await,
+        gate(query("jj abandon")).await,
         AutoModeOutcome::Failed {
             reason: "decision call timed out after 20 ms".into()
         }
@@ -662,11 +669,11 @@ fn scripted_gate(
     seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 ) -> lofi_code::AutoModeFn {
     let outcomes = std::sync::Arc::new(std::sync::Mutex::new(outcomes));
-    std::sync::Arc::new(move |command: String| {
+    std::sync::Arc::new(move |query: lofi_code::AutoModeQuery| {
         let outcomes = outcomes.clone();
         let seen = seen.clone();
         Box::pin(async move {
-            seen.lock().unwrap().push(command);
+            seen.lock().unwrap().push(query.command);
             outcomes.lock().unwrap().remove(0)
         })
             as std::pin::Pin<Box<dyn std::future::Future<Output = AutoModeOutcome> + Send + Sync>>
@@ -697,14 +704,14 @@ async fn the_chat_stage_sees_only_what_the_decision_gate_refuses() {
         ),
     );
     assert!(matches!(
-        staged("cargo test".to_string()).await,
+        staged(query("cargo test")).await,
         AutoModeOutcome::Allow { .. }
     ));
     assert_eq!(decision_seen.lock().unwrap().len(), 1);
     assert!(chat_seen.lock().unwrap().is_empty());
 
     // The refused command reaches the chat stage, whose verdict stands.
-    match staged("exa search rust release notes".to_string()).await {
+    match staged(query("exa search rust release notes")).await {
         AutoModeOutcome::Ask { reason } => {
             assert!(reason.contains("known=0.35"), "{reason}");
         }
@@ -730,7 +737,7 @@ async fn the_chat_stage_allows_what_the_decision_gate_asked_on() {
         ),
     );
     assert!(matches!(
-        staged("exa search rust release notes".to_string()).await,
+        staged(query("exa search rust release notes")).await,
         AutoModeOutcome::Allow { .. }
     ));
 }
@@ -748,7 +755,7 @@ async fn the_chat_stage_never_runs_after_a_decision_allow() {
         scripted_gate(vec![], chat_seen.clone()),
     );
     assert!(matches!(
-        staged("uptime".to_string()).await,
+        staged(query("uptime")).await,
         AutoModeOutcome::Allow { .. }
     ));
     assert!(chat_seen.lock().unwrap().is_empty());
@@ -764,7 +771,7 @@ async fn a_transport_error_fails_the_gate_closed() {
         None,
         &crate::agent::auto_mode::hint_handle(),
     );
-    match gate("jj abandon".to_string()).await {
+    match gate(query("jj abandon")).await {
         AutoModeOutcome::Failed { reason } => {
             assert!(reason.contains("unreachable"), "{reason}");
         }
@@ -783,7 +790,7 @@ async fn an_oversized_command_asks_without_a_call() {
         std::time::Duration::from_secs(5),
     );
     let long = "x".repeat(8 * 1024 + 1);
-    let outcome = gate(long).await;
+    let outcome = gate(query(&long)).await;
     assert!(matches!(outcome, AutoModeOutcome::Ask { .. }));
     assert!(fake.calls.lock().unwrap().is_empty());
 }

@@ -1,7 +1,7 @@
 use futures::StreamExt;
 use lofi_code::policy::auto_mode::{self, AutoModeRisk};
 use lofi_code::policy::decision;
-use lofi_code::{AutoModeFn, AutoModeHintHandle, AutoModeHints, AutoModeOutcome};
+use lofi_code::{AutoModeFn, AutoModeHintHandle, AutoModeHints, AutoModeOutcome, AutoModeQuery};
 use lofi_types::{AutoModeConfig, Config, ContentBlock, Message, PromptKind, Role};
 use std::sync::Arc;
 
@@ -271,15 +271,13 @@ pub fn build_decision_auto_mode(
     });
 
     let hints = hints.clone();
-    Arc::new(move |command: String| {
+    Arc::new(move |query: AutoModeQuery| {
         let gate = gate.clone();
-        let turn = hints
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let turn = hints.snapshot();
         Box::pin(async move {
-            let handle =
-                tokio::task::spawn(async move { evaluate_decision(&gate, &command, &turn).await });
+            let handle = tokio::task::spawn(async move {
+                evaluate_decision(&gate, &query.command, &turn, query.intent.as_deref()).await
+            });
             let mut abort_on_drop = AbortOnDrop(Some(handle.abort_handle()));
             let outcome = match handle.await {
                 Ok(outcome) => outcome,
@@ -312,15 +310,15 @@ fn outcome_reason(outcome: &AutoModeOutcome) -> &str {
 /// prompt carrying both reasons.
 #[must_use]
 pub fn chat_stage_after_decision(decision: AutoModeFn, chat: AutoModeFn) -> AutoModeFn {
-    Arc::new(move |command: String| {
+    Arc::new(move |query: AutoModeQuery| {
         let decision = decision.clone();
         let chat = chat.clone();
         Box::pin(async move {
-            let first = decision(command.clone()).await;
+            let first = decision(query.clone()).await;
             if let AutoModeOutcome::Allow { reason } = first {
                 return AutoModeOutcome::Allow { reason };
             }
-            let second = chat(command).await;
+            let second = chat(query).await;
             match second {
                 AutoModeOutcome::Allow { reason } => AutoModeOutcome::Allow { reason },
                 AutoModeOutcome::Ask { reason } => AutoModeOutcome::Ask {
@@ -345,10 +343,11 @@ async fn evaluate_decision(
     gate: &DecisionGate,
     command: &str,
     turn: &AutoModeHints,
+    intent: Option<&str>,
 ) -> AutoModeOutcome {
     // A command is never sent cut: a truncated command can hide its
     // dangerous tail, so an oversized one asks without a network call.
-    let state = match decision::build_state(command, &gate.cwd, &gate.skill_dirs, turn) {
+    let state = match decision::build_state(command, &gate.cwd, &gate.skill_dirs, turn, intent) {
         Ok(state) => state,
         Err(too_long) => {
             return AutoModeOutcome::Ask {
@@ -413,7 +412,7 @@ async fn evaluate_decision(
 /// cannot read the hints of the session that spawned it.
 #[must_use]
 pub fn hint_handle() -> AutoModeHintHandle {
-    Arc::new(std::sync::Mutex::new(AutoModeHints::default()))
+    Arc::new(lofi_code::AutoModeHintsHandle::default())
 }
 
 /// Abort a spawned provider evaluation if the surrounding auto-mode future is
@@ -462,19 +461,16 @@ pub fn build_auto_mode(
     }
 
     let hints = hints.clone();
-    Arc::new(move |command: String| {
+    Arc::new(move |query: AutoModeQuery| {
         let evaluator = evaluator.clone();
         let cwd = cwd.clone();
         let skill_dirs = skill_dirs.clone();
-        let turn = hints
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let turn = hints.snapshot();
         Box::pin(async move {
             let handle = tokio::task::spawn(async move {
                 evaluate_command(
                     &evaluator,
-                    &command,
+                    &query,
                     &cwd,
                     max_tokens,
                     timeout,
@@ -499,19 +495,25 @@ pub fn build_auto_mode(
 
 pub(super) async fn evaluate_command(
     evaluator: &BackendRef,
-    command: &str,
+    query: &AutoModeQuery,
     cwd: &std::path::Path,
     max_tokens: Option<u64>,
     timeout: std::time::Duration,
     skill_dirs: &[std::path::PathBuf],
     turn: &AutoModeHints,
 ) -> AutoModeOutcome {
+    let AutoModeQuery { command, intent } = &query;
     let skill_dirs: Vec<&std::path::Path> =
         skill_dirs.iter().map(std::path::PathBuf::as_path).collect();
     // The system message is the same on every call so the provider's prompt
     // cache covers it; only the user message changes per command.
-    let user =
-        auto_mode::build_user_message(command, &cwd.display().to_string(), &skill_dirs, turn);
+    let user = auto_mode::build_user_message(
+        command,
+        &cwd.display().to_string(),
+        &skill_dirs,
+        turn,
+        intent.as_deref(),
+    );
 
     let started = std::time::Instant::now();
     let request = crate::backend::CompletionRequest {

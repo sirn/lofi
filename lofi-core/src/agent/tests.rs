@@ -95,6 +95,31 @@ struct CompletedRoundThenPartialProvider {
     first: std::sync::Mutex<Option<Vec<StreamingEvent>>>,
 }
 
+/// A provider whose later rounds replay a fixed partial stream, so a run can
+/// be cancelled mid-round with chosen blocks already accepted.
+struct CompletedRoundThenFixedPartialProvider {
+    first: std::sync::Mutex<Option<Vec<StreamingEvent>>>,
+    partial: Vec<StreamingEvent>,
+}
+
+#[async_trait]
+impl Provider for CompletedRoundThenFixedPartialProvider {
+    async fn stream(
+        &self,
+        _model: &Model,
+        _messages: &[Message],
+        _tools: &[ToolSchema],
+    ) -> Result<futures::stream::BoxStream<'static, Result<StreamingEvent>>> {
+        let first = self.first.lock().unwrap().take();
+        match first {
+            Some(events) => Ok(Box::pin(stream::iter(events.into_iter().map(Ok)))),
+            None => Ok(Box::pin(
+                stream::iter(self.partial.clone().into_iter().map(Ok)).chain(stream::pending()),
+            )),
+        }
+    }
+}
+
 #[async_trait]
 impl Provider for CompletedRoundThenPartialProvider {
     async fn stream(
@@ -234,7 +259,7 @@ fn exec_round(code: &str) -> Vec<StreamingEvent> {
         },
         StreamingEvent::ToolUseInputDelta {
             id: "t1".to_string(),
-            delta: serde_json::json!({ "code": code }).to_string(),
+            delta: serde_json::json!({ "code": code, "description": "run code" }).to_string(),
         },
         StreamingEvent::ToolUseEnd {
             id: "t1".to_string(),
@@ -265,7 +290,8 @@ fn productive_tool_round(id: usize) -> Vec<StreamingEvent> {
         },
         StreamingEvent::ToolUseInputDelta {
             id: format!("t{id}"),
-            delta: serde_json::json!({ "code": format!("return {id}") }).to_string(),
+            delta: serde_json::json!({ "code": format!("return {id}"), "description": "run code" })
+                .to_string(),
         },
         StreamingEvent::ToolUseEnd {
             id: format!("t{id}"),

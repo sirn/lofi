@@ -150,6 +150,7 @@ pub async fn run(
     {
         let mut handle = executor
             .auto_mode_hints
+            .hints
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut hints = super::auto_mode::derive_hints(messages, current_request);

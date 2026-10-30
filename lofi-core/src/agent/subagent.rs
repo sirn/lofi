@@ -2171,11 +2171,8 @@ pub(super) fn isolate_auto_mode(executor: &mut ToolExecutor, support: &SubagentS
 /// so a spawn call can never supply it.
 pub(super) fn inherited_request(template: &dyn Backend) -> Option<String> {
     let executor = template.tool_executor();
-    let hints = executor
-        .auto_mode_hints
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    hints.root_request.clone().or_else(|| hints.prompt.clone())
+    let hints = executor.auto_mode_hints.snapshot();
+    hints.root_request.or(hints.prompt)
 }
 
 pub(super) fn child_executor(
@@ -2195,6 +2192,7 @@ pub(super) fn child_executor(
     if let Some(request) = root_request {
         *executor
             .auto_mode_hints
+            .hints
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = lofi_code::AutoModeHints {
             root_request: Some(request),

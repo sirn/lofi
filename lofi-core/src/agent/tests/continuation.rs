@@ -428,7 +428,7 @@ async fn max_tokens_truncated_tool_call_is_closed_and_valid_calls_still_run() {
         },
         StreamingEvent::ToolUseInputDelta {
             id: "t_cut".into(),
-            delta: r#"{"code":"#.into(),
+            delta: r#"{"description":"run","code":"#.into(),
         },
         StreamingEvent::ToolUseStart {
             id: "t_ok".into(),
@@ -436,7 +436,7 @@ async fn max_tokens_truncated_tool_call_is_closed_and_valid_calls_still_run() {
         },
         StreamingEvent::ToolUseInputDelta {
             id: "t_ok".into(),
-            delta: r#"{"code":"return 2"}"#.into(),
+            delta: r#"{"description":"run","code":"return 2"}"#.into(),
         },
         StreamingEvent::Done {
             usage: Usage::default(),
@@ -662,7 +662,8 @@ async fn run_continuation_persists_completed_round_before_next_round_settles() {
         b"{\"type\":\"meta\",\"version\":1,\"created\":0,\"cwd\":\"\",\"model\":\"m\"}\n",
     )
     .unwrap();
-    let tool_input = serde_json::json!({ "code": "return 1" }).to_string();
+    let tool_input =
+        serde_json::json!({ "code": "return 1", "description": "run code" }).to_string();
     let first_round = vec![
         StreamingEvent::ToolUseStart {
             id: "t1".to_string(),
@@ -718,7 +719,8 @@ async fn cancelled_run_persists_partial_output_as_aborted_turn() {
     let dir = tempdir().unwrap();
     let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
     let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
-    let tool_input = serde_json::json!({ "code": "return 1" }).to_string();
+    let tool_input =
+        serde_json::json!({ "code": "return 1", "description": "run code" }).to_string();
     let first_round = vec![
         StreamingEvent::ToolUseStart {
             id: "t1".to_string(),
@@ -816,9 +818,119 @@ async fn cancelled_run_persists_partial_output_as_aborted_turn() {
 }
 
 #[tokio::test]
+async fn a_cancelled_round_keeps_the_partial_tool_use_capped() {
+    let dir = tempdir().unwrap();
+    let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
+    let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
+    let first_round = vec![
+        StreamingEvent::ToolUseStart {
+            id: "t1".to_string(),
+            name: "exec".to_string(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t1".to_string(),
+            delta: serde_json::json!({ "code": "return 1", "description": "run code" }).to_string(),
+        },
+        StreamingEvent::ToolUseEnd {
+            id: "t1".to_string(),
+        },
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: None,
+        },
+    ];
+    let long = format!("{} end", "d".repeat(400));
+    let partial_round = vec![
+        StreamingEvent::ToolUseStart {
+            id: "t2".to_string(),
+            name: "exec".to_string(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t2".to_string(),
+            delta: serde_json::json!({ "code": "return 2", "description": long }).to_string(),
+        },
+        StreamingEvent::ToolUseEnd {
+            id: "t2".to_string(),
+        },
+        StreamingEvent::TextDelta("partial answer".into()),
+    ];
+    let agent = Agent {
+        provider: Arc::new(CompletedRoundThenFixedPartialProvider {
+            first: std::sync::Mutex::new(Some(first_round)),
+            partial: partial_round,
+        }),
+        ..agent_with(Vec::new(), dir.path())
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    {
+        let run = agent.run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
+            tx,
+            Some(&cursor),
+            RunControls {
+                cancel: Some(cancel.clone()),
+                preempt: None,
+            },
+        );
+        tokio::pin!(run);
+
+        loop {
+            let event = tokio::select! {
+                result = run.as_mut() => panic!("run settled before cancellation: {result:?}"),
+                event = rx.recv() => event.unwrap_or_else(|| panic!("run event channel closed")),
+            };
+            if matches!(event, AgentEvent::Text(ref text) if text == "partial answer") {
+                break;
+            }
+        }
+        cancel.store(true, Ordering::Relaxed);
+        run.as_mut().await.unwrap();
+    }
+    while let Some(event) = rx.recv().await {
+        if matches!(event, AgentEvent::TurnCancelled { .. }) {
+            break;
+        }
+    }
+
+    // The partial assistant message keeps the tool use, with the
+    // description capped exactly as a settled round would record it.
+    let partial = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::Assistant)
+        .unwrap();
+    let tool_use = partial
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::ToolUse { input, .. } => Some(input.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let description = tool_use["description"].as_str().unwrap();
+    assert!(description.starts_with("ddd"), "{description}");
+    assert!(description.ends_with(" [...truncated]"), "{description}");
+
+    let events = cursor.load_events().unwrap();
+    assert!(events.iter().any(|event| matches!(&event.kind,
+        SessionEventKind::Message(message)
+            if message.role == Role::Assistant
+                && message.blocks.iter().any(|block| matches!(
+                    block,
+                    ContentBlock::ToolUse { input, .. }
+                        if input["description"].as_str().is_some_and(|d| d.ends_with(" [...truncated]"))
+                ))
+    )));
+}
+
+#[tokio::test]
 async fn run_continuation_force_stops_at_hard_cap() {
     let dir = tempdir().unwrap();
-    let tool_input = serde_json::json!({ "code": "return 1" }).to_string();
+    let tool_input =
+        serde_json::json!({ "code": "return 1", "description": "run code" }).to_string();
     let tool_round = |input_tokens| {
         vec![
             StreamingEvent::ToolUseStart {
@@ -1029,7 +1141,8 @@ async fn run_continuation_image_byte_pressure_stops_before_send() {
 async fn run_once_tool_error_marks_result_error() {
     let dir = tempdir().unwrap();
     let tool_input =
-        serde_json::json!({ "code": "await lofi.read('../escape'); return 1;" }).to_string();
+        serde_json::json!({ "code": "await lofi.read('../escape'); return 1;", "description": "read escape" })
+            .to_string();
     let round1 = vec![
         StreamingEvent::ToolUseStart {
             id: "t1".to_string(),

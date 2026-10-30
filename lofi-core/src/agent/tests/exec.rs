@@ -57,21 +57,21 @@ fn parse_exec_input_extracts_fields() {
     let input = serde_json::json!({
         "code": "return 1",
         "strings": { "a": "x", "b": 2 },
-        "display": { "hint": "row" }
+        "description": "count things"
     });
-    let (code, strings, display) = parse_exec_input(&input);
+    let (code, strings, description) = parse_exec_input(&input);
     assert_eq!(code, "return 1");
     assert_eq!(strings.get("a").unwrap(), "x");
     assert_eq!(strings.get("b").unwrap(), "2");
-    assert_eq!(display["hint"], "row");
+    assert_eq!(description, "count things");
 }
 
 #[test]
 fn parse_exec_input_missing_code_is_empty() {
-    let (code, strings, display) = parse_exec_input(&serde_json::Value::Null);
+    let (code, strings, description) = parse_exec_input(&serde_json::Value::Null);
     assert!(code.is_empty());
     assert!(strings.is_empty());
-    assert!(display.is_null());
+    assert!(description.is_empty());
 }
 
 #[test]
@@ -79,6 +79,91 @@ fn parse_exec_input_trims_surrounding_newlines() {
     let input = serde_json::json!({ "code": "\nreturn 1\n" });
     let (code, _, _) = parse_exec_input(&input);
     assert_eq!(code, "return 1");
+}
+
+#[test]
+fn exec_input_code_and_label_reads_the_description() {
+    let input = serde_json::json!({ "code": "return 1", "description": "count things" });
+    assert_eq!(
+        exec_input_code_and_label(&input),
+        ("return 1".to_string(), Some("count things".to_string()))
+    );
+}
+
+#[test]
+fn a_long_description_is_capped_with_its_head_kept() {
+    let long = format!("{} end", "d".repeat(400));
+    let input = serde_json::json!({ "code": "return 1", "description": long });
+    let (_, _, description) = parse_exec_input(&input);
+    assert!(description.ends_with(" [...truncated]"));
+    assert!(description.starts_with("ddd"));
+    assert!(description.chars().count() < 230);
+}
+
+#[test]
+fn normalize_exec_input_caps_a_long_description() {
+    let long = format!("{} end", "d".repeat(400));
+    let input = serde_json::json!({ "code": "return 1", "description": long });
+    let normalized = normalize_exec_input(&input);
+    let description = normalized["description"].as_str().unwrap();
+    assert!(description.starts_with("ddd"));
+    assert!(description.ends_with(" [...truncated]"));
+}
+
+#[test]
+fn normalize_exec_input_drops_a_non_string_description() {
+    let input = serde_json::json!({
+        "code": "return 1",
+        "description": serde_json::json!(["not", "a", "string"]),
+    });
+    let normalized = normalize_exec_input(&input);
+    assert!(normalized.get("description").is_none());
+}
+
+#[tokio::test]
+async fn the_recorded_tool_use_carries_the_capped_description() {
+    let dir = tempdir().unwrap();
+    let executor = crate::agent::tool_executor::ToolExecutor::new(
+        dir.path(),
+        &lofi_types::Config::default(),
+        &[],
+    )
+    .unwrap();
+    let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink: std::sync::Arc<dyn Fn(ContentBlock) -> lofi_error::Result<()> + Send + Sync> = {
+        let recorded = recorded.clone();
+        std::sync::Arc::new(move |block| {
+            recorded.lock().unwrap().push(block);
+            Ok(())
+        })
+    };
+    let context = crate::agent::tool_executor::ToolCallContext {
+        record_tool: Some(sink),
+        ..Default::default()
+    };
+    let long = format!("{} end", "d".repeat(400));
+    executor
+        .execute(
+            lofi_code::EXEC_TOOL_NAME,
+            &serde_json::json!({ "code": "return 1", "description": long }),
+            context,
+        )
+        .await
+        .unwrap();
+    let recorded = recorded.lock().unwrap().clone();
+    let [ContentBlock::ToolUse { input, .. }, _] = &recorded[..] else {
+        panic!("expected the tool use then the result: {recorded:?}");
+    };
+    let description = input["description"].as_str().unwrap();
+    assert!(description.starts_with("ddd"));
+    assert!(description.ends_with(" [...truncated]"));
+}
+
+#[test]
+fn exec_label_trims_and_rejects_blank() {
+    assert_eq!(exec_label("  do thing  "), Some("do thing".to_string()));
+    assert_eq!(exec_label("   "), None);
+    assert_eq!(exec_label(""), None);
 }
 
 #[test]
@@ -104,7 +189,7 @@ fn extract_code_prefix_streams_and_trims_leading_newline() {
         (r#"{"code":"\nle"#, "le"),
         (r#"{"code":"\nlet x"#, "let x"),
         (r#"{"code":"\nlet x\nlet y"#, "let x\nlet y"),
-        (r#"{"display":"z","code":"\nlet x"#, "let x"),
+        (r#"{"description":"z","code":"\nlet x"#, "let x"),
     ];
     for (raw, want) in cases {
         assert_eq!(extract_code_prefix(raw), want, "raw: {raw}");

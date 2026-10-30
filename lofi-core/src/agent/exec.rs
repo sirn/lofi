@@ -221,9 +221,7 @@ pub(crate) fn extract_code_prefix(raw: &str) -> String {
     String::new()
 }
 
-pub fn parse_exec_input(
-    input: &serde_json::Value,
-) -> (String, HashMap<String, String>, serde_json::Value) {
+pub fn parse_exec_input(input: &serde_json::Value) -> (String, HashMap<String, String>, String) {
     let code = input
         .get("code")
         .and_then(serde_json::Value::as_str)
@@ -240,36 +238,66 @@ pub fn parse_exec_input(
             strings.insert(k.clone(), s);
         }
     }
-    let display = input
-        .get("display")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    (code, strings, display)
+    let description = cap_description(
+        input
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(""),
+    );
+    (code, strings, description)
+}
+
+use lofi_code::{DESCRIPTION_CUT_MARKER, MAX_DESCRIPTION_CHARS};
+
+/// Trim, then keep the head with a cut marker: a description states its
+/// purpose up front.
+pub(crate) fn cap_description(text: &str) -> String {
+    let text = text.trim();
+    if text.chars().count() <= MAX_DESCRIPTION_CHARS {
+        return text.to_string();
+    }
+    let end = text
+        .char_indices()
+        .nth(MAX_DESCRIPTION_CHARS)
+        .map_or(text.len(), |(i, _)| i);
+    format!("{}{DESCRIPTION_CUT_MARKER}", &text[..end])
+}
+
+/// Cap the description of a recorded exec call, so the transcript and
+/// every later provider request carry the bounded text the label and the
+/// intent come from.
+#[must_use]
+pub fn normalize_exec_input(input: &serde_json::Value) -> serde_json::Value {
+    let mut out = input.clone();
+    if let Some(obj) = out.as_object_mut() {
+        match obj.get("description") {
+            Some(serde_json::Value::String(description)) => {
+                obj.insert(
+                    "description".to_string(),
+                    serde_json::Value::String(cap_description(description)),
+                );
+            }
+            // A description of another type is dropped: the call is rejected
+            // as missing one, so the transcript must not retain the value.
+            Some(_) => {
+                obj.remove("description");
+            }
+            None => {}
+        }
+    }
+    out
 }
 
 #[must_use]
-pub fn exec_label(display: &serde_json::Value) -> Option<String> {
-    if let Some(s) = display.as_str() {
-        let s = s.trim();
-        return (!s.is_empty()).then(|| s.to_string());
-    }
-    if let Some(obj) = display.as_object() {
-        for key in ["name", "title", "description", "task"] {
-            if let Some(s) = obj.get(key).and_then(|v| v.as_str()) {
-                let s = s.trim();
-                if !s.is_empty() {
-                    return Some(s.to_string());
-                }
-            }
-        }
-    }
-    None
+pub fn exec_label(description: &str) -> Option<String> {
+    let s = description.trim();
+    (!s.is_empty()).then(|| s.to_string())
 }
 
 #[must_use]
 pub fn exec_input_code_and_label(input: &serde_json::Value) -> (String, Option<String>) {
-    let (code, _strings, display) = parse_exec_input(input);
-    (code, exec_label(&display))
+    let (code, _strings, description) = parse_exec_input(input);
+    (code, exec_label(&description))
 }
 
 #[must_use]

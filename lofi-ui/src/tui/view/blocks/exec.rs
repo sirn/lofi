@@ -33,10 +33,6 @@ impl ExecBlock<'_> {
         let t = cx.theme;
         let mut out = RenderWindow::new(range);
 
-        let header = match &self.tool.label {
-            Some(l) if !l.is_empty() => format!("Exec {l}"),
-            _ => "Exec".to_string(),
-        };
         let status_color = if !self.tool.done {
             active_indicator(t)
         } else if self.tool.is_error {
@@ -61,21 +57,31 @@ impl ExecBlock<'_> {
         let total = code
             .as_deref()
             .map_or(0, |code| detail_row_count(code, cx.width, &code_deco));
-        let content = vec![Span::styled(
-            header,
+        let mut content = vec![Span::styled(
+            "Exec",
             Style::new().fg(t.fg).add_modifier(Modifier::BOLD),
         )];
-        let mut header = prim::rline(
-            vec![
-                Span::raw("  "),
-                Span::styled("· ", Style::new().fg(status_color)),
-            ],
-            content,
-        );
-        if has_detail {
-            header = header.with_detail(key.clone(), total, false);
+        if let Some(label) = self.tool.label.as_deref().filter(|l| !l.is_empty()) {
+            content.push(Span::styled(format!(" {label}"), Style::new().fg(t.fg)));
         }
-        out.push(header);
+        let header_deco = vec![
+            Span::raw("  "),
+            Span::styled("· ", Style::new().fg(status_color)),
+        ];
+        // Hang wrapped label rows under the label start, after "Exec ".
+        let cont_deco = vec![Span::raw("  "), Span::raw(" ".repeat(7))];
+        let mut header = prim::rline_wrapped(header_deco, &cont_deco, content, cx.width);
+        if has_detail {
+            for line in &mut header {
+                line.detail = Some(prim::DetailTarget {
+                    key: key.clone(),
+                    total,
+                    tail: false,
+                    row: None,
+                });
+            }
+        }
+        out.extend(header);
         if let Some(code) = code {
             out.extend(detail_box(
                 &code,

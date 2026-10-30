@@ -665,7 +665,7 @@ async fn without_subagent_makes_models_unavailable_in_the_sandbox() {
     let out = executor
         .execute(
             lofi_code::EXEC_TOOL_NAME,
-            &json!({ "code": "return lofi.models()" }),
+            &json!({ "code": "return lofi.models()", "description": "list models" }),
             context,
         )
         .await
@@ -804,12 +804,12 @@ async fn parent_turn_records_and_reports_subagent_spend() {
         },
         StreamingEvent::ToolUseInputDelta {
             id: "t1".into(),
-            delta: r#"{"code":"const r = await lofi.subagent({ prompt: 'x' }); return r.status;"}"#
+            delta: r#"{"description":"run subagent","code":"const r = await lofi.subagent({ prompt: 'x' }); return r.status;"}"#
                 .into(),
         },
         StreamingEvent::ToolUseInputComplete {
             id: "t1".into(),
-            input: r#"{"code":"const r = await lofi.subagent({ prompt: 'x' }); return r.status;"}"#
+            input: r#"{"description":"run subagent","code":"const r = await lofi.subagent({ prompt: 'x' }); return r.status;"}"#
                 .into(),
         },
         StreamingEvent::ToolUseEnd { id: "t1".into() },
@@ -1929,7 +1929,7 @@ async fn a_child_reaches_the_parent_mailbox_from_its_own_sandbox() {
         },
         StreamingEvent::ToolUseInputComplete {
             id: "p1".into(),
-            input: json!({ "code": "const run = await lofi.subagent({ prompt: 'x' }); const got = await lofi.subagentMailboxReceive({ wait_ms: 500 }); return { status: run.status, messages: got.messages };" }).to_string(),
+            input: json!({ "code": "const run = await lofi.subagent({ prompt: 'x' }); const got = await lofi.subagentMailboxReceive({ wait_ms: 500 }); return { status: run.status, messages: got.messages };", "description": "run subagent" }).to_string(),
         },
         StreamingEvent::ToolUseEnd { id: "p1".into() },
         StreamingEvent::Done {
@@ -1944,7 +1944,7 @@ async fn a_child_reaches_the_parent_mailbox_from_its_own_sandbox() {
         },
         StreamingEvent::ToolUseInputComplete {
             id: "c1".into(),
-            input: json!({ "code": "const r = await lofi.subagentMailboxSend({ to: 'parent', body: 'from child' }); return r.ok;" }).to_string(),
+            input: json!({ "code": "const r = await lofi.subagentMailboxSend({ to: 'parent', body: 'from child' }); return r.ok;", "description": "send mailbox message" }).to_string(),
         },
         StreamingEvent::ToolUseEnd { id: "c1".into() },
         StreamingEvent::Done {

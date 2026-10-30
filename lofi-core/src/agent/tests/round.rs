@@ -224,6 +224,221 @@ async fn run_once_exec_reports_unawaited_bash_failure() {
 }
 
 #[tokio::test]
+async fn run_once_exec_without_description_is_rejected() {
+    let dir = tempdir().unwrap();
+    let round = vec![
+        StreamingEvent::ToolUseStart {
+            id: "t1".to_string(),
+            name: "exec".to_string(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t1".to_string(),
+            delta: serde_json::json!({ "code": "return 1" }).to_string(),
+        },
+        StreamingEvent::ToolUseEnd {
+            id: "t1".to_string(),
+        },
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::ToolUse),
+        },
+    ];
+    let agent = agent_with(vec![round], dir.path());
+    let mut messages = vec![user_msg("go")];
+
+    assert!(!agent.run_once(&mut messages).await.unwrap());
+    let ContentBlock::ToolResult {
+        content, is_error, ..
+    } = &messages[2].blocks[0]
+    else {
+        panic!("expected tool_result");
+    };
+    assert!(*is_error);
+    assert_eq!(content, "exec: missing required 'description' argument");
+}
+
+#[tokio::test]
+async fn run_once_exec_with_blank_description_is_rejected() {
+    let dir = tempdir().unwrap();
+    let round = vec![
+        StreamingEvent::ToolUseStart {
+            id: "t1".to_string(),
+            name: "exec".to_string(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t1".to_string(),
+            delta: serde_json::json!({
+                "code": "return 1",
+                "description": "   "
+            })
+            .to_string(),
+        },
+        StreamingEvent::ToolUseEnd {
+            id: "t1".to_string(),
+        },
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::ToolUse),
+        },
+    ];
+    let agent = agent_with(vec![round], dir.path());
+    let mut messages = vec![user_msg("go")];
+
+    assert!(!agent.run_once(&mut messages).await.unwrap());
+    let ContentBlock::ToolResult {
+        content, is_error, ..
+    } = &messages[2].blocks[0]
+    else {
+        panic!("expected tool_result");
+    };
+    assert!(*is_error);
+    assert_eq!(content, "exec: missing required 'description' argument");
+}
+
+#[tokio::test]
+async fn run_once_exec_without_code_is_rejected() {
+    let dir = tempdir().unwrap();
+    let round = vec![
+        StreamingEvent::ToolUseStart {
+            id: "t1".to_string(),
+            name: "exec".to_string(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t1".to_string(),
+            delta: serde_json::json!({ "description": "run code" }).to_string(),
+        },
+        StreamingEvent::ToolUseEnd {
+            id: "t1".to_string(),
+        },
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::ToolUse),
+        },
+    ];
+    let agent = agent_with(vec![round], dir.path());
+    let mut messages = vec![user_msg("go")];
+
+    assert!(!agent.run_once(&mut messages).await.unwrap());
+    let ContentBlock::ToolResult {
+        content, is_error, ..
+    } = &messages[2].blocks[0]
+    else {
+        panic!("expected tool_result");
+    };
+    assert!(*is_error);
+    assert_eq!(content, "exec: missing required 'code' argument");
+}
+
+#[tokio::test]
+async fn two_exec_calls_pair_each_command_with_its_own_description() {
+    // The intent travels on the call's own context, so commands of two
+    // calls in one round are never judged against the other call's
+    // description.
+    let dir = tempdir().unwrap();
+    let seen: Arc<std::sync::Mutex<Vec<(String, String)>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let auto: lofi_code::AutoModeFn = {
+        let seen = seen.clone();
+        Arc::new(move |query| {
+            let intent = query.intent.clone().unwrap_or_default();
+            seen.lock().unwrap().push((query.command.clone(), intent));
+            Box::pin(async {
+                lofi_code::AutoModeOutcome::Allow {
+                    reason: "safe".to_string(),
+                }
+            })
+        })
+    };
+    let two_calls = vec![
+        StreamingEvent::ToolUseStart {
+            id: "t1".to_string(),
+            name: "exec".to_string(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t1".to_string(),
+            delta: serde_json::json!({
+                "code": "return (await lofi.bash({ cmd: 'first-cmd' })).ok",
+                "description": "first call"
+            })
+            .to_string(),
+        },
+        StreamingEvent::ToolUseEnd {
+            id: "t1".to_string(),
+        },
+        StreamingEvent::ToolUseStart {
+            id: "t2".to_string(),
+            name: "exec".to_string(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t2".to_string(),
+            delta: serde_json::json!({
+                "code": "return (await lofi.bash({ cmd: 'second-cmd' })).ok",
+                "description": "second call"
+            })
+            .to_string(),
+        },
+        StreamingEvent::ToolUseEnd {
+            id: "t2".to_string(),
+        },
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: None,
+        },
+    ];
+    let agent = Agent {
+        auto_mode: Some(auto),
+        ..agent_with(vec![two_calls], dir.path())
+    };
+    let mut messages = vec![user_msg("go")];
+
+    assert!(!agent.run_once(&mut messages).await.unwrap());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            ("first-cmd".to_string(), "first call".to_string()),
+            ("second-cmd".to_string(), "second call".to_string()),
+        ],
+        "each command must be judged with its own call's description"
+    );
+}
+
+#[tokio::test]
+async fn run_once_exec_description_reaches_the_shell_gate() {
+    // A shell command inside exec is judged with the call's stated
+    // description: the gate reads it as the intent hint.
+    let dir = tempdir().unwrap();
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let auto: lofi_code::AutoModeFn = {
+        let seen = seen.clone();
+        Arc::new(move |query| {
+            *seen.lock().unwrap() = query.intent;
+            Box::pin(async {
+                lofi_code::AutoModeOutcome::Allow {
+                    reason: "safe".to_string(),
+                }
+            })
+        })
+    };
+    let agent = Agent {
+        auto_mode: Some(auto),
+        ..agent_with(
+            vec![exec_round(
+                "return (await lofi.bash({ cmd: 'special-cmd' })).ok",
+            )],
+            dir.path(),
+        )
+    };
+    let mut messages = vec![user_msg("go")];
+
+    assert!(!agent.run_once(&mut messages).await.unwrap());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        Some("run code".to_string()),
+        "the evaluator must see the exec call's description"
+    );
+}
+
+#[tokio::test]
 async fn run_once_stops_at_done_without_polling_stream_again() {
     // A protocol terminal event is sufficient even when the transport keeps
     // the connection open. This is the Responses terminal-stream regression.

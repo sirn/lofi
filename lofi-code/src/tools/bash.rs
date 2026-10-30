@@ -2,6 +2,7 @@ use super::bash_util::{read_capped, PgrpKillGuard};
 use super::truncate::{format_size, truncate_tail_with};
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use crate::ctx::AutoModeQuery;
 use lofi_error::{Error, Result};
 use serde_json::{json, Value};
 use std::fmt::Write as _;
@@ -137,7 +138,10 @@ impl BuiltinTools {
     }
 
     async fn auto_mode_decision(&self, cmd: &str, auto_mode: &crate::AutoModeFn) -> AskVerdict {
-        let mut evaluation = auto_mode(cmd.to_string());
+        let mut evaluation = auto_mode(AutoModeQuery {
+            command: cmd.to_string(),
+            intent: self.intent.clone(),
+        });
         let Some(confirm) = &self.confirm else {
             let outcome = guard_temp_escape(cmd, evaluation.await);
             return matches!(outcome, crate::AutoModeOutcome::Allow { .. }).into();

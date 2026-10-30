@@ -1859,7 +1859,14 @@ fn hard_context_pressure_compacts_and_silently_continues_the_tool_cycle() {
                 .as_str()
                 .is_some_and(|text| text.contains("This summary captures work done"))
     }));
-    assert!(messages.iter().any(|message| message["role"] == "tool"));
+    // Hard pressure can fold the current tool round into the summary; the
+    // result must still reach the model, as a live tool message or inside
+    // the summary.
+    assert!(
+        messages.iter().any(|message| message["role"] == "tool")
+            || request.to_string().contains("hard pressure tool result"),
+        "the tool result must reach the model after hard-pressure compaction"
+    );
 }
 
 #[test]

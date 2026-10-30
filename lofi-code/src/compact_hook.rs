@@ -141,7 +141,7 @@ impl CompactionHook for CodeCompactionHook {
         let mut items: Vec<String> = Vec::new();
 
         items.push(
-            "exec({code, strings?, display?}) — the TypeScript sandbox tool. Call lofi.* methods inside it."
+            "exec({code, description, strings?}) — the TypeScript sandbox tool. Call lofi.* methods inside it."
                 .to_string(),
         );
         seen.insert("exec".to_string());

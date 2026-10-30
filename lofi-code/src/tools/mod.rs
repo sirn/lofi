@@ -102,6 +102,10 @@ pub struct BuiltinTools {
     shell_policy: crate::policy::ResolvedPolicy,
     confirm: Option<crate::ConfirmFn>,
     auto_mode: Option<crate::AutoModeFn>,
+    /// The exec call's stated `description`, carried from the call's
+    /// context so the gate judges the call's commands with the call's own
+    /// intent. `None` outside an exec call.
+    intent: Option<String>,
     /// How long an auto-mode ask prompt waits for the user before auto mode
     /// denies it on its own. `None` disables the auto-deny.
     approval_timeout: Option<std::time::Duration>,
@@ -188,6 +192,7 @@ impl BuiltinTools {
             shell_policy,
             confirm,
             auto_mode,
+            intent: None,
             approval_timeout: None,
             policy_override: crate::policy::PolicyOverride::default(),
             skills_dir,
@@ -202,6 +207,14 @@ impl BuiltinTools {
             on_job_acquired: None,
             truncate: truncate::TruncatedCap::default(),
         }
+    }
+
+    /// Sets the exec call's stated description, so auto mode judges this
+    /// call's shell commands with the call's own intent.
+    #[must_use]
+    pub fn with_intent(mut self, intent: Option<String>) -> Self {
+        self.intent = intent;
+        self
     }
 
     /// Attaches the run's cooperative cancellation flag. Long-running tools

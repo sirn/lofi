@@ -99,7 +99,8 @@ async fn run_continuation_retries_transient_provider_errors() {
 #[tokio::test]
 async fn successful_provider_round_resets_retry_attempt_count() {
     let dir = tempdir().unwrap();
-    let tool_input = serde_json::json!({ "code": "return 1" }).to_string();
+    let tool_input =
+        serde_json::json!({ "code": "return 1", "description": "run code" }).to_string();
     let tool_round = vec![
         StreamingEvent::ToolUseStart {
             id: "t1".to_string(),

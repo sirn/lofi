@@ -18,9 +18,14 @@ fn exec_tool_contract_shape() {
     assert!(EXEC_TOOL_DESCRIPTION.contains("sandboxed QuickJS runtime"));
     let schema = exec_tool_input_schema();
     assert_eq!(schema["properties"]["code"]["type"], "string");
-    assert_eq!(schema["required"], serde_json::json!(["code"]));
+    assert_eq!(
+        schema["required"],
+        serde_json::json!(["code", "description"])
+    );
     assert!(schema["properties"].get("strings").is_some());
-    assert!(schema["properties"].get("display").is_some());
+    assert_eq!(schema["properties"]["description"]["type"], "string");
+    assert!(schema["properties"].get("display").is_none());
+    assert!(EXEC_TOOL_DESCRIPTION.contains("description"));
 }
 
 use tempfile::tempdir;
@@ -41,6 +46,7 @@ fn ctx(root: &std::path::Path) -> ExecCtx {
         approve_dir: None,
         grants: Vec::new(),
         auto_mode: None,
+        intent: None,
         approval_timeout: None,
         policy_override: crate::policy::PolicyOverride::default(),
         skills_dir: None,
@@ -353,6 +359,7 @@ async fn exec_strings_exposed_as_lofi_strings() {
         approve_dir: None,
         grants: Vec::new(),
         auto_mode: None,
+        intent: None,
         approval_timeout: None,
         policy_override: crate::policy::PolicyOverride::default(),
         skills_dir: None,

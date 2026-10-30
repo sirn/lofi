@@ -465,6 +465,60 @@ fn exec_keeps_left_gutter_without_tile_or_vertical_padding() {
 }
 
 #[test]
+fn exec_header_wraps_the_label_and_keeps_it_unbold() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    use ratatui::style::Modifier;
+
+    let mut a = app();
+    a.transcript.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
+        prompt: String::new(),
+        blocks: Vec::new(),
+    });
+    a.apply_event(AgentEvent::ToolStart {
+        id: "e1".into(),
+        name: "exec".into(),
+    });
+    a.apply_event(AgentEvent::ToolInput {
+        id: "e1".into(),
+        code: "lofi.bash({ cmd: 'true' })".into(),
+        label: Some("alpha beta gamma delta epsilon zeta eta theta iota kappa".into()),
+    });
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 36,
+        active_turn: false,
+    };
+    let lines = render_turn_lines(&cx, &a.transcript.turns[0]);
+    assert!(
+        lines.len() > 1,
+        "a long label must wrap onto extra header rows"
+    );
+    for (index, line) in lines.iter().enumerate() {
+        assert_eq!(line.line.spans[0].content, "  ", "two-cell left gutter");
+        if index == 0 {
+            assert!(line.line.to_string().starts_with("  · Exec alpha"));
+        } else {
+            assert_eq!(
+                line.line.spans[1].content,
+                " ".repeat(7),
+                "wrapped rows hang under the label start"
+            );
+        }
+    }
+    for span in lines.iter().flat_map(|line| line.line.spans.iter()) {
+        let bold = span.style.add_modifier.contains(Modifier::BOLD);
+        if span.content.starts_with("Exec") {
+            assert!(bold, "the Exec tag stays bold");
+        } else if !span.content.trim().is_empty() {
+            assert!(!bold, "the label text stays unbold: {span:?}");
+        }
+    }
+}
+
+#[test]
 fn user_shell_renders_as_shell_tree_with_exit_status() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;

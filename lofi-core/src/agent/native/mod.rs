@@ -17,6 +17,20 @@ use super::turn_session::{
 };
 use super::{usage_cost, Agent, AgentEvent};
 
+/// Cap the descriptions the model stated, so the committed transcript and
+/// every later provider request carry the bounded text the label and the
+/// intent come from. Runs on the settled message and on a partial kept
+/// after a cancelled or failed stream, so both record paths stay bounded.
+fn cap_exec_descriptions(blocks: &mut [ContentBlock]) {
+    for block in blocks {
+        if let ContentBlock::ToolUse { name, input, .. } = block {
+            if name == lofi_code::EXEC_TOOL_NAME {
+                *input = crate::agent::normalize_exec_input(input);
+            }
+        }
+    }
+}
+
 /// The provider transport's per-turn state. It must not leak across turns, so
 /// the turn opens one driver per turn.
 pub struct NativeEngine {
@@ -397,6 +411,7 @@ impl Agent {
             // visible output disappear; the rollback decides whether it stays.
             let mut partial = assembler.finish();
             stamp_message_origin(&mut partial, &model);
+            cap_exec_descriptions(&mut partial.blocks);
             if !partial.blocks.is_empty() {
                 messages.push(partial);
             }
@@ -427,6 +442,7 @@ impl Agent {
         let assistant_index = messages.len();
         let mut assistant = assembler.finish();
         stamp_message_origin(&mut assistant, &model);
+        cap_exec_descriptions(&mut assistant.blocks);
         messages.push(assistant);
         let tool_uses: Vec<(String, String, serde_json::Value)> = {
             let assistant = &messages[assistant_index];

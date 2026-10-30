@@ -716,7 +716,8 @@ async fn non_vision_model_warns_once_per_turn_with_image_in_history() {
     // The omit notice must fire exactly once for the whole turn, not once
     // per tool round. Two rounds: a tool-use round then a text round.
     let dir = tempdir().unwrap();
-    let tool_input = serde_json::json!({ "code": "return 1" }).to_string();
+    let tool_input =
+        serde_json::json!({ "code": "return 1", "description": "run code" }).to_string();
     let round1 = vec![
         StreamingEvent::ToolUseStart {
             id: "t1".to_string(),
