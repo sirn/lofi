@@ -303,6 +303,46 @@ fn sessions_prune_deletes_old_sessions_and_keeps_the_rest() {
 }
 
 #[test]
+fn sessions_lists_every_workspace_with_its_directory_when_asked_for_all() {
+    let server = MockServer::start(vec![
+        text_response("workspace list answer"),
+        text_response("nested list answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let nested = fixture.workspace.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    for (cwd, prompt, answer) in [
+        (
+            &fixture.workspace,
+            "workspace list prompt",
+            "workspace list answer",
+        ),
+        (&nested, "nested list prompt", "nested list answer"),
+    ] {
+        let mut tui = fixture.spawn_in(cwd, &[]);
+        tui.submit(prompt);
+        tui.wait_for(answer, WAIT);
+        tui.submit("/quit");
+        tui.wait_exit();
+    }
+
+    let scoped = fixture.output(&["sessions"]);
+    assert!(scoped.status.success());
+    let scoped = String::from_utf8_lossy(&scoped.stdout);
+    assert_eq!(scoped.lines().count(), 1, "{scoped}");
+    assert!(!scoped.contains("nested"), "{scoped}");
+
+    let all = fixture.output(&["sessions", "--all"]);
+    assert!(all.status.success());
+    let all = String::from_utf8_lossy(&all.stdout);
+    assert_eq!(all.lines().count(), 2, "{all}");
+    let nested = std::fs::canonicalize(&nested).unwrap();
+    let nested = nested.to_str().unwrap();
+    assert!(all.contains(nested), "{all}");
+}
+
+#[test]
 fn sessions_prune_stays_in_this_workspace_unless_asked_for_all() {
     let server = MockServer::start(vec![
         text_response("workspace answer"),

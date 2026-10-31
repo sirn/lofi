@@ -43,7 +43,7 @@ See [End-to-end testing](docs/e2e.md) for the current coverage map, architecture
 | Command | Description |
 | --- | --- |
 | `models` | Print `provider/id — name` lines and exit. |
-| `sessions` | Print the saved sessions of this workspace and exit. |
+| `sessions` | Print the saved sessions of this workspace and exit. `--all` covers every workspace and appends each session's directory. |
 | `sessions prune` | Delete old session transcripts. `--delete-older-than <AGE>` defaults to `7d`, `--dry-run` lists without deleting, `--all` covers every workspace instead of this one. |
 | `docs` | Print the embedded API reference index. |
 | `docs search <QUERY>` | Search the embedded API reference. |

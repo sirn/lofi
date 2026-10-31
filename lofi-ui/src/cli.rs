@@ -46,6 +46,9 @@ enum Command {
     /// List the saved sessions of this workspace, or prune saved
     /// sessions.
     Sessions {
+        /// Consider every workspace, not just this directory's sessions
+        #[arg(long)]
+        all: bool,
         #[command(subcommand)]
         cmd: Option<SessionCommand>,
     },
@@ -203,8 +206,8 @@ pub async fn run_cli() -> anyhow::Result<()> {
 async fn run_command(command: Command, root: &std::path::Path) -> anyhow::Result<()> {
     match command {
         Command::Models => list_models().await?,
-        Command::Sessions { cmd } => match cmd {
-            None => list_sessions(root)?,
+        Command::Sessions { all, cmd } => match cmd {
+            None => list_sessions(root, all)?,
             Some(SessionCommand::Prune {
                 delete_older_than,
                 dry_run,
@@ -319,17 +322,27 @@ fn build_interactive_opts(cli: &Cli, root: std::path::PathBuf) -> InteractiveOpt
     opts
 }
 
-fn list_sessions(root: &std::path::Path) -> anyhow::Result<()> {
+fn list_sessions(root: &std::path::Path, all: bool) -> anyhow::Result<()> {
     let sink = lofi_core::session::sink::SessionSink::open(root).context("open session sink")?;
-    let entries = sink.workspace_entries().context("list sessions")?;
+    let entries = if all {
+        sink.all_entries()
+    } else {
+        sink.workspace_entries()
+    }
+    .context("list sessions")?;
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     if entries.is_empty() {
         handle.write_all(b"(no sessions)\n")?;
     } else {
         for e in &entries {
+            let cwd = if all {
+                format!("  {}", e.meta.cwd)
+            } else {
+                String::new()
+            };
             let line = format!(
-                "{}  {}  {}  ({} msgs)\n",
+                "{}  {}  {}  ({} msgs){cwd}\n",
                 e.id(),
                 format_ts(e.meta.created),
                 e.meta.model.label(),

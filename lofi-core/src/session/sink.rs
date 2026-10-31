@@ -246,6 +246,15 @@ impl SessionSink {
         self.store.list_for_cwd(&self.cwd)
     }
 
+    /// List the session entries of every workspace in the store. Read-only;
+    /// never mutates.
+    ///
+    /// # Errors
+    /// Propagates directory read failures.
+    pub fn all_entries(&self) -> Result<Vec<store::SessionEntry>> {
+        self.store.list_all()
+    }
+
     /// Subagent transcripts spawned by the session `parent`, newest first.
     /// Read-only; never mutates.
     ///

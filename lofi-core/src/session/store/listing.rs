@@ -275,19 +275,28 @@ impl SessionStore {
     /// Returns [`Error::Io`] if the per-cwd directory cannot be read for a reason
     /// other than not existing.
     pub fn list_for_cwd(&self, cwd: &Path) -> Result<Vec<SessionEntry>> {
-        let mut entries = Vec::new();
-        for file in self.list_files_for_cwd(cwd)? {
-            // Subagent transcripts exist for resumability; they are not user
-            // sessions and stay out of the picker. Filter on the listed
-            // header: inspect reads the whole file.
-            if file.meta().subagent {
-                continue;
-            }
-            if let Some(entry) = file.inspect() {
-                entries.push(entry);
-            }
-        }
-        Ok(entries)
+        Ok(Self::entries_from(self.list_files_for_cwd(cwd)?))
+    }
+
+    /// Every session entry in the store, across all workspaces, newest
+    /// first.
+    ///
+    /// # Errors
+    /// Returns [`Error::Io`] if a directory or entry cannot be read for a
+    /// reason other than not existing.
+    pub fn list_all(&self) -> Result<Vec<SessionEntry>> {
+        Ok(Self::entries_from(self.list_all_files()?))
+    }
+
+    /// Subagent transcripts exist for resumability; they are not user
+    /// sessions and stay out of the picker. Filter on the listed header:
+    /// inspect reads the whole file.
+    fn entries_from(files: Vec<SessionFile>) -> Vec<SessionEntry> {
+        files
+            .into_iter()
+            .filter(|file| !file.meta().subagent)
+            .filter_map(|file| file.inspect())
+            .collect()
     }
 
     /// # Errors

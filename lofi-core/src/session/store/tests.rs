@@ -139,6 +139,20 @@ fn listing_every_workspace_sees_each_transcript_once() {
 }
 
 #[test]
+fn listing_every_workspace_leaves_out_subagent_transcripts() {
+    let (_guard, store) = isolated_store();
+    let cwd = Path::new("/tmp/list-all-subagent");
+    store.create(cwd, &"p/m".into()).unwrap();
+    store
+        .create_subagent_cursor(cwd, &"p/m".into(), Some("parent-a"), "run-a")
+        .unwrap();
+
+    let entries = store.list_all().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].meta.cwd, "/tmp/list-all-subagent");
+}
+
+#[test]
 fn a_missing_store_root_lists_nothing() {
     let (_guard, store) = isolated_store();
     assert!(store.list_all_files().unwrap().is_empty());
