@@ -8,6 +8,8 @@ Set `$LOFI_CONFIG` to use another configuration file.
 Set `$LOFI_POLICY` to use another shell policy file.
 Lofi stores sessions, model-discovery data, and approved outside-workspace
 directories in `$XDG_STATE_HOME/lofi/`, which defaults to `~/.local/state/lofi/`.
+Each directory there appears only when a file is written to it, so a session
+that saves nothing leaves nothing behind.
 The configuration directory remains read-only.
 
 ## Quick start
@@ -684,6 +686,7 @@ Older tool results and tool-call code become event-id stubs; the compaction hand
 Each workspace keeps a memory file under the state directory
 (`$XDG_STATE_HOME/lofi/states/<workspace-key>/memory.md`), shared by every
 session opened in the same directory. There is no config key.
+The file and its directory appear on the first write, mode 0600 and 0700.
 The agent reads the file with the `lofi.memory()` sandbox tool, which returns
 its content and file location, and updates it with the normal file tools: the
 path is accepted for read and write without approval. A compaction puts the

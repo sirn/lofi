@@ -5,6 +5,25 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+/// Create the directory of a host-owned file in the state tree: mode 0700,
+/// including the ancestors this call creates, so the tree stays private.
+pub(super) fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
+/// Tighten a host-owned state file to mode 0600.
+pub(super) fn set_private_file(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
 /// Atomically replace a regular file and durably commit both its contents and
 /// directory entry. The temporary file lives beside the destination so rename
 /// cannot cross filesystems.

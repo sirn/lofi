@@ -86,6 +86,16 @@ pub(crate) fn ensure_private_dir(path: &std::path::Path) -> std::io::Result<()> 
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
 }
 
+/// Tighten an existing directory in the state tree to mode 0700. A missing
+/// directory stays missing: repair must not create one.
+pub(crate) fn repair_private_dir(path: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::metadata(path) {
+        Ok(_) => ensure_private_dir(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) fn ensure_private_file(path: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -96,17 +106,15 @@ pub(crate) fn ensure_private_file(path: &std::path::Path) -> std::io::Result<()>
 /// under `states/`, keyed like `sessions/` and `tmp/` so a project's
 /// memory never crosses into another workspace. The agent maintains it
 /// through the `lofi.memory` sandbox tool; the compaction hook reads it.
-/// The directory is created here (mode 0700, like the rest of the state
-/// tree) so a first write lands inside a private tree; the file itself
-/// appears only when the agent writes it.
+/// Nothing is created here: every session resolves this path at startup, so
+/// creating the directory would leave one behind in a session that never
+/// writes. The first write creates it, mode 0700 like the rest of the tree.
 /// # Errors
-/// Returns [`Error::State`] if the base state directory cannot be resolved,
-/// or [`Error::Io`] on filesystem failure.
+/// Returns [`Error::State`] if the base state directory cannot be resolved.
 pub fn workspace_memory_path(cwd: &Path) -> Result<PathBuf> {
-    let mut path = ensure_state_dir()?;
+    let mut path = state_dir()?;
     path.push("states");
     path.push(workspace_key(cwd));
-    ensure_private_dir(&path)?;
     path.push("memory.md");
     Ok(path)
 }
@@ -303,7 +311,13 @@ fn parse_grants(bytes: &[u8]) -> Vec<WorkspaceGrant> {
 
 pub(crate) struct SessionTempDir {
     path: PathBuf,
-    _lease: std::fs::File,
+    /// The workspace-key directory that groups this workspace's leases. It
+    /// holds nothing of its own, so it goes with the last lease.
+    group: Option<PathBuf>,
+    /// The lease file, opened on the first call to [`Self::ensure`]. Until
+    /// then nothing exists on disk: a session that writes no pageable output
+    /// and starts no job leaves no directory at all.
+    lease: std::sync::Mutex<Option<std::fs::File>>,
 }
 
 impl SessionTempDir {
@@ -311,15 +325,85 @@ impl SessionTempDir {
         &self.path
     }
 
+    /// Create the directory and take its lease, once. Every writer into the
+    /// directory calls this first.
+    pub(crate) fn ensure(&self) -> std::io::Result<()> {
+        use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+
+        let mut lease = self
+            .lease
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if lease.is_some() {
+            return Ok(());
+        }
+        if let Some(group) = &self.group {
+            if let Some(root) = group.parent() {
+                ensure_private_dir(root)?;
+            }
+            ensure_private_dir(group)?;
+        }
+        // Stage the directory with its lease inside, then rename it into
+        // place: a sweeper in another process must never see it without a
+        // lease and collect it.
+        let staging = self
+            .path
+            .with_file_name(format!(".creating-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::DirBuilder::new().mode(0o700).create(&staging)?;
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(staging.join(".lease"))
+        {
+            Ok(file) => file,
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(error);
+            }
+        };
+        if let Err(error) = file.lock() {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+        if let Err(error) = std::fs::rename(&staging, &self.path) {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+        *lease = Some(file);
+        Ok(())
+    }
+
     #[cfg(test)]
-    fn create_under(root: &std::path::Path) -> Result<Self> {
-        create_leased_tmp_dir(root).map_err(Error::Io)
+    fn create_under(root: &std::path::Path) -> Self {
+        Self {
+            path: root.join(uuid::Uuid::new_v4().simple().to_string()),
+            group: None,
+            lease: std::sync::Mutex::new(None),
+        }
     }
 }
 
 impl Drop for SessionTempDir {
     fn drop(&mut self) {
+        let lease = self
+            .lease
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if lease.is_none() {
+            return;
+        }
         let _ = std::fs::remove_dir_all(&self.path);
+        // The scratch tree carries nothing of its own, so it falls away with
+        // the last lease. Each removal fails while a sibling still holds the
+        // directory, which is exactly when it must stay.
+        if let Some(group) = &self.group {
+            let _ = std::fs::remove_dir(group);
+            if let Some(root) = group.parent() {
+                let _ = std::fs::remove_dir(root);
+            }
+        }
     }
 }
 
@@ -382,66 +466,40 @@ fn collect_abandoned_tmp_dirs(root: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn create_leased_tmp_dir(root: &std::path::Path) -> std::io::Result<SessionTempDir> {
-    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
-
-    loop {
-        let id = uuid::Uuid::new_v4().simple().to_string();
-        let staging = root.join(format!(".creating-{id}"));
-        let path = root.join(id);
-        let mut builder = std::fs::DirBuilder::new();
-        builder.mode(0o700);
-        match builder.create(&staging) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        }
-        let lease = match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(staging.join(".lease"))
-        {
-            Ok(lease) => lease,
-            Err(error) => {
-                let _ = std::fs::remove_dir_all(&staging);
-                return Err(error);
-            }
-        };
-        if let Err(error) = lease.lock() {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(error);
-        }
-        if let Err(error) = std::fs::rename(&staging, &path) {
-            let _ = std::fs::remove_dir_all(&staging);
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
-                continue;
-            }
-            return Err(error);
-        }
-        return Ok(SessionTempDir {
-            path,
-            _lease: lease,
-        });
-    }
+/// The per-session directory for pageable tool output and job logs, scoped to
+/// the workspace so a project's scratch dirs group alongside its transcripts.
+/// Nothing is created here: the directory and its lease arrive with the first
+/// write, so a session that writes none leaves no directory behind. Resolving
+/// it tidies the existing tree instead.
+/// # Errors
+/// Returns [`Error::State`] if the base directory cannot be resolved.
+pub(crate) fn create_session_tmp_dir(cwd: &Path) -> Result<SessionTempDir> {
+    let home = state_dir()?;
+    tidy_state_tree(&home);
+    let group = home.join("tmp").join(workspace_key(cwd));
+    Ok(SessionTempDir {
+        path: group.join(uuid::Uuid::new_v4().simple().to_string()),
+        group: Some(group),
+        lease: std::sync::Mutex::new(None),
+    })
 }
 
-/// Create a leased per-session directory for pageable tool output, scoped to
-/// the workspace so a project's scratch dirs group alongside its transcripts.
-/// Orphaned dirs are collected from the whole `tmp/` tree (not just this
-/// workspace), so a stale dir from any project is reclaimed at its owner's
-/// next startup.
-/// # Errors
-/// Returns [`Error::Io`] on filesystem failure, or [`Error::State`] if the
-/// base directory cannot be resolved.
-pub(crate) fn create_session_tmp_dir(cwd: &Path) -> Result<SessionTempDir> {
-    let root = ensure_state_dir()?.join("tmp");
-    ensure_private_dir(&root)?;
-    collect_abandoned_tmp_dirs(&root)?;
-    let scoped = root.join(workspace_key(cwd));
-    ensure_private_dir(&scoped)?;
-    create_leased_tmp_dir(&scoped).map_err(Error::Io)
+/// Tighten the modes of an existing state tree and collect the scratch dirs
+/// a dead session left behind. Nothing is created: a session that writes
+/// nothing must leave no directory, and every session resolves this state at
+/// startup.
+fn tidy_state_tree(home: &Path) {
+    let scratch = home.join("tmp");
+    for dir in [
+        home.join("states"),
+        home.join("sessions"),
+        home.join("logs"),
+        scratch.clone(),
+    ] {
+        let _ = repair_private_dir(&dir);
+    }
+    let _ = collect_abandoned_tmp_dirs(&scratch);
+    let _ = repair_private_dir(home);
 }
 
 #[cfg(test)]
@@ -511,6 +569,81 @@ mod tests {
     }
 
     #[test]
+    fn workspace_memory_path_creates_nothing() {
+        let _env = super::STATE_ENV_LOCK.lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!(
+            "lofi_state_test_memory_lazy_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("LOFI_STATE_HOME", &tmp);
+
+        let path = workspace_memory_path(Path::new("/ws/proj")).unwrap();
+        assert!(!path.exists());
+        assert!(!path.parent().unwrap().exists());
+        assert!(
+            !super::state_dir().unwrap().exists(),
+            "resolving the memory path must not create the state directory"
+        );
+
+        std::env::remove_var("LOFI_STATE_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn scratch_lease(group: &std::path::Path) -> SessionTempDir {
+        SessionTempDir {
+            path: group.join(uuid::Uuid::new_v4().simple().to_string()),
+            group: Some(group.to_path_buf()),
+            lease: std::sync::Mutex::new(None),
+        }
+    }
+
+    #[test]
+    fn the_scratch_lease_creates_nothing_until_it_is_used() {
+        let root = tempfile::tempdir().unwrap();
+        let group = root.path().join("lofi").join("tmp").join("proj-key");
+        let lease = scratch_lease(&group);
+
+        assert!(!lease.path().exists());
+        assert!(!group.exists());
+        drop(lease);
+        assert!(!root.path().join("lofi").exists());
+    }
+
+    #[test]
+    fn the_last_lease_takes_the_scratch_tree_with_it() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = root.path().join("lofi").join("tmp");
+        let group = scratch.join("proj-key");
+
+        let lease = scratch_lease(&group);
+        lease.ensure().unwrap();
+        assert!(lease.path().join(".lease").exists());
+        drop(lease);
+
+        assert!(!group.exists());
+        assert!(!scratch.exists());
+        assert!(root.path().exists());
+    }
+
+    #[test]
+    fn a_sibling_lease_keeps_the_scratch_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = root.path().join("lofi").join("tmp");
+        let group = scratch.join("proj-key");
+
+        let first = scratch_lease(&group);
+        let second = scratch_lease(&group);
+        first.ensure().unwrap();
+        second.ensure().unwrap();
+        drop(first);
+        assert!(group.exists());
+        drop(second);
+        assert!(!group.exists());
+        assert!(!scratch.exists());
+    }
+
+    #[test]
     fn workspace_key_is_readable_and_collision_resistant() {
         let first = workspace_key(Path::new("/work/a-b/c"));
         let second = workspace_key(Path::new("/work/a/b-c"));
@@ -523,7 +656,8 @@ mod tests {
     #[test]
     fn session_tmp_dir_is_removed_after_last_lease() {
         let root = tempfile::tempdir().unwrap();
-        let lease = SessionTempDir::create_under(root.path()).unwrap();
+        let lease = SessionTempDir::create_under(root.path());
+        lease.ensure().unwrap();
         let path = lease.path().to_path_buf();
         std::fs::write(path.join("output.log"), "secret").unwrap();
         let lease = std::sync::Arc::new(lease);
@@ -556,7 +690,8 @@ mod tests {
     #[test]
     fn startup_preserves_locked_temp_dirs() {
         let root = tempfile::tempdir().unwrap();
-        let lease = SessionTempDir::create_under(root.path()).unwrap();
+        let lease = SessionTempDir::create_under(root.path());
+        lease.ensure().unwrap();
         let path = lease.path().to_path_buf();
 
         collect_abandoned_tmp_dirs(root.path()).unwrap();

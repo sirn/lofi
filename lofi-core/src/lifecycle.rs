@@ -604,11 +604,11 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         std::env::set_var("LOFI_STATE_HOME", state.path());
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            crate::state::workspace_memory_path(dir.path()).unwrap(),
-            memory,
-        )
-        .unwrap();
+        // Resolving the path creates nothing, so the first write brings its
+        // own directory, the way the write tool does.
+        let path = crate::state::workspace_memory_path(dir.path()).unwrap();
+        crate::state::ensure_private_dir(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, memory).unwrap();
         let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
         let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
         let mut events = Vec::new();

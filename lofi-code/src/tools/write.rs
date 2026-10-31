@@ -14,11 +14,22 @@ impl BuiltinTools {
         let resolved = self.resolve_mutate(&path).await?;
         reject_non_regular(&format!("write {path}"), &resolved)?;
         let label = path.clone();
+        // The memory file is the one host-owned path a write can reach: its
+        // directory belongs to the private state tree, not to the workspace,
+        // so it is created private and only here, on the first write.
+        let private = self.memory.as_deref() == Some(resolved.as_path());
         tokio::task::spawn_blocking(move || -> std::io::Result<()> {
             if let Some(parent) = resolved.parent() {
-                std::fs::create_dir_all(parent)?;
+                if private {
+                    ensure_private_dir(parent)?;
+                } else {
+                    std::fs::create_dir_all(parent)?;
+                }
             }
             atomic_write(&resolved, text.as_bytes())?;
+            if private {
+                set_private_file(&resolved)?;
+            }
             Ok(())
         })
         .await

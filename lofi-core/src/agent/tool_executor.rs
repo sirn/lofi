@@ -101,7 +101,7 @@ async fn reject(
 impl ToolExecutor {
     /// Create execution state without constructing a model provider.
     /// # Errors
-    /// Returns an error when the session temporary directory cannot be created.
+    /// Returns an error when the state directory cannot be resolved.
     pub fn new(
         root: &std::path::Path,
         config: &lofi_types::Config,
@@ -364,6 +364,11 @@ impl ToolExecutor {
     ) -> Result<Vec<ContentBlock>> {
         if tool_uses.is_empty() {
             return Ok(Vec::new());
+        }
+        // The scratch directory arrives with the first tool run, so a
+        // session that never runs one leaves no directory behind.
+        if let Some(lease) = &self.tmp_lease {
+            lease.ensure()?;
         }
         let native_cursor = call.session.clone();
         let recall = call.recall.clone();

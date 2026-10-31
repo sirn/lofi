@@ -186,6 +186,20 @@ fn print_mode_streams_text_and_reports_tool_calls_on_stderr() {
 }
 
 #[test]
+fn a_print_run_that_writes_nothing_creates_no_state_directory() {
+    let server = MockServer::start(vec![text_response("read only answer")]);
+    let fixture = Fixture::new(&server);
+
+    let output = fixture.output(&["--print", "read only prompt"]);
+    assert!(output.status.success());
+
+    assert!(
+        !fixture.state.join("lofi").exists(),
+        "a run that writes nothing created the state directory"
+    );
+}
+
+#[test]
 fn print_mode_emits_no_program_status_report() {
     let server = MockServer::start(vec![text_response("print status answer")]);
     let fixture = Fixture::new(&server);

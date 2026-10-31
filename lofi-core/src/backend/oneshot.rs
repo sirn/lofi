@@ -38,6 +38,7 @@ pub(super) async fn complete(
         return Err(Error::Config("empty Claude Code system prompt".into()));
     }
     let dir = crate::state::create_session_tmp_dir(root)?;
+    dir.ensure()?;
     let prompt_file = dir.path().join("system-prompt.md");
     std::fs::write(&prompt_file, &request.system)?;
     crate::state::ensure_private_file(&prompt_file)?;

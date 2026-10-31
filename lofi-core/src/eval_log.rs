@@ -83,10 +83,9 @@ pub(crate) fn session_key(session: Option<&str>, cwd: &Path) -> String {
 /// One session's log file: `logs/<session>/auto-mode.jsonl` under the state
 /// directory.
 /// # Errors
-/// Returns state and io errors when the state directory cannot be
-/// resolved or the log directory cannot be created.
+/// Returns [`Error::State`] when the state directory cannot be resolved.
 pub(crate) fn log_path(session: &str) -> Result<PathBuf> {
-    let mut path = crate::state::ensure_state_dir()?;
+    let mut path = crate::state::state_dir()?;
     path.push("logs");
     path.push(session);
     path.push("auto-mode.jsonl");
@@ -99,7 +98,7 @@ pub(crate) fn log_path(session: &str) -> Result<PathBuf> {
 /// Returns state and io errors when the state directory cannot be resolved
 /// or its log directory cannot be read.
 pub(crate) fn session_logs() -> Result<Vec<PathBuf>> {
-    let mut root = crate::state::ensure_state_dir()?;
+    let mut root = crate::state::state_dir()?;
     root.push("logs");
     let entries = match std::fs::read_dir(&root) {
         Ok(entries) => entries,

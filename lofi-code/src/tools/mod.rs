@@ -28,9 +28,9 @@ pub mod write;
 pub use bash_env::BashEnv;
 pub use bash_util::{read_capped, wait_for_cancel, PgrpKillGuard};
 use fs::{
-    approval_candidate, atomic_write, canonicalize_up, find_walk, is_outside_error,
-    parse_grep_args, reject_non_regular, reject_symlink_leaf, resolve_for_read, walk_files_capped,
-    WalkCeilings, WalkLimit, OUTSIDE_ROOT_ERROR,
+    approval_candidate, atomic_write, canonicalize_up, ensure_private_dir, find_walk,
+    is_outside_error, parse_grep_args, reject_non_regular, reject_symlink_leaf, resolve_for_read,
+    set_private_file, walk_files_capped, WalkCeilings, WalkLimit, OUTSIDE_ROOT_ERROR,
 };
 pub use jobs::{
     JobAttributes, JobColor, JobInfo, JobNotice, JobRegistry, JobScreen, JobScreenLine, JobSpan,
@@ -1506,6 +1506,31 @@ mod tests {
         assert!(err.to_string().contains("path is read-only"), "got: {err}");
         assert!(!tools.tmp_dir().join("out.txt").exists());
         assert!(asked.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn write_creates_the_memory_directory_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let ws = tempdir().unwrap();
+        let holder = tempdir().unwrap();
+        let tmp = tempdir().unwrap();
+        // The state tree is empty: the path is known, nothing is created.
+        let memory = holder.path().join("states").join("proj").join("memory.md");
+        let tools = tools_in(ws.path().to_path_buf(), tmp.path().to_path_buf())
+            .with_memory(Some(memory.clone()));
+        assert!(!memory.parent().unwrap().exists());
+
+        let path = memory.to_string_lossy().into_owned();
+        tools
+            .write(json!({ "path": path, "text": "state" }))
+            .await
+            .unwrap();
+
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(memory.parent().unwrap()), 0o700);
+        assert_eq!(mode(&memory), 0o600);
+        assert_eq!(std::fs::read_to_string(&memory).unwrap(), "state");
     }
 
     #[tokio::test]

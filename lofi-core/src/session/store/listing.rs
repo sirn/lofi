@@ -164,9 +164,10 @@ impl SessionStore {
     pub fn open() -> Result<Self> {
         let mut p = crate::state::state_dir()?;
         p.push("sessions");
-        let store = Self { root: p };
-        crate::state::ensure_private_dir(&store.root)?;
-        Ok(store)
+        // A broad mode on an existing tree is repaired; a missing directory
+        // stays missing, so a session that writes no transcript leaves none.
+        crate::state::repair_private_dir(&p)?;
+        Ok(Self { root: p })
     }
 
     #[must_use]
@@ -544,4 +545,32 @@ fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     crate::state::ensure_private_file(path)?;
     std::fs::File::open(dir)?.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn opening_the_store_creates_no_directory() {
+        let _env = crate::state::STATE_ENV_LOCK.lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!("lofi_store_open_lazy_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("LOFI_STATE_HOME", &tmp);
+
+        let store = SessionStore::open().unwrap();
+        assert!(!store.root().exists(), "opening the store writes nothing");
+        // A read of a workspace with no transcript finds nothing and still
+        // leaves the tree alone.
+        assert!(store
+            .list_for_cwd(Path::new("/ws/proj"))
+            .unwrap()
+            .is_empty());
+        assert!(!store.root().exists());
+
+        std::env::remove_var("LOFI_STATE_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
