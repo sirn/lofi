@@ -56,6 +56,20 @@ impl SessionFile {
         &self.meta
     }
 
+    /// Delete this transcript, then drop its workspace directory when
+    /// nothing else lives there. The directory removal fails while another
+    /// transcript remains, which is exactly when it must stay.
+    ///
+    /// # Errors
+    /// Returns [`Error::Io`] when the file cannot be removed.
+    pub fn remove(&self) -> Result<()> {
+        std::fs::remove_file(&self.path)?;
+        if let Some(dir) = self.path.parent() {
+            let _ = std::fs::remove_dir(dir);
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn inspect(&self) -> Option<SessionEntry> {
         parse_entry(&self.path, self.last_active)
@@ -280,16 +294,50 @@ impl SessionStore {
     /// Returns [`Error::Io`] if the per-cwd directory cannot be read for a reason
     /// other than not existing.
     pub fn list_files_for_cwd(&self, cwd: &Path) -> Result<Vec<SessionFile>> {
-        let mut files = Vec::new();
         let dir = self.dir_for_cwd(cwd);
-        let read = match std::fs::read_dir(&dir) {
-            Ok(read) => {
-                crate::state::ensure_private_dir(&dir)?;
-                read
+        if dir.is_dir() {
+            crate::state::ensure_private_dir(&dir)?;
+        }
+        let mut files: Vec<SessionFile> = Self::files_in(&dir)?
+            .into_iter()
+            .filter(|file| metadata_matches_cwd(file.meta(), cwd))
+            .collect();
+        files.sort_by_key(|file| std::cmp::Reverse(file.last_active));
+        Ok(files)
+    }
+
+    /// Every transcript in the store, across all workspace directories,
+    /// newest first. Read-only, so a prune can report before it deletes.
+    ///
+    /// # Errors
+    /// Returns [`Error::Io`] if a directory or entry cannot be read for a
+    /// reason other than not existing.
+    pub fn list_all_files(&self) -> Result<Vec<SessionFile>> {
+        let mut files = Vec::new();
+        let read = match std::fs::read_dir(&self.root) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(files),
+            Err(error) => return Err(Error::Io(error)),
+        };
+        for entry in read {
+            let entry = entry?;
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(files);
-            }
+            files.extend(Self::files_in(&entry.path())?);
+        }
+        files.sort_by_key(|file| std::cmp::Reverse(file.last_active));
+        Ok(files)
+    }
+
+    /// Transcripts in one workspace directory, unfiltered. A missing
+    /// directory reads as empty, and a file without a readable header is
+    /// skipped: a prune must never delete what it cannot name.
+    fn files_in(dir: &Path) -> Result<Vec<SessionFile>> {
+        let mut files = Vec::new();
+        let read = match std::fs::read_dir(dir) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(files),
             Err(error) => return Err(Error::Io(error)),
         };
         for entry in read {
@@ -301,9 +349,6 @@ impl SessionStore {
             let Some(meta) = read_session_meta(&path) else {
                 continue;
             };
-            if !metadata_matches_cwd(&meta, cwd) {
-                continue;
-            }
             crate::state::ensure_private_file(&path)?;
             let last_active = entry
                 .metadata()
@@ -315,7 +360,6 @@ impl SessionStore {
                 last_active,
             });
         }
-        files.sort_by_key(|file| std::cmp::Reverse(file.last_active));
         Ok(files)
     }
 }

@@ -43,8 +43,12 @@ struct Cli {
 enum Command {
     /// Print the configured models and exit.
     Models,
-    /// Print the saved sessions of this workspace and exit.
-    Sessions,
+    /// List the saved sessions of this workspace, or prune saved
+    /// sessions.
+    Sessions {
+        #[command(subcommand)]
+        cmd: Option<SessionCommand>,
+    },
     /// Work with the shell policy.
     Policy {
         #[command(subcommand)]
@@ -59,6 +63,31 @@ enum Command {
     Mcp {
         #[command(subcommand)]
         cmd: McpCommand,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum SessionCommand {
+    /// Delete saved sessions last active before a cutoff.
+    ///
+    /// Without `--all`, only this directory's sessions are considered. A
+    /// subagent transcript is a saved session too, so it ages out with the
+    /// rest.
+    Prune {
+        /// Delete sessions last active before this age: `s`, `m`, `h`, `d`, or `w`
+        #[arg(
+            long,
+            value_name = "AGE",
+            default_value = "7d",
+            value_parser = parse_age
+        )]
+        delete_older_than: chrono::Duration,
+        /// Report what would be deleted without deleting it
+        #[arg(long)]
+        dry_run: bool,
+        /// Consider every workspace, not just this directory's sessions
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -174,7 +203,14 @@ pub async fn run_cli() -> anyhow::Result<()> {
 async fn run_command(command: Command, root: &std::path::Path) -> anyhow::Result<()> {
     match command {
         Command::Models => list_models().await?,
-        Command::Sessions => list_sessions(root)?,
+        Command::Sessions { cmd } => match cmd {
+            None => list_sessions(root)?,
+            Some(SessionCommand::Prune {
+                delete_older_than,
+                dry_run,
+                all,
+            }) => prune_sessions(root, delete_older_than, dry_run, all)?,
+        },
         Command::Mcp {
             cmd: McpCommand::Serve,
         } => lofi_core::backend::run_stdio_proxy().await?,
@@ -308,6 +344,97 @@ fn list_sessions(root: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Parse an age with a unit: `30m`, `12h`, `7d`, or `2w`. A bare number is
+/// rejected, because the unit decides whether the user meant hours or days.
+fn parse_age(text: &str) -> Result<chrono::Duration, String> {
+    let (count, unit) = match text.find(|c: char| c.is_ascii_alphabetic()) {
+        Some(at) => text.split_at(at),
+        None => return Err(format!("missing a unit in {text}: use s, m, h, d, or w")),
+    };
+    let count: i64 = count
+        .parse()
+        .map_err(|_| format!("invalid count in {text}"))?;
+    if count < 0 {
+        return Err(format!("negative count in {text}"));
+    }
+    let age = match unit {
+        "s" => chrono::Duration::try_seconds(count),
+        "m" => chrono::Duration::try_minutes(count),
+        "h" => chrono::Duration::try_hours(count),
+        "d" => chrono::Duration::try_days(count),
+        "w" => chrono::Duration::try_weeks(count),
+        _ => {
+            return Err(format!(
+                "unknown unit {unit} in {text}: use s, m, h, d, or w"
+            ))
+        }
+    };
+    age.ok_or_else(|| format!("age is too large in {text}"))
+}
+
+/// The age as the user would write it back: the largest unit that divides
+/// it exactly, so `7d` prints as `7d` and not `168h`. Weeks stay out, so
+/// the default never comes back as `1w`.
+fn age_label(age: chrono::Duration) -> String {
+    let seconds = age.num_seconds().unsigned_abs();
+    for (unit, size) in [("d", 86_400), ("h", 3_600), ("m", 60)] {
+        if seconds >= size && seconds.is_multiple_of(size) {
+            return format!("{}{unit}", seconds / size);
+        }
+    }
+    format!("{seconds}s")
+}
+
+fn prune_sessions(
+    root: &std::path::Path,
+    older_than: chrono::Duration,
+    dry_run: bool,
+    all: bool,
+) -> anyhow::Result<()> {
+    let store = lofi_core::session::store::SessionStore::open().context("open session store")?;
+    let files = if all {
+        store.list_all_files().context("list sessions")?
+    } else {
+        store.list_files_for_cwd(root).context("list sessions")?
+    };
+    let cutoff = chrono::Utc::now() - older_than;
+    let stale: Vec<_> = files
+        .into_iter()
+        .filter(|file| chrono::DateTime::<chrono::Utc>::from(file.last_active()) < cutoff)
+        .collect();
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    for file in &stale {
+        let workspace = if all {
+            format!("  {}", file.meta().cwd)
+        } else {
+            String::new()
+        };
+        let line = format!(
+            "{}  {}  {}{workspace}\n",
+            file.id(),
+            format_ts(file.meta().created),
+            file.meta().model.label(),
+        );
+        handle.write_all(line.as_bytes())?;
+    }
+    let age = age_label(older_than);
+    if stale.is_empty() {
+        handle.write_all(format!("(no sessions older than {age})\n").as_bytes())?;
+    } else if dry_run {
+        let line = format!("would delete {} session(s) older than {age}\n", stale.len());
+        handle.write_all(line.as_bytes())?;
+    } else {
+        for file in &stale {
+            file.remove()
+                .with_context(|| format!("delete session {}", file.id()))?;
+        }
+        let line = format!("deleted {} session(s) older than {age}\n", stale.len());
+        handle.write_all(line.as_bytes())?;
+    }
+    Ok(())
+}
+
 fn print_docs_index() -> anyhow::Result<()> {
     let idx = lofi_core::docs::docs_index();
     let entries = idx["entries"].as_array().context("malformed docs index")?;
@@ -349,24 +476,12 @@ fn print_docs_search(query: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[allow(clippy::many_single_char_names)] // mirrors Howard Hinnant's civil calendar algorithm
 fn format_ts(ms: u64) -> String {
-    let secs = ms / 1000;
-    let day = i64::try_from(secs / 86_400).unwrap_or(i64::MAX);
-    let rem = secs % 86_400;
-    let h = rem / 3600;
-    let m = (rem % 3600) / 60;
-    let z = day + 719_468;
-    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if month <= 2 { y + 1 } else { y };
-    format!("{year:04}-{month:02}-{d:02} {h:02}:{m:02}")
+    i64::try_from(ms)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|at| at.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_default()
 }
 
 async fn list_models() -> anyhow::Result<()> {

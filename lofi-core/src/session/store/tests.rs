@@ -114,6 +114,64 @@ fn failed_append_rolls_back_and_preserves_selected_head() {
 }
 
 #[test]
+fn listing_every_workspace_sees_each_transcript_once() {
+    let (_guard, store) = isolated_store();
+    store
+        .create_cursor(Path::new("/tmp/list-all-a"), &"p/m".into())
+        .unwrap();
+    store
+        .create_cursor(Path::new("/tmp/list-all-b"), &"p/m".into())
+        .unwrap();
+
+    let files = store.list_all_files().unwrap();
+    assert_eq!(files.len(), 2);
+    let mut cwds: Vec<&str> = files.iter().map(|file| file.meta().cwd.as_str()).collect();
+    cwds.sort_unstable();
+    assert_eq!(cwds, ["/tmp/list-all-a", "/tmp/list-all-b"]);
+    // A per-workspace listing stays scoped to its own directory.
+    assert_eq!(
+        store
+            .list_files_for_cwd(Path::new("/tmp/list-all-a"))
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn a_missing_store_root_lists_nothing() {
+    let (_guard, store) = isolated_store();
+    assert!(store.list_all_files().unwrap().is_empty());
+    assert!(!store.root().exists());
+}
+
+#[test]
+fn removing_a_transcript_drops_its_empty_workspace_directory() {
+    let (_guard, store) = isolated_store();
+    let cwd = Path::new("/tmp/remove-one");
+    store.create_cursor(cwd, &"p/m".into()).unwrap();
+    let files = store.list_files_for_cwd(cwd).unwrap();
+    let dir = files[0].path().parent().unwrap().to_path_buf();
+    files[0].remove().unwrap();
+    assert!(!files[0].path().exists());
+    assert!(!dir.exists(), "the empty workspace directory remains");
+}
+
+#[test]
+fn removing_a_transcript_keeps_a_workspace_with_siblings() {
+    let (_guard, store) = isolated_store();
+    let cwd = Path::new("/tmp/remove-siblings");
+    store.create_cursor(cwd, &"p/m".into()).unwrap();
+    store.create_cursor(cwd, &"p/m".into()).unwrap();
+    let mut files = store.list_files_for_cwd(cwd).unwrap();
+    files.sort_by_key(SessionFile::last_active);
+    let dir = files[0].path().parent().unwrap().to_path_buf();
+    files[0].remove().unwrap();
+    assert!(dir.exists());
+    assert_eq!(store.list_files_for_cwd(cwd).unwrap().len(), 1);
+}
+
+#[test]
 fn create_load_round_trip() {
     let (_guard, store) = isolated_store();
     let cwd = Path::new("/tmp/project");

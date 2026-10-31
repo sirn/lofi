@@ -248,6 +248,123 @@ fn list_sessions_reports_a_completed_tui_session() {
     assert!(stdout.contains("msgs"));
 }
 
+/// Age a transcript so a prune sees it as stale without waiting.
+fn age_transcript(path: &std::path::Path, age: Duration) {
+    let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    let at = std::time::SystemTime::now() - age;
+    file.set_times(std::fs::FileTimes::new().set_modified(at))
+        .unwrap();
+}
+
+#[test]
+fn sessions_prune_deletes_old_sessions_and_keeps_the_rest() {
+    let server = MockServer::start(vec![
+        text_response("first prune answer"),
+        text_response("second prune answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    for (prompt, answer) in [
+        ("first prune prompt", "first prune answer"),
+        ("second prune prompt", "second prune answer"),
+    ] {
+        let mut tui = fixture.spawn(&[]);
+        tui.submit(prompt);
+        tui.wait_for(answer, WAIT);
+        tui.submit("/quit");
+        tui.wait_exit();
+    }
+
+    let mut files = fixture.session_files();
+    assert_eq!(files.len(), 2, "{files:?}");
+    files.sort();
+    age_transcript(&files[0], Duration::from_hours(720));
+
+    let dry = fixture.output(&["sessions", "prune", "--dry-run"]);
+    assert!(dry.status.success());
+    let dry = String::from_utf8_lossy(&dry.stdout);
+    assert!(
+        dry.contains("would delete 1 session(s) older than 7d"),
+        "{dry}"
+    );
+    assert_eq!(
+        fixture.session_files().len(),
+        2,
+        "a dry run deletes nothing"
+    );
+
+    let prune = fixture.output(&["sessions", "prune"]);
+    assert!(prune.status.success());
+    let prune = String::from_utf8_lossy(&prune.stdout);
+    assert!(
+        prune.contains("deleted 1 session(s) older than 7d"),
+        "{prune}"
+    );
+    assert_eq!(fixture.session_files().len(), 1, "the fresh session stays");
+}
+
+#[test]
+fn sessions_prune_stays_in_this_workspace_unless_asked_for_all() {
+    let server = MockServer::start(vec![
+        text_response("workspace answer"),
+        text_response("nested answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let nested = fixture.workspace.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    for (cwd, prompt, answer) in [
+        (
+            &fixture.workspace,
+            "workspace prune prompt",
+            "workspace answer",
+        ),
+        (&nested, "nested prune prompt", "nested answer"),
+    ] {
+        let mut tui = fixture.spawn_in(cwd, &[]);
+        tui.submit(prompt);
+        tui.wait_for(answer, WAIT);
+        tui.submit("/quit");
+        tui.wait_exit();
+    }
+    for file in fixture.session_files() {
+        age_transcript(&file, Duration::from_hours(720));
+    }
+    assert_eq!(fixture.session_files().len(), 2);
+
+    let scoped = fixture.output(&["sessions", "prune"]);
+    assert!(scoped.status.success());
+    let scoped = String::from_utf8_lossy(&scoped.stdout);
+    assert!(scoped.contains("deleted 1 session(s)"), "{scoped}");
+    assert_eq!(fixture.session_files().len(), 1, "the nested one stays");
+    assert!(nested.exists());
+
+    let all = fixture.output(&["sessions", "prune", "--all"]);
+    assert!(all.status.success());
+    let all = String::from_utf8_lossy(&all.stdout);
+    assert!(all.contains("deleted 1 session(s)"), "{all}");
+    assert!(fixture.session_files().is_empty());
+    let gone = fixture.output(&["sessions"]);
+    assert_eq!(String::from_utf8_lossy(&gone.stdout), "(no sessions)\n");
+}
+
+#[test]
+fn sessions_prune_rejects_a_bad_age() {
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+
+    for (age, reason) in [
+        ("7", "missing a unit"),
+        ("7x", "unknown unit x"),
+        ("-5d", "negative count"),
+    ] {
+        let flag = format!("--delete-older-than={age}");
+        let output = fixture.output(&["sessions", "prune", &flag]);
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(reason), "{age}: {stderr}");
+    }
+}
+
 #[test]
 fn invalid_resume_id_fails_before_starting_the_tui() {
     let server = MockServer::start(Vec::new());
