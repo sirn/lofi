@@ -142,6 +142,9 @@ Lofi runs Claude Code in streaming print mode with the Lofi MCP server.
 Claude Code's built-in tools, slash commands, hooks, Chrome integration, and
 user/project/local settings are disabled for this process.
 Managed Claude Code policy can still apply.
+The `init` frame must report only the `exec` tool and only the connected
+Lofi MCP server; any other tool or server fails the turn, and the error
+names what the child reported.
 
 Claude Code is a transport, not a second agent.
 Lofi tracks the conversation, so the child holds no decision Lofi cannot see.

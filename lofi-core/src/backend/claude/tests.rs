@@ -1,6 +1,50 @@
+#![allow(clippy::unwrap_used)]
+
 use serde_json::{json, Value};
 
 use super::*;
+
+fn init_frame(tools: &Value, server_status: &str) -> Value {
+    json!({
+        "tools": tools,
+        "mcp_servers": [{"name": "lofi", "status": server_status}],
+    })
+}
+
+#[test]
+fn validate_init_accepts_the_exec_tool_and_the_lofi_server() {
+    let frame = init_frame(&json!([EXEC]), "connected");
+    assert!(validate_init(&frame).is_ok());
+}
+
+#[test]
+fn validate_init_names_an_extra_tool() {
+    let frame = init_frame(&json!([EXEC, "ToolSearch"]), "connected");
+    let error = validate_init(&frame).unwrap_err().to_string();
+    assert!(error.contains("ToolSearch"), "{error}");
+}
+
+#[test]
+fn validate_init_names_a_missing_tool_list() {
+    let frame = json!({"mcp_servers": []});
+    let error = validate_init(&frame).unwrap_err().to_string();
+    assert!(error.contains("null"), "{error}");
+}
+
+#[test]
+fn validate_init_names_a_server_that_did_not_connect() {
+    let frame = init_frame(&json!([EXEC]), "failed");
+    let error = validate_init(&frame).unwrap_err().to_string();
+    assert!(error.contains("failed"), "{error}");
+}
+
+#[test]
+fn observed_cuts_a_long_list() {
+    let tools = Value::Array((0..50).map(|i| json!(format!("tool-{i}"))).collect());
+    let text = observed(&tools);
+    assert!(text.ends_with('…'));
+    assert_eq!(text.chars().count(), 201);
+}
 
 #[test]
 fn effort_levels_include_the_cli_maximum() {

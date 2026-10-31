@@ -788,19 +788,36 @@ fn parse_usage(value: &Value) -> Option<lofi_types::Usage> {
     })
 }
 
+/// The child's `init` frame must show exactly the exec tool and exactly the
+/// connected Lofi server. Anything else means a built-in tool, a managed
+/// policy, or a wrapper reached the child, and the failure names what the
+/// child reported: an operator can only fix a tool it can see.
 fn validate_init(message: &Value) -> Result<()> {
     if message["tools"] != json!([EXEC]) {
-        return Err(Error::State(
-            "Claude Code must expose only mcp__lofi__exec".into(),
-        ));
+        return Err(Error::State(format!(
+            "Claude Code must expose only {EXEC}, but reported {}",
+            observed(&message["tools"]),
+        )));
     }
     let servers = message["mcp_servers"].as_array();
     if !servers.is_some_and(|servers| {
         servers.len() == 1 && servers[0]["name"] == "lofi" && servers[0]["status"] == "connected"
     }) {
-        return Err(Error::State(
-            "Claude Code must connect only to the Lofi MCP server".into(),
-        ));
+        return Err(Error::State(format!(
+            "Claude Code must connect only to the Lofi MCP server, but reported {}",
+            observed(&message["mcp_servers"]),
+        )));
     }
     Ok(())
+}
+
+/// The reported value, cut short so a large policy list cannot fill the
+/// screen. A missing field reads as `null`, which is itself the answer.
+fn observed(value: &Value) -> String {
+    const LIMIT: usize = 200;
+    let text = value.to_string();
+    match text.char_indices().nth(LIMIT) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text,
+    }
 }
