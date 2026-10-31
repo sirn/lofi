@@ -25,9 +25,9 @@ pub struct ToolExecutor {
     /// Config-sourced granted directories outside the workspace root, with
     /// their access levels.
     pub(super) grants: Vec<lofi_code::GrantedDir>,
-    /// Workspace memory file `lofi.memory` reports, resolved
-    /// once from the workspace root.
-    pub(super) memory: Option<PathBuf>,
+    /// Workspace memory file `lofi.memory` reports, resolved once from the
+    /// workspace root, with the modes its first write applies.
+    pub(super) memory: Option<lofi_types::HostFile>,
     pub(super) jobs: lofi_code::tools::JobRegistry,
     pub(super) timers: lofi_code::tools::TimerRegistry,
     pub(super) job_owner: Option<String>,
@@ -127,7 +127,7 @@ impl ToolExecutor {
             policy_override: lofi_code::policy::PolicyOverride::default(),
             skills_dir: None,
             grants: super::granted_dirs(&config.permissions),
-            memory: state::workspace_memory_path(root).ok(),
+            memory: state::WorkspaceMemory::open(root).ok().map(Into::into),
             jobs: lofi_code::tools::JobRegistry::new(),
             timers: lofi_code::tools::TimerRegistry::new(),
             job_owner: None,
@@ -176,7 +176,7 @@ impl ToolExecutor {
             self.root.clone(),
             Some(self.tmp_dir.clone()),
             self.skills_dir.clone(),
-            self.memory.clone(),
+            self.memory.as_ref().map(|file| file.path.clone()),
             self.grants.clone(),
         )
     }

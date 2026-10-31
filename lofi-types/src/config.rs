@@ -37,6 +37,17 @@ pub struct GrantedDir {
     pub access: Access,
 }
 
+/// A host-owned file outside the workspace that the file tools accept
+/// without a prompt, with the modes its first write must apply. The host
+/// names the file and the modes, so the tool layer holds no rule about
+/// the tree it writes into.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostFile {
+    pub path: PathBuf,
+    pub dir_mode: u32,
+    pub file_mode: u32,
+}
+
 /// One [[permissions]] entry: a directory tree the file tools may use
 /// outside the workspace root, with its access level. The path may not
 /// exist yet; it is resolved through its deepest existing ancestor.

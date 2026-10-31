@@ -5,23 +5,24 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
-/// Create the directory of a host-owned file in the state tree: mode 0700,
-/// including the ancestors this call creates, so the tree stays private.
-pub(super) fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
+/// Create a directory with the mode its host owner chose, including the
+/// ancestors this call creates. The tool layer holds no rule about the
+/// tree above the file; the mode comes from the host with the target.
+pub(super) fn create_dir_with_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 
     std::fs::DirBuilder::new()
         .recursive(true)
-        .mode(0o700)
+        .mode(mode)
         .create(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
 }
 
-/// Tighten a host-owned state file to mode 0600.
-pub(super) fn set_private_file(path: &Path) -> std::io::Result<()> {
+/// Set a file to the mode its host owner chose.
+pub(super) fn set_file_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
 
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
 }
 
 /// Atomically replace a regular file and durably commit both its contents and

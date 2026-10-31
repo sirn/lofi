@@ -171,7 +171,7 @@ pub struct Agent {
     root: PathBuf,
     tmp_dir: PathBuf,
     tmp_lease: Option<Arc<state::SessionTempDir>>,
-    memory: Option<PathBuf>,
+    memory: Option<lofi_types::HostFile>,
     retry: crate::retry::RetryPolicy,
     pub(crate) system_prompt: String,
     max_output_tokens: Option<u64>,
@@ -250,7 +250,7 @@ impl Agent {
             max_bytes: truncate.max_bytes,
         };
         let shell_policy = lofi_code::policy::defaults::resolve(shell_policy_config);
-        let memory = state::workspace_memory_path(&root).ok();
+        let memory = state::WorkspaceMemory::open(&root).ok().map(Into::into);
         Self {
             provider: Arc::from(provider),
             model,

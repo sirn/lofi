@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::ToolEvent;
 use lofi_error::{Error, Result};
+use lofi_types::HostFile;
 pub mod bash;
 mod bash_env;
 pub mod edit;
@@ -28,9 +29,9 @@ pub mod write;
 pub use bash_env::BashEnv;
 pub use bash_util::{read_capped, wait_for_cancel, PgrpKillGuard};
 use fs::{
-    approval_candidate, atomic_write, canonicalize_up, ensure_private_dir, find_walk,
+    approval_candidate, atomic_write, canonicalize_up, create_dir_with_mode, find_walk,
     is_outside_error, parse_grep_args, reject_non_regular, reject_symlink_leaf, resolve_for_read,
-    set_private_file, walk_files_capped, WalkCeilings, WalkLimit, OUTSIDE_ROOT_ERROR,
+    set_file_mode, walk_files_capped, WalkCeilings, WalkLimit, OUTSIDE_ROOT_ERROR,
 };
 pub use jobs::{
     JobAttributes, JobColor, JobInfo, JobNotice, JobRegistry, JobScreen, JobScreenLine, JobSpan,
@@ -113,9 +114,10 @@ pub struct BuiltinTools {
     /// dialog pick applies to every later exec in the session.
     policy_override: crate::policy::PolicyOverride,
     skills_dir: Option<PathBuf>,
-    /// Workspace memory file `lofi.memory` reports. `None` keeps the
-    /// tool bound but unavailable (tests, nested sandboxes).
-    memory: Option<PathBuf>,
+    /// Workspace memory file `lofi.memory` reports, with the modes its
+    /// first write applies. `None` keeps the tool bound but unavailable
+    /// (tests, nested sandboxes).
+    memory: Option<HostFile>,
     read_roots: Vec<PathBuf>,
     /// Granted directories outside the workspace root, with their access.
     grants: Vec<crate::GrantedDir>,
@@ -368,15 +370,18 @@ impl BuiltinTools {
     }
 
     /// Attaches the workspace memory file `lofi.memory` reports. The path
-    /// is host-chosen and never resolved from guest input. It registers the
-    /// file as a root the file tools accept for read and write without a
-    /// prompt.
+    /// and the modes are host-chosen and never resolved from guest input.
+    /// It registers the file as a root the file tools accept for read and
+    /// write without a prompt.
     #[must_use]
-    pub fn with_memory(mut self, memory: Option<PathBuf>) -> Self {
+    pub fn with_memory(mut self, memory: Option<HostFile>) -> Self {
         if let Some(memory) = memory {
-            let canon = canonicalize_up(&memory).unwrap_or(memory.clone());
+            let canon = canonicalize_up(&memory.path).unwrap_or_else(|| memory.path.clone());
             self.read_roots.push(canon.clone());
-            self.memory = Some(canon);
+            self.memory = Some(HostFile {
+                path: canon,
+                ..memory
+            });
         } else {
             self.memory = None;
         }
@@ -389,7 +394,7 @@ impl BuiltinTools {
     /// Returns [`Error::Tool`] when no memory path is attached or the read
     /// fails.
     pub(crate) fn memory_read(&self) -> Result<serde_json::Value> {
-        let path = self.memory.as_deref().ok_or_else(|| {
+        let path = self.memory.as_ref().map(|file| &file.path).ok_or_else(|| {
             Error::Tool("lofi.memory is not available in this context".to_string())
         })?;
         let text = memory::read(path)?;
@@ -417,7 +422,7 @@ impl BuiltinTools {
             .map(|g| g.dir.clone())
             .collect();
         if let Some(memory) = &self.memory {
-            roots.push(memory.clone());
+            roots.push(memory.path.clone());
         }
         roots
     }
@@ -451,7 +456,7 @@ impl BuiltinTools {
         let builtin: Vec<PathBuf> = self
             .read_roots
             .iter()
-            .filter(|r| Some(*r) != self.memory.as_ref())
+            .filter(|r| self.memory.as_ref().is_none_or(|m| *r != &m.path))
             .cloned()
             .collect();
         if resolve_for_read(&self.root, &builtin, p).is_ok() {
@@ -551,6 +556,16 @@ mod tests {
             allow_by_default: true,
         };
         BuiltinTools::with_tool_cb(root, None, tmp_dir, BashEnv::default(), policy, None)
+    }
+
+    /// A host-owned target with the state-tree modes, the way the host
+    /// hands the memory file to the tools.
+    fn host_file(path: &std::path::Path) -> HostFile {
+        HostFile {
+            path: path.to_path_buf(),
+            dir_mode: 0o700,
+            file_mode: 0o600,
+        }
     }
 
     fn grep_lines(v: &Value) -> Vec<String> {
@@ -1518,7 +1533,7 @@ mod tests {
         // The state tree is empty: the path is known, nothing is created.
         let memory = holder.path().join("states").join("proj").join("memory.md");
         let tools = tools_in(ws.path().to_path_buf(), tmp.path().to_path_buf())
-            .with_memory(Some(memory.clone()));
+            .with_memory(Some(host_file(&memory)));
         assert!(!memory.parent().unwrap().exists());
 
         let path = memory.to_string_lossy().into_owned();
@@ -1542,7 +1557,7 @@ mod tests {
         let memory = holder.path().join("memory.md");
         let asked = Arc::new(Mutex::new(Vec::new()));
         let tools = tools
-            .with_memory(Some(memory.clone()))
+            .with_memory(Some(host_file(&memory)))
             .with_approve_dir(Some(recording_hook(None, asked.clone())));
 
         // The memory file itself is writable without a prompt.

@@ -246,7 +246,8 @@ impl AgentLifecycle {
             hooks: vec![Arc::new(CodeCompactionHook::new(
                 self.workspace_root
                     .as_deref()
-                    .and_then(|root| crate::state::workspace_memory_path(root).ok())
+                    .and_then(|root| crate::state::WorkspaceMemory::open(root).ok())
+                    .map(|memory| memory.path().to_path_buf())
                     .unwrap_or_default(),
             ))],
         };
@@ -606,7 +607,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Resolving the path creates nothing, so the first write brings its
         // own directory, the way the write tool does.
-        let path = crate::state::workspace_memory_path(dir.path()).unwrap();
+        let target = crate::state::WorkspaceMemory::open(dir.path()).unwrap();
+        let path = target.path().to_path_buf();
         crate::state::ensure_private_dir(path.parent().unwrap()).unwrap();
         std::fs::write(&path, memory).unwrap();
         let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));

@@ -109,14 +109,40 @@ pub(crate) fn ensure_private_file(path: &std::path::Path) -> std::io::Result<()>
 /// Nothing is created here: every session resolves this path at startup, so
 /// creating the directory would leave one behind in a session that never
 /// writes. The first write creates it, mode 0700 like the rest of the tree.
-/// # Errors
-/// Returns [`Error::State`] if the base state directory cannot be resolved.
-pub fn workspace_memory_path(cwd: &Path) -> Result<PathBuf> {
-    let mut path = state_dir()?;
-    path.push("states");
-    path.push(workspace_key(cwd));
-    path.push("memory.md");
-    Ok(path)
+pub struct WorkspaceMemory {
+    file: lofi_types::HostFile,
+}
+
+impl WorkspaceMemory {
+    /// Resolve the memory file of the workspace rooted at `cwd`. Nothing is
+    /// read or written yet.
+    /// # Errors
+    /// Returns [`Error::State`] if the base state directory cannot be
+    /// resolved.
+    pub fn open(cwd: &Path) -> Result<Self> {
+        let mut path = state_dir()?;
+        path.push("states");
+        path.push(workspace_key(cwd));
+        path.push("memory.md");
+        Ok(Self {
+            file: lofi_types::HostFile {
+                path,
+                dir_mode: 0o700,
+                file_mode: 0o600,
+            },
+        })
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.file.path
+    }
+}
+
+impl From<WorkspaceMemory> for lofi_types::HostFile {
+    fn from(memory: WorkspaceMemory) -> Self {
+        memory.file
+    }
 }
 
 /// The per-workspace state document: `state.json` in a directory under
@@ -544,14 +570,15 @@ mod tests {
     }
 
     #[test]
-    fn workspace_memory_path_is_workspace_scoped() {
+    fn workspace_memory_is_workspace_scoped() {
         let _env = super::STATE_ENV_LOCK.lock().unwrap();
         let tmp =
             std::env::temp_dir().join(format!("lofi_state_test_memory_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::env::set_var("LOFI_STATE_HOME", &tmp);
 
-        let path = workspace_memory_path(Path::new("/ws/proj")).unwrap();
+        let memory = WorkspaceMemory::open(Path::new("/ws/proj")).unwrap();
+        let path = memory.path();
         assert!(path.ends_with("memory.md"));
         assert!(path.starts_with(&tmp));
         let key = path
@@ -562,14 +589,15 @@ mod tests {
             .to_string();
         assert_eq!(key, workspace_key(Path::new("/ws/proj")));
         // Another workspace gets its own memory file.
-        assert_ne!(workspace_memory_path(Path::new("/ws/other")).unwrap(), path);
+        let other = WorkspaceMemory::open(Path::new("/ws/other")).unwrap();
+        assert_ne!(other.path(), path);
 
         std::env::remove_var("LOFI_STATE_HOME");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
-    fn workspace_memory_path_creates_nothing() {
+    fn workspace_memory_open_creates_nothing() {
         let _env = super::STATE_ENV_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir().join(format!(
             "lofi_state_test_memory_lazy_{}",
@@ -578,7 +606,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::env::set_var("LOFI_STATE_HOME", &tmp);
 
-        let path = workspace_memory_path(Path::new("/ws/proj")).unwrap();
+        let memory = WorkspaceMemory::open(Path::new("/ws/proj")).unwrap();
+        let path = memory.path();
         assert!(!path.exists());
         assert!(!path.parent().unwrap().exists());
         assert!(

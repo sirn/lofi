@@ -562,7 +562,11 @@ async fn memory_tool_reports_content_and_the_file_tools_update_it() {
     let dir = tempfile::tempdir().unwrap();
     let memory = dir.path().join("state").join("memory.md");
     let mut cx = ctx(dir.path());
-    cx.memory = Some(memory.clone());
+    cx.memory = Some(lofi_types::HostFile {
+        path: memory.clone(),
+        dir_mode: 0o700,
+        file_mode: 0o600,
+    });
 
     // A read with no memory yet reports the path and an empty text.
     let res = exec("return await lofi.memory();", &cx, &ExecOptions::default())

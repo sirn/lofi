@@ -14,21 +14,24 @@ impl BuiltinTools {
         let resolved = self.resolve_mutate(&path).await?;
         reject_non_regular(&format!("write {path}"), &resolved)?;
         let label = path.clone();
-        // The memory file is the one host-owned path a write can reach: its
-        // directory belongs to the private state tree, not to the workspace,
-        // so it is created private and only here, on the first write.
-        let private = self.memory.as_deref() == Some(resolved.as_path());
+        // A host-owned target carries the modes its first write applies, so
+        // it is created private and only here; a workspace path keeps the
+        // modes the workspace gives it.
+        let host_file = self
+            .memory
+            .as_ref()
+            .filter(|file| file.path == resolved)
+            .map(|file| (file.dir_mode, file.file_mode));
         tokio::task::spawn_blocking(move || -> std::io::Result<()> {
             if let Some(parent) = resolved.parent() {
-                if private {
-                    ensure_private_dir(parent)?;
-                } else {
-                    std::fs::create_dir_all(parent)?;
+                match host_file {
+                    Some((dir_mode, _)) => create_dir_with_mode(parent, dir_mode)?,
+                    None => std::fs::create_dir_all(parent)?,
                 }
             }
             atomic_write(&resolved, text.as_bytes())?;
-            if private {
-                set_private_file(&resolved)?;
+            if let Some((_, file_mode)) = host_file {
+                set_file_mode(&resolved, file_mode)?;
             }
             Ok(())
         })
