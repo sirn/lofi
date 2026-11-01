@@ -251,6 +251,9 @@ impl Agent {
             max_bytes: truncate.max_bytes,
         };
         let shell_policy = lofi_code::policy::defaults::resolve(shell_policy_config);
+        // One handle space for everything this session owns, so a job, a
+        // subagent, and a timer can never share an id.
+        let ids = lofi_types::IdSpace::new();
         let memory = state::WorkspaceMemory::open(&root).ok().map(Into::into);
         Self {
             provider: Arc::from(provider),
@@ -276,13 +279,13 @@ impl Agent {
             policy_override: lofi_code::policy::PolicyOverride::default(),
             skills_dir: None,
             grants: Vec::new(),
-            jobs: lofi_code::tools::JobRegistry::new(),
-            timers: lofi_code::tools::TimerRegistry::new(),
+            jobs: lofi_code::tools::JobRegistry::with_ids(ids.clone()),
+            timers: lofi_code::tools::TimerRegistry::with_ids(ids.clone()),
             job_owner: None,
             mailbox: None,
             exec_worker: std::sync::Arc::new(std::sync::OnceLock::new()),
             subagent_support: None,
-            subagents: SubagentRegistry::default(),
+            subagents: SubagentRegistry::with_ids(ids),
             source: None,
         }
     }

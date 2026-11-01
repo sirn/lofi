@@ -7,6 +7,7 @@ use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::time::{Duration, Instant};
 
 use lofi_error::{Error, Result};
+use lofi_types::short_id;
 
 use super::{ensure_job_running, JobHandle};
 
@@ -404,7 +405,10 @@ pub(super) fn observe_idle(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .id;
-    Some(format!("job {id} idle (no output for {idle_ms}ms): {tail}"))
+    Some(format!(
+        "job {} idle (no output for {idle_ms}ms): {tail}",
+        short_id(id)
+    ))
 }
 
 pub(super) fn idle_tail(

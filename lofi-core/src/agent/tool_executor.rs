@@ -108,6 +108,7 @@ impl ToolExecutor {
         env: &[(String, String)],
     ) -> Result<Self> {
         let lease = state::create_session_tmp_dir(root)?;
+        let ids = lofi_types::IdSpace::new();
         Ok(Self {
             root: root.to_path_buf(),
             tmp_dir: lease.path().to_path_buf(),
@@ -128,13 +129,13 @@ impl ToolExecutor {
             skills_dir: None,
             grants: super::granted_dirs(&config.permissions),
             memory: state::WorkspaceMemory::open(root).ok().map(Into::into),
-            jobs: lofi_code::tools::JobRegistry::new(),
-            timers: lofi_code::tools::TimerRegistry::new(),
+            jobs: lofi_code::tools::JobRegistry::with_ids(ids.clone()),
+            timers: lofi_code::tools::TimerRegistry::with_ids(ids.clone()),
             job_owner: None,
             exec_worker: Arc::new(std::sync::OnceLock::new()),
             subagent: None,
             mailbox: None,
-            subagents: super::SubagentRegistry::default(),
+            subagents: super::SubagentRegistry::with_ids(ids),
             subagent_support: None,
             models: None,
         })

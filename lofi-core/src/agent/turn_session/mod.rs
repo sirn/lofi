@@ -659,13 +659,15 @@ fn tool_context(
     });
     let on_job_acquired = session.map(|cursor| {
         let cursor = cursor.clone();
-        Arc::new(move |id| {
-            let owner = cursor.record_job_started(id).ok()?;
-            let cursor = cursor.clone();
-            Some(Arc::new(move |id| {
-                let _ = cursor.record_job_finished(&owner, id);
-            }) as lofi_code::JobReleaseFn)
-        }) as lofi_code::JobAcquireFn
+        Arc::new(
+            move |id: u64, cmd: &str| -> Option<lofi_code::JobReleaseFn> {
+                let owner = cursor.record_job_started(id, cmd).ok()?;
+                let cursor = cursor.clone();
+                Some(Arc::new(move |id| {
+                    let _ = cursor.record_job_finished(&owner, id);
+                }) as lofi_code::JobReleaseFn)
+            },
+        ) as lofi_code::JobAcquireFn
     });
     ToolCallContext {
         events: Some(sink.clone()),

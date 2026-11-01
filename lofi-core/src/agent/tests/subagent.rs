@@ -66,7 +66,12 @@ async fn spawn_returns_id_status_and_result() {
     let out = hook(SubagentOp::Run, json!({ "prompt": "do it" })).await;
     assert_eq!(out["status"], json!("completed"), "{out}");
     assert_eq!(out["result"], json!("sub result"), "{out}");
-    assert_eq!(out["id"].as_str().unwrap().len(), 8);
+    // The handle space starts at the clock, so a run names a handle, not `1`.
+    let id = out["id"].as_str().unwrap_or_default();
+    assert!(
+        lofi_types::parse_short_id(id).is_some(),
+        "the run names a handle: {out}"
+    );
 }
 
 #[tokio::test]

@@ -117,11 +117,14 @@ impl store::SessionCursor {
     /// Record a job acquisition and return its durable event id. The id owns
     /// the corresponding release marker and remains stable across branch
     /// switches.
-    pub(crate) fn record_job_started(&self, job_id: u64) -> Result<String> {
+    pub(crate) fn record_job_started(&self, job_id: u64, cmd: &str) -> Result<String> {
         let mut events = [SessionEvent {
             id: String::new(),
             parent_id: None,
-            kind: SessionEventKind::JobStarted { job_id },
+            kind: SessionEventKind::JobStarted {
+                job_id,
+                cmd: Some(cmd.to_owned()),
+            },
         }];
         self.append_events(&mut events)?;
         Ok(events[0].id.clone())
@@ -1108,7 +1111,7 @@ mod tests {
                 exclude_from_context: false,
             })
             .unwrap();
-        let owner = cursor.record_job_started(7).unwrap();
+        let owner = cursor.record_job_started(7, "cargo test").unwrap();
         cursor.record_job_finished(&owner, 7).unwrap();
         cursor
             .record(SessionRecord::Compaction {

@@ -63,7 +63,10 @@ impl Component for RunningJobLine<'_> {
         let t = cx.theme;
         let dur = prim::fmt_duration(Duration::from_millis(self.job.duration_ms));
         let cmd = self.job.cmd.trim();
-        let text = format!("job {} running ({dur}): {cmd}", self.job.id);
+        let text = format!(
+            "job {} running ({dur}): {cmd}",
+            lofi_types::short_id(self.job.id)
+        );
         let mark = Style::new().fg(t.info);
         let body_style = t.muted_style();
         render_markdown_body(

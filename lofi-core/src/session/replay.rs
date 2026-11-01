@@ -622,13 +622,21 @@ pub fn compaction_status_from_index(
 /// on the visible lineage.
 #[must_use]
 pub fn outstanding_job_ids(events: &[SessionEvent]) -> Vec<u64> {
-    let mut started: Vec<u64> = Vec::new();
-    let mut finished: HashSet<u64> = HashSet::new();
+    let mut lifecycle = Lifecycle::default();
     for i in visible_event_indices(events) {
-        track_lifecycle(&events[i].kind, &mut started, &mut finished);
+        lifecycle.track(&events[i].kind);
     }
-    started.retain(|id| !finished.contains(id));
-    started
+    let (_, outstanding) = lifecycle.into_parts();
+    outstanding.into_iter().map(|job| job.id).collect()
+}
+
+/// A job a resumed transcript opened but never closed. The process that owned
+/// the command, the log, and the exit status is gone, so this is all a row can
+/// say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutstandingJob {
+    pub id: u64,
+    pub cmd: Option<String>,
 }
 
 /// Like [`outstanding_job_ids`] but reads lifecycle markers directly from a
@@ -637,10 +645,10 @@ pub fn outstanding_job_ids(events: &[SessionEvent]) -> Vec<u64> {
 /// touched.
 /// # Errors
 /// Propagates cursor I/O failures.
-pub fn outstanding_job_ids_at(
+pub fn outstanding_jobs_at(
     cursor: &SessionCursor,
     index: &[SessionIndexEntry],
-) -> lofi_error::Result<Vec<u64>> {
+) -> lofi_error::Result<Vec<OutstandingJob>> {
     Ok(job_lifecycle_ids_at(cursor, index)?.outstanding)
 }
 
@@ -680,40 +688,63 @@ pub fn timer_records_at(
     }
 }
 
+#[derive(Default)]
+struct Lifecycle {
+    started: Vec<u64>,
+    finished: HashSet<u64>,
+    /// What each started job ran, for the rows a resume shows. Absent for
+    /// ids recorded before the command was kept.
+    commands: Map<u64, String>,
+}
+
+impl Lifecycle {
+    fn track(&mut self, kind: &SessionEventKind) {
+        match kind {
+            SessionEventKind::JobStarted { job_id, cmd } => {
+                self.started.push(*job_id);
+                if let Some(cmd) = cmd {
+                    self.commands.insert(*job_id, cmd.clone());
+                }
+            }
+            SessionEventKind::JobFinished { job_id } => {
+                self.finished.insert(*job_id);
+            }
+            _ => {}
+        }
+    }
+
+    fn into_parts(mut self) -> (Vec<u64>, Vec<OutstandingJob>) {
+        let mut outstanding = Vec::new();
+        for id in &self.started {
+            if !self.finished.contains(id) {
+                outstanding.push(OutstandingJob {
+                    id: *id,
+                    cmd: self.commands.remove(id),
+                });
+            }
+        }
+        (self.started, outstanding)
+    }
+}
+
 pub(crate) struct JobLifecycleIds {
     pub started: Vec<u64>,
-    pub outstanding: Vec<u64>,
+    pub outstanding: Vec<OutstandingJob>,
 }
 
 pub(crate) fn job_lifecycle_ids_at(
     cursor: &SessionCursor,
     index: &[SessionIndexEntry],
 ) -> lofi_error::Result<JobLifecycleIds> {
-    let mut started: Vec<u64> = Vec::new();
-    let mut finished: HashSet<u64> = HashSet::new();
+    let mut lifecycle = Lifecycle::default();
     for entry in index.iter().filter(|e| e.kind == IndexKind::JobLifecycle) {
-        let ev = cursor.event_at(entry.offset)?;
-        track_lifecycle(&ev.kind, &mut started, &mut finished);
+        lifecycle.track(&cursor.event_at(entry.offset)?.kind);
     }
-    let outstanding = started
-        .iter()
-        .copied()
-        .filter(|id| !finished.contains(id))
-        .collect();
+    let (started, outstanding) = lifecycle.into_parts();
     Ok(JobLifecycleIds {
         started,
         outstanding,
     })
-}
-
-fn track_lifecycle(kind: &SessionEventKind, started: &mut Vec<u64>, finished: &mut HashSet<u64>) {
-    match kind {
-        SessionEventKind::JobStarted { job_id } => started.push(*job_id),
-        SessionEventKind::JobFinished { job_id } => {
-            finished.insert(*job_id);
-        }
-        _ => {}
-    }
 }
 
 /// Byte ranges per turn, derived from the visible event path. Test helper
@@ -814,7 +845,10 @@ mod tests {
         SessionEvent {
             id: String::new(),
             parent_id: None,
-            kind: SessionEventKind::JobStarted { job_id: id },
+            kind: SessionEventKind::JobStarted {
+                job_id: id,
+                cmd: None,
+            },
         }
     }
 
@@ -1126,7 +1160,11 @@ mod tests {
 
     #[test]
     fn job_lifecycle_markers_do_not_map_to_ir() {
-        assert!(agent_message_for_event(&SessionEventKind::JobStarted { job_id: 1 }).is_none());
+        assert!(agent_message_for_event(&SessionEventKind::JobStarted {
+            job_id: 1,
+            cmd: None,
+        })
+        .is_none());
         assert!(agent_message_for_event(&SessionEventKind::JobFinished { job_id: 1 }).is_none());
     }
 

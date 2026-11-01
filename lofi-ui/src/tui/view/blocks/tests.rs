@@ -44,7 +44,14 @@ fn running_job_line_renders_with_dashed_bar() {
         .iter()
         .map(|s| s.content.as_ref())
         .collect();
-    assert_eq!(rendered, "┆ job 42 running (12s): cargo test --workspace");
+    // The line names the job by the handle its notices carry.
+    assert_eq!(
+        rendered,
+        format!(
+            "┆ job {} running (12s): cargo test --workspace",
+            lofi_types::short_id(42)
+        )
+    );
 }
 
 fn running_job(id: u64, cmd: &str) -> lofi_core::JobInfo {

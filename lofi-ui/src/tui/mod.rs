@@ -52,6 +52,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use lofi_core::session::replay::OutstandingJob;
 use lofi_core::session::store::{self, SessionEntry};
 use lofi_types::{
     ContentBlock, Message, PromptKind, Role, RunModel, ServiceTier, SessionEvent, SessionEventKind,
@@ -310,9 +311,9 @@ pub(crate) struct App {
     /// The timer set the selected lineage recorded. Startup re-arms it once
     /// the agent hands the registry over; a `/resume` switch already has one.
     resumed_timers: Vec<lofi_types::TimerRecord>,
-    /// Job ids a resumed transcript opened but never closed. They are gone
+    /// Jobs a resumed transcript opened but never closed. They are gone
     /// with the previous process, so the jobs tab lists them as stale.
-    stale_jobs: Vec<u64>,
+    stale_jobs: Vec<OutstandingJob>,
     /// One dialog for every kind of running work: subagents, jobs, timers.
     background_modal: Option<BackgroundModalState>,
     model_choices: Vec<lofi_types::ModelChoice>,
@@ -409,8 +410,8 @@ impl App {
         &mut self,
         cursor: &store::SessionCursor,
         index: &[store::SessionIndexEntry],
-    ) -> Result<Vec<u64>> {
-        let stale = lofi_core::session::replay::outstanding_job_ids_at(cursor, index)?;
+    ) -> Result<Vec<OutstandingJob>> {
+        let stale = lofi_core::session::replay::outstanding_jobs_at(cursor, index)?;
         let timers = lofi_core::session::replay::timer_records_at(cursor, index)?;
         if let Some(registry) = &self.timers {
             registry.restore(&timers);
@@ -423,13 +424,13 @@ impl App {
 
     /// Keep the model off ids the previous run owned: it would otherwise see
     /// the transcript's `JobStarted` markers and poll them.
-    fn announce_stale_jobs(&mut self, stale: &[u64]) {
+    fn announce_stale_jobs(&mut self, stale: &[OutstandingJob]) {
         if stale.is_empty() {
             return;
         }
         let ids = stale
             .iter()
-            .map(u64::to_string)
+            .map(|job| lofi_types::short_id(job.id))
             .collect::<Vec<_>>()
             .join(", ");
         self.startup_notices.push(format!(

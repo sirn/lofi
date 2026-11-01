@@ -12,6 +12,7 @@ use super::{
     kill_pgrp, Inner, Job, JobHandle, JobNotice, State, JOB_POLL_INTERVAL, MAX_TERMINAL_JOBS,
 };
 use crate::tools::PgrpKillGuard;
+use lofi_types::short_id;
 
 /// Drive a spawned child to completion. Polls `try_wait` so cancellation,
 /// the (optional) timeout, and the log-size cap are observed on one clock; each
@@ -325,14 +326,15 @@ pub(super) fn progress_tick(
     let secs = started.elapsed().as_secs();
     let short = truncate_cmd(&cmd);
     Some(format!(
-        "job {id} running {secs}s, {bytes} bytes logged: {short}"
+        "job {} running {secs}s, {bytes} bytes logged: {short}",
+        short_id(id)
     ))
 }
 
 fn format_notice(job: &Job) -> String {
     use std::fmt::Write as _;
     let cmd = truncate_cmd(&job.cmd);
-    let mut s = format!("job {} {}: {}", job.id, job.state.as_str(), cmd);
+    let mut s = format!("job {} {}: {cmd}", short_id(job.id), job.state.as_str());
     if let Some(code) = job.exit_code {
         let _ = write!(s, " (exit {code})");
     }

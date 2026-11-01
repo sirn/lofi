@@ -183,10 +183,10 @@ const concurrentDoneB = await lofi.jobStatus({ id: concurrentB.id });
 const concurrentDoneC = await lofi.jobStatus({ id: concurrentC.id });
 const list = await lofi.jobList();
 const missing = {
-  status: await lofi.jobStatus({ id: "999999" }),
-  read: await lofi.jobRead({ id: "999999" }),
-  kill: await lofi.jobKill({ id: "999999" }),
-  notify: await lofi.jobNotify({ id: "999999" }),
+  status: await lofi.jobStatus({ id: "zzzz" }),
+  read: await lofi.jobRead({ id: "zzzz" }),
+  kill: await lofi.jobKill({ id: "zzzz" }),
+  notify: await lofi.jobNotify({ id: "zzzz" }),
 };
 return {
   notify, silenced, running, done, page1, page2, killed, killedStatus, killedAgain,
@@ -627,8 +627,8 @@ let keyUnknown;
 try { await lofi.jobKeyPress({ id: tty.id, key: "NotAKey" }); } catch (e) { keyUnknown = String(e); }
 let keyNonTty;
 try { await lofi.jobKeyPress({ id: plain.id, key: "Enter" }); } catch (e) { keyNonTty = String(e); }
-const typeMissing = await lofi.jobType({ id: "999999", text: "x" });
-const keyMissing = await lofi.jobKeyPress({ id: "999999", key: "Enter" });
+const typeMissing = await lofi.jobType({ id: "zzzz", text: "x" });
+const keyMissing = await lofi.jobKeyPress({ id: "zzzz", key: "Enter" });
 await lofi.jobKill({ id: tty.id });
 await lofi.jobKill({ id: plain.id });
 return { typeNoId, typeNoText, typeNonTty, keyUnknown, keyNonTty, typeMissing, keyMissing };
@@ -650,7 +650,7 @@ return { typeNoId, typeNoText, typeNonTty, keyUnknown, keyNonTty, typeMissing, k
         "jobType: missing 'text'",
         "job is not a tty job",
         "jobKeyPress: unknown key 'NotAKey'",
-        "no such job: 999999",
+        "no such job: zzzz",
     ] {
         assert!(body.contains(marker), "missing {marker}: {body}");
     }

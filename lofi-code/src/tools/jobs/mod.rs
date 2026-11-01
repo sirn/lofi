@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use lofi_error::{Error, Result};
+use lofi_types::{short_id, IdSpace};
 use serde_json::{json, Value};
 
 mod bindings;
@@ -157,7 +158,7 @@ impl Job {
             .as_millis() as u64;
         json!({
             "ok": true,
-            "id": self.id.to_string(),
+            "id": short_id(self.id),
             "state": self.state.as_str(),
             "command": self.cmd,
             "directory": root.display().to_string(),
@@ -289,11 +290,10 @@ impl PendingNotices {
 }
 
 struct Inner {
-    /// Seeded from the current time at registry construction so two
-    /// registries sharing a tmp dir (as in tests, or a session restart
-    /// reusing the same state dir) never mint the same job id and
-    /// collide on the same `create_new` log file.
-    next_id: AtomicU64,
+    /// The session's handle space, shared with its subagents and timers so a
+    /// job id names no other work. Also the log file's name, so the spawn
+    /// takes the next id when that file already exists.
+    ids: IdSpace,
     /// Changes whenever the host starts or attaches a different session.
     /// Drivers publish only into the generation they were spawned in.
     generation: AtomicU64,
@@ -339,13 +339,16 @@ impl Default for JobRegistry {
 impl JobRegistry {
     #[must_use]
     pub fn new() -> Self {
-        #[allow(clippy::cast_possible_truncation)]
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos() as u64);
+        Self::with_ids(IdSpace::new())
+    }
+
+    /// Build on the handle space the session shares with its subagents and
+    /// timers.
+    #[must_use]
+    pub fn with_ids(ids: IdSpace) -> Self {
         Self {
             inner: Arc::new(Inner {
-                next_id: AtomicU64::new(nanos),
+                ids,
                 generation: AtomicU64::new(0),
                 jobs: std::sync::Mutex::new(std::collections::HashMap::new()),
                 cancelled_owners: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -353,6 +356,13 @@ impl JobRegistry {
                 pending: std::sync::Mutex::new(PendingNotices::new()),
             }),
         }
+    }
+
+    /// The session's handle space, for a resume that must hold it above the
+    /// ids the adopted transcript lists.
+    #[must_use]
+    pub fn ids(&self) -> &IdSpace {
+        &self.inner.ids
     }
 
     /// Take every queued notice, oldest first, leaving the queue empty.

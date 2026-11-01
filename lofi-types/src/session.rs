@@ -113,6 +113,11 @@ pub enum SessionEventKind {
     /// transcript renderer.
     JobStarted {
         job_id: u64,
+        /// What the job ran. A job whose process died with the session has
+        /// nothing else to name it by, so the jobs tab reads this. Records
+        /// written before it was kept leave it empty.
+        #[serde(default)]
+        cmd: Option<String>,
     },
     /// Paired with [`Self::JobStarted`] by id; a start with no matching
     /// finish on the visible lineage was still running when the session

@@ -621,7 +621,10 @@ async fn tty_job_exposes_its_parsed_terminal_screen() {
     let id = spawned["id"].as_str().unwrap().to_owned();
     wait_for_log(&tools, &id, "parsed-marker").await;
 
-    let screen = tools.jobs.screen(id.parse().unwrap()).unwrap();
+    let screen = tools
+        .jobs
+        .screen(lofi_types::parse_short_id(&id).unwrap())
+        .unwrap();
     assert_eq!((screen.cols, screen.rows), (24, 3));
     assert_eq!(screen.lines.len(), 3);
     let line: String = screen.lines[0]

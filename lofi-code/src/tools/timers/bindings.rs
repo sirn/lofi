@@ -105,9 +105,15 @@ impl BuiltinTools {
         if !self.timer_slot_available() {
             return Ok(timer_cap_reached());
         }
-        self.timers
+        let id = self
+            .timers
             .schedule_at(self.job_owner.as_deref(), at_time, message.clone());
-        Ok(json!({ "ok": true, "at": at, "message": message }))
+        Ok(json!({
+            "ok": true,
+            "id": lofi_types::short_id(id),
+            "at": at,
+            "message": message
+        }))
     }
 
     /// `lofi.notifyEvery(every, message?)`: queue a repeating wake-up
@@ -136,9 +142,15 @@ impl BuiltinTools {
         if !self.timer_slot_available() {
             return Ok(timer_cap_reached());
         }
-        self.timers
+        let id = self
+            .timers
             .schedule_every(self.job_owner.as_deref(), interval, message.clone());
-        Ok(json!({ "ok": true, "every": every, "message": message }))
+        Ok(json!({
+            "ok": true,
+            "id": lofi_types::short_id(id),
+            "every": every,
+            "message": message
+        }))
     }
 
     /// `lofi.notifyCancel()`: drop every pending `notifyAt` and

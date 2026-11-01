@@ -5,6 +5,7 @@ use crate::tui::{
     JobRow, JobViewContent, SubagentRow, SubagentTranscriptView, Theme,
 };
 
+use lofi_types::short_id;
 use ratatui::style::Color;
 use ratatui::widgets::{Block as WidgetBlock, BorderType, Padding};
 
@@ -1241,9 +1242,23 @@ fn kill_label(modal: &BackgroundModalState, jobs: &[JobRow]) -> String {
     let selected = modal.selected();
     match &modal.confirm {
         Some(BackgroundKill::All(tab)) => format!("all {}", tab.label()),
-        Some(BackgroundKill::Job(_)) => jobs
-            .get(selected)
-            .map_or_else(|| "this job".to_string(), |job| format!("job {}", job.id())),
+        Some(BackgroundKill::Job(_)) => jobs.get(selected).map_or_else(
+            || "this job".to_string(),
+            |job| {
+                let cmd = match job {
+                    JobRow::Live(job) => one_line(&job.cmd, 28),
+                    JobRow::Stale(job) => job
+                        .cmd
+                        .as_deref()
+                        .map_or_else(String::new, |cmd| one_line(cmd, 28)),
+                };
+                if cmd.is_empty() {
+                    format!("job {}", short_id(job.id()))
+                } else {
+                    format!("job {} ({cmd})", short_id(job.id()))
+                }
+            },
+        ),
         Some(BackgroundKill::Subagent(id)) => format!("subagent {id}"),
         Some(BackgroundKill::Timer(_)) => "this timer".to_string(),
         None => "this row".to_string(),
@@ -1269,30 +1284,35 @@ fn subagent_row(row: &SubagentRow) -> String {
         String::new()
     };
     format!(
-        "{state:<8} {:<24} {model:<24} {cost:<8} {elapsed:<8} {}",
-        row.id,
-        one_line(&row.preview, 40)
+        "{state:<8} {model:<24} {cost:<8} {elapsed:<8} {}",
+        one_line(&row.preview, 48)
     )
 }
 
 fn job_row(row: &JobRow) -> String {
-    let JobRow::Live(job) = row else {
-        // A resumed transcript keeps only the id: the command, the duration
-        // and the log went with the process that owned them.
-        return format!(
-            "{:<9} #{:<6} {:>7}  {}",
-            "stale",
-            row.id(),
-            "",
-            "(from a previous run)"
-        );
+    let (state, exit, elapsed, cmd) = match row {
+        JobRow::Live(job) => (
+            job.state.clone(),
+            job.exit_code
+                .map_or_else(|| "-".to_string(), |code| code.to_string()),
+            fmt_job_duration(job.duration_ms),
+            one_line(&job.cmd, 48),
+        ),
+        // The process, the log, and the duration went with the run that
+        // owned them. What it ran is all the transcript could keep.
+        JobRow::Stale(job) => (
+            "stale".to_string(),
+            "-".to_string(),
+            "-".to_string(),
+            job.cmd.as_deref().map_or_else(
+                || "(no command recorded)".to_string(),
+                |cmd| one_line(cmd, 48),
+            ),
+        ),
     };
     format!(
-        "{:<9} #{:<6} {:>7}  {}",
-        job.state,
-        job.id,
-        fmt_job_duration(job.duration_ms),
-        one_line(&job.cmd, 40)
+        "{state:<9} {:>5} {exit:>3} {elapsed:>7}  {cmd}",
+        short_id(row.id())
     )
 }
 
@@ -1477,7 +1497,7 @@ fn render_job_output(f: &mut Frame, area: Rect, app: &App, view: &JobOutputView)
     let t = app.theme;
     match &view.content {
         JobViewContent::Terminal(screen) => {
-            let title = format!(" job {} terminal ", view.id);
+            let title = format!(" job {} terminal ", short_id(view.id));
             let popup = centered_modal(
                 area,
                 screen.cols.saturating_add(4),
@@ -1502,7 +1522,7 @@ fn render_job_output(f: &mut Frame, area: Rect, app: &App, view: &JobOutputView)
             f.render_widget(Paragraph::new(visible.collect::<Vec<_>>()), rows.content);
         }
         JobViewContent::Log { lines, scroll, .. } => {
-            let title = format!(" job {} log ", view.id);
+            let title = format!(" job {} log ", short_id(view.id));
             let help = " up/down scroll  g top  G follow  esc back ";
             let w = area.width.saturating_sub(4).clamp(40, 100);
             let h = area.height.saturating_sub(4).clamp(8, 28);

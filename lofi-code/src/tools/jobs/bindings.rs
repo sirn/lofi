@@ -20,6 +20,7 @@ use super::{
     MIN_IDLE_MS, MIN_NOTIFY_INTERVAL_MS,
 };
 use crate::tools::{require_str, BuiltinTools};
+use lofi_types::{parse_short_id, short_id};
 
 /// Maximum concurrently running jobs one subagent may hold. Bounds a
 /// runaway child without capping the session's own jobs.
@@ -32,12 +33,12 @@ fn parse_id(args: &Value) -> Result<u64> {
                 .map(str::to_owned)
                 .or_else(|| v.as_u64().map(|n| n.to_string()))
         })
-        .and_then(|s| s.parse::<u64>().ok())
+        .and_then(|s| parse_short_id(&s))
         .ok_or_else(|| Error::Tool("job: missing or invalid 'id'".into()))
 }
 
 fn no_such_job(id: u64) -> Value {
-    json!({ "ok": false, "error": format!("no such job: {id}") })
+    json!({ "ok": false, "error": format!("no such job: {}", short_id(id)) })
 }
 
 impl BuiltinTools {
@@ -117,22 +118,31 @@ impl BuiltinTools {
         }
 
         let generation = self.jobs.inner.generation.load(Ordering::SeqCst);
-        let id = self.jobs.inner.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        let log_path = self
-            .tmp_dir
-            .join(format!("lofi-job-{id}.log"))
-            .to_string_lossy()
-            .into_owned();
-        // Append mode so the shared stdout/stderr file interleaves both
-        // streams at end-of-file with no offset race between the two fds.
-        // For a tty job the child writes to the PTY slave instead; the driver
-        // copies master bytes into this same file, so `jobRead` and
-        // `lofi.read(logPath)` keep working unchanged.
-        let log_file = std::fs::OpenOptions::new()
-            .append(true)
-            .create_new(true)
-            .open(&log_path)
-            .map_err(Error::Io)?;
+        // The handle names the log file as well as the job, and a tmp dir can
+        // hold a file an earlier process left there (a session restart, or two
+        // registries in one dir). Take the next handle instead of failing.
+        let (id, log_path, log_file) = loop {
+            let id = self.jobs.inner.ids.next();
+            let log_path = self
+                .tmp_dir
+                .join(format!("lofi-job-{}.log", short_id(id)))
+                .to_string_lossy()
+                .into_owned();
+            // Append mode so the shared stdout/stderr file interleaves both
+            // streams at end-of-file with no offset race between the two fds.
+            // For a tty job the child writes to the PTY slave instead; the
+            // driver copies master bytes into this same file, so `jobRead` and
+            // `lofi.read(logPath)` keep working unchanged.
+            match std::fs::OpenOptions::new()
+                .append(true)
+                .create_new(true)
+                .open(&log_path)
+            {
+                Ok(file) => break (id, log_path, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(Error::Io(error)),
+            }
+        };
 
         let pty = if tty {
             Some(open_pty(cols, rows).map_err(Error::Io)?)
@@ -261,7 +271,10 @@ impl BuiltinTools {
                     "session changed while spawning job".into()
                 }));
             }
-            let on_release = self.on_job_acquired.as_ref().and_then(|hook| hook(id));
+            let on_release = self
+                .on_job_acquired
+                .as_ref()
+                .and_then(|hook| hook(id, &cmd));
             *handle
                 .on_release
                 .lock()
@@ -297,7 +310,7 @@ impl BuiltinTools {
 
         Ok(json!({
             "ok": true,
-            "id": id.to_string(),
+            "id": short_id(id),
             "state": "running",
             "command": cmd,
             "directory": self.root.display().to_string(),
@@ -393,7 +406,7 @@ impl BuiltinTools {
         self.bash_env.redact(&mut chunk);
         Ok(json!({
             "ok": true,
-            "id": id.to_string(),
+            "id": short_id(id),
             "state": state.as_str(),
             "cursor": next,
             "totalBytes": total,
@@ -422,7 +435,7 @@ impl BuiltinTools {
         let Some(screen) = screen else {
             return Ok(json!({
                 "ok": false,
-                "id": id.to_string(),
+                "id": short_id(id),
                 "error": "job has no terminal screen",
             }));
         };
@@ -437,7 +450,7 @@ impl BuiltinTools {
             .collect();
         Ok(json!({
             "ok": true,
-            "id": id.to_string(),
+            "id": short_id(id),
             "cols": screen.cols,
             "rows": screen.rows,
             "lines": lines,
@@ -509,7 +522,7 @@ impl BuiltinTools {
         }
         Ok(json!({
             "ok": true,
-            "id": id.to_string(),
+            "id": short_id(id),
             "notify": job.notify.enabled,
             "intervalMs": job.notify.interval_ms,
             "changed": job.notify.changed,
@@ -534,7 +547,7 @@ impl BuiltinTools {
             return Err(Error::Tool("jobType: text too long".into()));
         }
         let sent = write_to_master(&handle, text.as_bytes())?;
-        Ok(json!({ "ok": true, "id": id.to_string(), "sent": sent }))
+        Ok(json!({ "ok": true, "id": short_id(id), "sent": sent }))
     }
 
     /// Send one named key press to a tty job. Uses the same key names as the
@@ -558,7 +571,7 @@ impl BuiltinTools {
         if sent != bytes.len() {
             return Err(Error::Tool("jobKeyPress: partial PTY write".into()));
         }
-        Ok(json!({ "ok": true, "id": id.to_string(), "key": key }))
+        Ok(json!({ "ok": true, "id": short_id(id), "key": key }))
     }
 }
 

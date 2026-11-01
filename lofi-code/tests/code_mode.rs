@@ -56,7 +56,7 @@ async fn wait_for_job(cx: &ExecCtx, id: &str) {
             .jobs
             .snapshot()
             .into_iter()
-            .find(|job| job.id.to_string() == id)
+            .find(|job| lofi_types::short_id(job.id) == id)
             .is_some_and(|job| job.running);
         if !running {
             return;
@@ -893,7 +893,7 @@ async fn job_completion_keeps_its_spawn_owner() {
     first.jobs = jobs.clone();
     first.on_job_acquired = Some({
         let finished = first_finished.clone();
-        std::sync::Arc::new(move |_| {
+        std::sync::Arc::new(move |_, _cmd| {
             let finished = finished.clone();
             Some(std::sync::Arc::new(move |id| {
                 finished.lock().unwrap().push(id);
@@ -913,7 +913,7 @@ async fn job_completion_keeps_its_spawn_owner() {
     second.jobs = jobs;
     second.on_job_acquired = Some({
         let finished = second_finished.clone();
-        std::sync::Arc::new(move |_| {
+        std::sync::Arc::new(move |_, _cmd| {
             let finished = finished.clone();
             Some(std::sync::Arc::new(move |id| {
                 finished.lock().unwrap().push(id);
@@ -929,10 +929,13 @@ async fn job_completion_keeps_its_spawn_owner() {
     .unwrap();
     wait_for_job(&first, id).await;
 
-    assert_eq!(
-        first_finished.lock().unwrap().as_slice(),
-        [id.parse::<u64>().unwrap()]
-    );
+    let released: Vec<String> = first_finished
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|id| lofi_types::short_id(*id))
+        .collect();
+    assert_eq!(released, [id]);
     assert!(second_finished.lock().unwrap().is_empty());
 }
 

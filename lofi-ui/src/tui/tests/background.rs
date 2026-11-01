@@ -1,6 +1,13 @@
 use super::*;
 use crate::tui::app_render::counter_text;
 
+fn stale_job(id: u64, cmd: Option<&str>) -> lofi_core::session::replay::OutstandingJob {
+    lofi_core::session::replay::OutstandingJob {
+        id,
+        cmd: cmd.map(str::to_owned),
+    }
+}
+
 fn app_with_timers() -> App {
     let mut a = app();
     a.timers = Some(lofi_core::TimerRegistry::new());
@@ -339,20 +346,33 @@ fn a_repeating_timer_does_not_record_every_fire() {
 }
 
 #[test]
-fn the_jobs_tab_lists_a_job_the_previous_run_left() {
+fn the_jobs_tab_names_a_job_the_previous_run_left() {
     let mut a = app();
-    a.stale_jobs = vec![7];
+    a.stale_jobs = vec![stale_job(7, Some("npm run dev"))];
     a.open_background_modal(BackgroundTab::Jobs);
     let screen = screen(&mut a);
     assert!(screen.contains("stale"), "{screen}");
-    assert!(screen.contains('7'), "{screen}");
+    assert!(screen.contains("npm run dev"), "{screen}");
+    assert!(
+        !screen.contains("no command recorded"),
+        "the row names what it ran: {screen}"
+    );
     assert!(!screen.contains("no jobs"), "{screen}");
+}
+
+#[test]
+fn a_stale_row_without_a_recorded_command_says_so() {
+    let mut a = app();
+    a.stale_jobs = vec![stale_job(7, None)];
+    a.open_background_modal(BackgroundTab::Jobs);
+    let screen = screen(&mut a);
+    assert!(screen.contains("(no command recorded)"), "{screen}");
 }
 
 #[test]
 fn a_new_session_drops_the_stale_jobs() {
     let mut a = app_with_timers();
-    a.stale_jobs = vec![7];
+    a.stale_jobs = vec![stale_job(7, None)];
     a.reset_session_jobs();
     assert!(a.jobs_rows().is_empty());
 }
@@ -413,7 +433,10 @@ fn a_switch_adopts_the_recorded_work() {
         SessionEvent {
             id: String::new(),
             parent_id: None,
-            kind: SessionEventKind::JobStarted { job_id: 9 },
+            kind: SessionEventKind::JobStarted {
+                job_id: 9,
+                cmd: Some("cargo watch".into()),
+            },
         },
         SessionEvent {
             id: String::new(),
@@ -441,8 +464,8 @@ fn a_switch_adopts_the_recorded_work() {
     );
     a.reset_session_jobs();
     let stale = a.adopt_recorded_work(&cursor, &snapshot.index).unwrap();
-    assert_eq!(stale, vec![9]);
-    assert_eq!(a.stale_jobs, vec![9]);
+    assert_eq!(stale, vec![stale_job(9, Some("cargo watch"))]);
+    assert_eq!(a.stale_jobs, stale);
     assert_eq!(
         a.timers.as_ref().unwrap().records().len(),
         1,
@@ -457,10 +480,10 @@ fn a_handover_warns_the_model_about_stale_job_ids() {
     let mut a = app();
     a.announce_stale_jobs(&[]);
     assert!(a.startup_notices.is_empty(), "no dead ids, no notice");
-    a.announce_stale_jobs(&[9, 12]);
+    a.announce_stale_jobs(&[stale_job(9, None), stale_job(12, None)]);
     assert_eq!(a.startup_notices.len(), 1);
     assert!(
-        a.startup_notices[0].contains("jobs [9, 12]"),
+        a.startup_notices[0].contains("jobs [9, c]"),
         "{:?}",
         a.startup_notices
     );

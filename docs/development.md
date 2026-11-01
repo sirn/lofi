@@ -46,7 +46,7 @@ The current event kinds are:
 | `turn_cancelled` | `model`, `elapsed_ms`, `cost`, `usage` | A user-cancelled turn whose partial output remains visible and available to later turns. |
 | `cursor` | `leaf_id` | Metadata that selects the transcript's logical head. It is not part of the conversation tree. |
 | `compaction` | Summary, range ids, checkpoint flag, and message counts | A durable checkpoint that replaces an older model-history prefix with a summary and retained tail. |
-| `job_started` / `job_finished` | `job_id` | Invisible lineage markers used to reconcile session-owned background jobs. |
+| `job_started` / `job_finished` | `job_id` (`job_started` also `cmd`) | Invisible lineage markers used to reconcile session-owned background jobs. The command is kept so a resumed session can name a job whose process is gone. |
 
 The recorder checkpoints each completed provider and tool round. It then appends the remaining events and a terminal marker when the turn settles. A hard-context-pressure stop writes the available turn data without a terminal marker because compaction continues the same turn.
 

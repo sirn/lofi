@@ -6,6 +6,17 @@ to a string (template interpolation, `String()`, `+`) throws, so read its fields
 or `JSON.stringify` it. All file paths are resolved against the
 workspace root. Read-only tools also accept absolute paths under registered roots, such as `lofi.tmpDir` and skill directories, and under granted directories. Relative paths that escape the workspace root are rejected. An absolute path outside every allowed root asks the user to grant its directory: read-only or read and write, covering the directory and its subdirectories and remembered across sessions. A write under a read-only grant asks the user to widen it. Use an absolute path to reach a granted directory.
 
+## Work handles
+
+Jobs, subagents, and timers share one handle space per session, so a handle
+names exactly one of them. The space seeds itself from the clock in
+microseconds plus random low bits, so two sessions that start at the same
+moment still begin far apart, and the handles sort by when the work started.
+A handle prints in base 36 with no padding and runs thirteen characters,
+such as `2k3f9xwq1m4dq`. Pass one back exactly as it was returned, as a
+string: the digits are base 36. A resumed session keeps the handles its
+transcript lists.
+
 ## lofi.read(path, opts?)
 
 Read a file as UTF-8 with optional line range, or attach an image.
@@ -334,8 +345,9 @@ session drops pending timers.
   `notifyAt fired: <message>`. Without one the notice reads `notifyAt fired`.
   Limited to 500 characters.
 
-**Returns:** `{ ok, at, message }`. Throws when `at` is not a parseable RFC
-3339 timestamp or `message` is not a string within the limit.
+**Returns:** `{ ok, id, at, message }`. `id` is the timer's handle. Throws
+when `at` is not a parseable RFC 3339 timestamp or `message` is not a string
+within the limit.
 
 ## lofi.notifyEvery(every, message?)
 
@@ -350,8 +362,9 @@ per elapsed window, never a burst of the missed ones.
   `notifyEvery fired: <message>`. Without one the notice reads
   `notifyEvery fired`. Limited to 500 characters.
 
-**Returns:** `{ ok, every, message }`. Throws when `every` is not a parseable
-duration at least 1s, or `message` is not a string within the limit.
+**Returns:** `{ ok, id, every, message }`. `id` is the timer's handle. Throws
+when `every` is not a parseable duration at least 1s, or `message` is not a
+string within the limit.
 
 ## lofi.notifyCancel()
 

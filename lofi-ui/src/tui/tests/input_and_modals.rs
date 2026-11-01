@@ -1110,7 +1110,6 @@ fn subagent_rows_name_the_model_the_live_cost_and_the_elapsed_time() {
     let screen = subagent_screen(&term);
     for expected in [
         "running",
-        "abc12345",
         "plexus/gpt-6.1-sol:high",
         "$0.0123",
         "65s",
@@ -1118,6 +1117,10 @@ fn subagent_rows_name_the_model_the_live_cost_and_the_elapsed_time() {
     ] {
         assert!(screen.contains(expected), "missing {expected}:\n{screen}");
     }
+    assert!(
+        !screen.contains("abc12345"),
+        "the row names the work, not the id: {screen}"
+    );
 }
 
 #[test]

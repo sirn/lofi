@@ -166,6 +166,7 @@ impl AgentLifecycle {
         let stale: Vec<u64> = lineage
             .outstanding
             .into_iter()
+            .map(|job| job.id)
             .filter(|id| !live.contains(id))
             .collect();
         let stale = if stale.is_empty() {
@@ -898,7 +899,7 @@ mod tests {
         let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
         let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
         let root = cursor.leaf_id();
-        let owner = cursor.record_job_started(42).unwrap();
+        let owner = cursor.record_job_started(42, "cargo test").unwrap();
 
         cursor.restore_branch(root).unwrap();
         cursor.record_job_finished(&owner, 42).unwrap();
@@ -918,7 +919,10 @@ mod tests {
         let mut started = [SessionEvent {
             id: String::new(),
             parent_id: None,
-            kind: SessionEventKind::JobStarted { job_id: 42 },
+            kind: SessionEventKind::JobStarted {
+                job_id: 42,
+                cmd: Some("cargo test".into()),
+            },
         }];
         cursor.append_events(&mut started).unwrap();
         let lifecycle = AgentLifecycle::new(CompactionConfig::default(), 100_000);
@@ -945,7 +949,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
         let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
-        let owner = cursor.record_job_started(42).unwrap();
+        let owner = cursor.record_job_started(42, "cargo test").unwrap();
         cursor.record_job_finished(&owner, 42).unwrap();
         // Roll back to the JobStarted event so the JobFinished marker lands on
         // the pruned branch while JobStarted stays on the selected lineage.

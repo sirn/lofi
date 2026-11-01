@@ -301,6 +301,7 @@ pub struct SubagentRegistry {
     generation: Arc<AtomicU64>,
     /// Creation order for `subagentList` cursors.
     next_born: Arc<AtomicU64>,
+    ids: lofi_types::IdSpace,
     /// Runtime that owns background runs. Captured at construction: the
     /// agent is built on the app's long-lived runtime, while a turn may
     /// run on a per-turn worker runtime that dies when the turn ends.
@@ -337,6 +338,7 @@ impl Default for SubagentRegistry {
             parent_session: Arc::default(),
             generation: Arc::default(),
             next_born: Arc::default(),
+            ids: lofi_types::IdSpace::new(),
             host_handle,
             notices,
             rehydrated_for: Arc::default(),
@@ -379,6 +381,16 @@ impl NoticeHub {
 }
 
 impl SubagentRegistry {
+    /// Build on the handle space the session shares with its jobs and
+    /// timers.
+    #[must_use]
+    pub fn with_ids(ids: lofi_types::IdSpace) -> Self {
+        Self {
+            ids,
+            ..Self::default()
+        }
+    }
+
     /// Notice stream for the host UI. Re-subscribe after a session rebuild;
     /// a lagging receiver skips to the newest notices.
     #[must_use]
@@ -2429,7 +2441,7 @@ async fn prepare(
         }
         evict_for_spawn(&mut entries)?;
         let id = loop {
-            let id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+            let id = lofi_types::short_id(registry.ids.next());
             // A killed owner's job bar outlives its entry (its old worker
             // may still finish in-flight work): do not hand the id to a
             // new run, which would then be unable to spawn jobs.

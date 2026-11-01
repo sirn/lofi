@@ -485,18 +485,18 @@ pub(crate) struct JobsModalState {
 }
 
 /// One jobs-tab row: an entry of the live registry, or a job a resumed
-/// transcript still lists as started. Only the registry knows a command,
-/// a log, or a screen.
+/// transcript still lists as started. Only the registry knows a log or a
+/// screen; a stale row knows what it ran only when the record kept that.
 pub(crate) enum JobRow {
     Live(lofi_core::JobInfo),
-    Stale(u64),
+    Stale(lofi_core::session::replay::OutstandingJob),
 }
 
 impl JobRow {
     pub(crate) fn id(&self) -> u64 {
         match self {
             Self::Live(job) => job.id,
-            Self::Stale(id) => *id,
+            Self::Stale(job) => job.id,
         }
     }
 

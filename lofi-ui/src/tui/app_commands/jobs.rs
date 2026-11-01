@@ -75,12 +75,12 @@ impl App {
             .map_or_else(Vec::new, lofi_core::JobRegistry::snapshot)
     }
 
-    /// Jobs-tab rows: the live registry, then the ids a resumed transcript
-    /// still lists as started. Those jobs died with their process, so the
-    /// row can show nothing but the id.
+    /// Jobs-tab rows: the live registry, then the jobs a resumed transcript
+    /// still lists as started. Those jobs died with their process, so the row
+    /// shows only what the record kept.
     pub(in crate::tui) fn jobs_rows(&self) -> Vec<JobRow> {
         let mut rows: Vec<JobRow> = self.jobs_snapshot().into_iter().map(JobRow::Live).collect();
-        rows.extend(self.stale_jobs.iter().copied().map(JobRow::Stale));
+        rows.extend(self.stale_jobs.iter().cloned().map(JobRow::Stale));
         rows
     }
 

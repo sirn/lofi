@@ -71,7 +71,7 @@ pub type ModelsFn = Arc<dyn Fn() -> Json + Send + Sync>;
 pub type JobReleaseFn = Arc<dyn Fn(u64) + Send + Sync>;
 /// Acquire lifecycle ownership for a spawned job. The returned release hook
 /// is retained by that job and called once when it reaches a terminal state.
-pub type JobAcquireFn = Arc<dyn Fn(u64) -> Option<JobReleaseFn> + Send + Sync>;
+pub type JobAcquireFn = Arc<dyn Fn(u64, &str) -> Option<JobReleaseFn> + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmReason {

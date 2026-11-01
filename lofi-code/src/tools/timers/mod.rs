@@ -7,11 +7,10 @@
 //! [`TimerRegistry::records`] and re-arms it with
 //! [`TimerRegistry::restore`] when the session resumes.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use lofi_types::TimerRecord;
+use lofi_types::{IdSpace, TimerRecord};
 
 mod bindings;
 #[cfg(test)]
@@ -82,7 +81,7 @@ pub struct TimerInfo {
 #[derive(Clone, Debug, Default)]
 pub struct TimerRegistry {
     timers: Arc<Mutex<Vec<Timer>>>,
-    next_id: Arc<AtomicU64>,
+    ids: IdSpace,
 }
 
 impl TimerRegistry {
@@ -91,28 +90,45 @@ impl TimerRegistry {
         Self::default()
     }
 
+    /// Build on the handle space the session shares with its jobs and
+    /// subagents, so a timer id names nothing else.
+    #[must_use]
+    pub fn with_ids(ids: IdSpace) -> Self {
+        Self {
+            timers: Arc::default(),
+            ids,
+        }
+    }
+
     /// Register a one-shot `notifyAt` wake-up. An `at` in the past fires on
-    /// the next [`take_notices`](Self::take_notices).
-    pub fn schedule_at(&self, owner: Option<&str>, at: SystemTime, message: Option<String>) {
+    /// the next [`take_notices`](Self::take_notices). Returns the timer's
+    /// handle.
+    pub fn schedule_at(&self, owner: Option<&str>, at: SystemTime, message: Option<String>) -> u64 {
         self.push(Timer {
             id: 0,
             due: at,
             every: None,
             owner: owner.map(str::to_owned),
             message,
-        });
+        })
     }
 
     /// Register a repeating `notifyEvery` wake-up whose first fire is one
-    /// interval from now. Callers must pass a non-zero `every`.
-    pub fn schedule_every(&self, owner: Option<&str>, every: Duration, message: Option<String>) {
+    /// interval from now. Callers must pass a non-zero `every`. Returns the
+    /// timer's handle.
+    pub fn schedule_every(
+        &self,
+        owner: Option<&str>,
+        every: Duration,
+        message: Option<String>,
+    ) -> u64 {
         self.push(Timer {
             id: 0,
             due: SystemTime::now() + every,
             every: Some(every),
             owner: owner.map(str::to_owned),
             message,
-        });
+        })
     }
 
     /// Pending timers of `owner`, both kinds. `None` counts the timers no
@@ -169,15 +185,11 @@ impl TimerRegistry {
     }
 
     /// Replace the pending set with a recorded snapshot, keeping the ids the
-    /// transcript lists so a cancel after a resume reaches the same timer.
-    /// New timers pick up above the highest restored id.
+    /// transcript lists so a cancel after a resume reaches the same timer. A
+    /// new timer takes a clock-seeded id, which no recorded one can equal.
     pub fn restore(&self, records: &[TimerRecord]) {
         self.locked(|timers| {
             *timers = records.iter().map(Timer::from_record).collect();
-            // Inside the lock: a schedule from another thread must not take
-            // an id this set already uses.
-            let highest = records.iter().map(|record| record.id).max().unwrap_or(0);
-            self.next_id.fetch_max(highest, Ordering::SeqCst);
         });
     }
 
@@ -242,9 +254,11 @@ impl TimerRegistry {
         })
     }
 
-    fn push(&self, mut timer: Timer) {
-        timer.id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
+    fn push(&self, mut timer: Timer) -> u64 {
+        let id = self.ids.next();
+        timer.id = id;
         self.locked(|timers| timers.push(timer));
+        id
     }
 
     fn locked<R>(&self, f: impl FnOnce(&mut Vec<Timer>) -> R) -> R {
