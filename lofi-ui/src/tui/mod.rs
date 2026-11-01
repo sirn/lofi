@@ -303,6 +303,16 @@ pub(crate) struct App {
     /// `jobs`. `/new` clears it so old subagent ids cannot resume into the
     /// new session.
     subagents: Option<lofi_core::SubagentRegistry>,
+    /// The timer set the transcript already holds. A tick that sees a
+    /// different set appends one `TimerState`, so a resumed session
+    /// re-arms what was still pending.
+    timers_recorded: Vec<lofi_types::TimerRecord>,
+    /// The timer set the selected lineage recorded. Startup re-arms it once
+    /// the agent hands the registry over; a `/resume` switch already has one.
+    resumed_timers: Vec<lofi_types::TimerRecord>,
+    /// Job ids a resumed transcript opened but never closed. They are gone
+    /// with the previous process, so the jobs tab lists them as stale.
+    stale_jobs: Vec<u64>,
     /// One dialog for every kind of running work: subagents, jobs, timers.
     background_modal: Option<BackgroundModalState>,
     model_choices: Vec<lofi_types::ModelChoice>,
@@ -389,5 +399,41 @@ impl App {
 
         restore_compaction_from_index(self, cursor, index);
         Ok(())
+    }
+
+    /// The selected session's own leftover work: the job ids its transcript
+    /// never closed, and the timer set it recorded. Startup resume and the
+    /// `/resume` picker both hand a session over, so both adopt it here and
+    /// show the same thing. Returns the stale jobs for the caller to announce.
+    fn adopt_recorded_work(
+        &mut self,
+        cursor: &store::SessionCursor,
+        index: &[store::SessionIndexEntry],
+    ) -> Result<Vec<u64>> {
+        let stale = lofi_core::session::replay::outstanding_job_ids_at(cursor, index)?;
+        let timers = lofi_core::session::replay::timer_records_at(cursor, index)?;
+        if let Some(registry) = &self.timers {
+            registry.restore(&timers);
+        }
+        self.timers_recorded.clone_from(&timers);
+        self.resumed_timers = timers;
+        self.stale_jobs.clone_from(&stale);
+        Ok(stale)
+    }
+
+    /// Keep the model off ids the previous run owned: it would otherwise see
+    /// the transcript's `JobStarted` markers and poll them.
+    fn announce_stale_jobs(&mut self, stale: &[u64]) {
+        if stale.is_empty() {
+            return;
+        }
+        let ids = stale
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.startup_notices.push(format!(
+            "session resumed: jobs [{ids}] from the previous run are no longer running; their ids are stale. Use jobSpawn for new background work."
+        ));
     }
 }

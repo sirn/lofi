@@ -288,6 +288,7 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
             | SessionEventKind::JobFinished { .. }
             | SessionEventKind::Cursor { .. }
             | SessionEventKind::RunSettled { .. }
+            | SessionEventKind::TimerState { .. }
             | SessionEventKind::Unknown => {}
             SessionEventKind::Compaction {
                 summarized,
@@ -365,6 +366,8 @@ pub fn agent_message_for_event(kind: &SessionEventKind) -> Option<Message> {
         SessionEventKind::JobStarted { .. } | SessionEventKind::JobFinished { .. } => None,
         // Accounting only; the model never sees subagent spend.
         SessionEventKind::SubagentUsage { .. } => None,
+        // Host bookkeeping: the timer set lives outside the conversation.
+        SessionEventKind::TimerState { .. } => None,
         SessionEventKind::Message(m) => Some(m.clone()),
         SessionEventKind::UserShell {
             command,
@@ -641,6 +644,42 @@ pub fn outstanding_job_ids_at(
     Ok(job_lifecycle_ids_at(cursor, index)?.outstanding)
 }
 
+/// The pending wake-up set a resume must re-arm: the last `TimerState` on
+/// the visible lineage, or empty when the session recorded none.
+#[must_use]
+pub fn timer_records(events: &[SessionEvent]) -> Vec<lofi_types::TimerRecord> {
+    let mut latest: Vec<lofi_types::TimerRecord> = Vec::new();
+    for i in visible_event_indices(events) {
+        if let SessionEventKind::TimerState { timers } = &events[i].kind {
+            latest.clone_from(timers);
+        }
+    }
+    latest
+}
+
+/// Like [`timer_records`] but reads only the `TimerState` entries of an
+/// indexed lineage; `index` must be lineage-scoped (see
+/// `SessionCursor::snapshot`).
+/// # Errors
+/// Propagates cursor I/O failures.
+pub fn timer_records_at(
+    cursor: &SessionCursor,
+    index: &[SessionIndexEntry],
+) -> lofi_error::Result<Vec<lofi_types::TimerRecord>> {
+    // Only the last snapshot on the lineage matters, so read that one event.
+    let Some(entry) = index
+        .iter()
+        .rev()
+        .find(|entry| entry.kind == IndexKind::TimerState)
+    else {
+        return Ok(Vec::new());
+    };
+    match cursor.event_at(entry.offset)?.kind {
+        SessionEventKind::TimerState { timers } => Ok(timers),
+        _ => Ok(Vec::new()),
+    }
+}
+
 pub(crate) struct JobLifecycleIds {
     pub started: Vec<u64>,
     pub outstanding: Vec<u64>,
@@ -748,6 +787,26 @@ mod tests {
         for (i, ev) in events.iter_mut().enumerate() {
             ev.id = format!("e{i}");
             ev.parent_id = (i > 0).then(|| format!("e{}", i - 1));
+        }
+    }
+
+    fn timer(id: u64) -> lofi_types::TimerRecord {
+        lofi_types::TimerRecord {
+            id,
+            due_ms: 1_700_000_000_000,
+            every_ms: None,
+            message: Some(format!("timer {id}")),
+            owner: None,
+        }
+    }
+
+    fn timer_state(timers: &[lofi_types::TimerRecord]) -> SessionEvent {
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::TimerState {
+                timers: timers.to_vec(),
+            },
         }
     }
 
@@ -1086,6 +1145,32 @@ mod tests {
             }
         });
         assert_eq!(prompts, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn timer_records_returns_the_last_state_on_the_lineage() {
+        let mut events = vec![
+            user_msg("a"),
+            timer_state(&[timer(3)]),
+            user_msg("b"),
+            timer_state(&[timer(4), timer(5)]),
+        ];
+        chain(&mut events);
+        assert_eq!(timer_records(&events), vec![timer(4), timer(5)]);
+    }
+
+    #[test]
+    fn timer_records_returns_empty_when_a_later_state_cleared_them() {
+        let mut events = vec![timer_state(&[timer(1)]), timer_state(&[])];
+        chain(&mut events);
+        assert!(timer_records(&events).is_empty());
+    }
+
+    #[test]
+    fn timer_state_does_not_map_to_ir() {
+        assert!(
+            agent_message_for_event(&SessionEventKind::TimerState { timers: vec![] }).is_none()
+        );
     }
 
     #[test]

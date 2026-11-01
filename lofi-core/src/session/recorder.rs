@@ -140,6 +140,24 @@ impl store::SessionCursor {
         Ok(())
     }
 
+    /// Persist the whole pending-wake-up set. The last record on the
+    /// lineage wins, so one snapshot per change is enough for a resume to
+    /// re-arm exactly what was pending.
+    ///
+    /// # Errors
+    /// Propagates transcript serialization and I/O failures.
+    pub fn record_timer_state(&self, timers: &[lofi_types::TimerRecord]) -> Result<()> {
+        let mut events = [SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::TimerState {
+                timers: timers.to_vec(),
+            },
+        }];
+        self.append_events(&mut events)?;
+        Ok(())
+    }
+
     /// Persist one ordinary session record.
     ///
     /// # Errors

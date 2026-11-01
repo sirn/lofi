@@ -97,6 +97,51 @@ fn reset_clears_every_owner() {
     assert_eq!(registry.cancel_owner(None), 0);
 }
 
+#[test]
+fn records_round_trip_through_restore() {
+    let registry = TimerRegistry::new();
+    registry.schedule_every(Some("sub"), Duration::from_secs(5), Some("tick".into()));
+    registry.schedule_at(None, past(), None);
+    let records = registry.records();
+    assert_eq!(records.len(), 2);
+    let resumed = TimerRegistry::new();
+    resumed.restore(&records);
+    assert_eq!(resumed.records(), records);
+    assert_eq!(resumed.pending_for(Some("sub")), 1);
+}
+
+#[test]
+fn a_restored_timer_fires_once_and_keeps_its_id() {
+    let record = TimerRecord {
+        id: 7,
+        due_ms: 1,
+        every_ms: None,
+        message: Some("wake".into()),
+        owner: None,
+    };
+    let registry = TimerRegistry::new();
+    registry.restore(&[record]);
+    assert_eq!(registry.listing()[0].id, 7);
+    assert_eq!(registry.take_notices(), vec!["notifyAt fired: wake"]);
+    assert!(registry.take_notices().is_empty());
+}
+
+#[test]
+fn a_new_timer_takes_an_id_above_the_restored_ones() {
+    let registry = TimerRegistry::new();
+    registry.restore(&[TimerRecord {
+        id: 41,
+        due_ms: 1,
+        every_ms: None,
+        message: None,
+        owner: None,
+    }]);
+    registry.schedule_at(None, past(), None);
+    let ids: Vec<u64> = registry.listing().iter().map(|timer| timer.id).collect();
+    assert!(ids.contains(&41));
+    assert!(ids.iter().any(|id| *id > 41), "ids are {ids:?}");
+}
+
 #[tokio::test]
 async fn sleep_blocks_for_the_requested_time() {
     let (_dir, tools) = tools();

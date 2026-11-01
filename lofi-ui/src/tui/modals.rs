@@ -397,9 +397,9 @@ pub(crate) enum BackgroundKill {
 }
 
 impl BackgroundModalState {
-    /// Rows of the active tab. Jobs come from the registry snapshot, which
-    /// the renderer reads fresh each frame.
-    pub(crate) fn len(&self, jobs: &[lofi_core::JobInfo]) -> usize {
+    /// Rows of the active tab. Job rows come from the registry snapshot plus
+    /// the resumed ids, which the caller reads fresh each frame.
+    pub(crate) fn len(&self, jobs: &[JobRow]) -> usize {
         match self.tab {
             BackgroundTab::Subagents => self.subagents.rows.len(),
             BackgroundTab::Jobs => jobs.len(),
@@ -482,6 +482,27 @@ pub(crate) struct SubagentTranscriptView {
 /// unbounded log never inflates memory.
 pub(crate) struct JobsModalState {
     pub(crate) selected: usize,
+}
+
+/// One jobs-tab row: an entry of the live registry, or a job a resumed
+/// transcript still lists as started. Only the registry knows a command,
+/// a log, or a screen.
+pub(crate) enum JobRow {
+    Live(lofi_core::JobInfo),
+    Stale(u64),
+}
+
+impl JobRow {
+    pub(crate) fn id(&self) -> u64 {
+        match self {
+            Self::Live(job) => job.id,
+            Self::Stale(id) => *id,
+        }
+    }
+
+    pub(crate) fn running(&self) -> bool {
+        matches!(self, Self::Live(job) if job.running)
+    }
 }
 
 /// Drill-in output view for one job. PTY jobs show their parsed terminal

@@ -27,6 +27,7 @@ impl SummaryAccumulator {
             | IndexKind::ContextReported
             | IndexKind::JobLifecycle
             | IndexKind::SubagentUsage
+            | IndexKind::TimerState
             | IndexKind::Other => {}
             IndexKind::SystemMessage => {
                 self.message_count = self.message_count.saturating_add(1);

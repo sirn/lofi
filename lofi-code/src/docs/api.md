@@ -321,7 +321,10 @@ delivers the notice as a notice prompt — the same path a finished background
 job's notice takes — so the agent wakes to it whether or not it is mid-turn.
 An `at` in the past fires on the next host poll.
 
-Nothing is persisted: the timer lives and dies with the session, and a `/new`
+The session records its pending timers, so a resume after a restart re-arms
+them: one whose time passed while lofi was down fires once on the next poll.
+Only a changed set is recorded, not each fire, so a repeating timer can deliver
+one extra notice after a restart even if it already fired before it. A `/new`
 session drops pending timers.
 
 **Parameters:**

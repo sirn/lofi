@@ -1129,6 +1129,34 @@ fn resume_preview_coalesces_streamed_assistant_chunks_and_skips_system_messages(
 }
 
 #[test]
+fn resume_preview_keeps_one_run_across_a_timer_record() {
+    let (_guard, store) = isolated_store();
+    let cwd = Path::new("/tmp/resume-preview-timer");
+    let path = store.create(cwd, &"p/m".into()).unwrap();
+    let timer = SessionEvent {
+        id: String::new(),
+        parent_id: None,
+        kind: SessionEventKind::TimerState { timers: Vec::new() },
+    };
+    let mut batch = [
+        ev(user("set a timer")),
+        ev(assistant("## Timer")),
+        timer,
+        ev(assistant(" set.")),
+    ];
+    append_events(&path, &mut batch, None).unwrap();
+
+    let files = store.list_files_for_cwd(cwd).unwrap();
+    assert_eq!(
+        files[0].quick_preview().as_deref(),
+        Some("agent: ## Timer set.")
+    );
+    let entry = files[0].inspect().unwrap();
+    assert_eq!(entry.last_message, "agent: ## Timer set.");
+    assert_eq!(entry.message_count, 2);
+}
+
+#[test]
 fn subagent_files_list_only_children_of_the_parent() {
     let (_guard, store) = isolated_store();
     let cwd = Path::new("/tmp/subagent-listing");

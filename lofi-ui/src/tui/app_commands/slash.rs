@@ -313,6 +313,11 @@ impl App {
             );
             return;
         }
+        // The old transcript stays readable, so it must not promise a
+        // wake-up this session shed.
+        if let Err(error) = self.record_dropped_timers() {
+            self.notify(NotifyKind::Warn, format!("record dropped timers: {error}"));
+        }
         self.reset_session_jobs();
         self.record_subagent_spend();
         self.clear_subagents();
@@ -337,7 +342,7 @@ impl App {
         self.bump_render_epoch();
     }
 
-    pub(super) fn reset_session_jobs(&mut self) {
+    pub(in crate::tui) fn reset_session_jobs(&mut self) {
         if let Some(jobs) = &self.jobs {
             jobs.reset();
         }
@@ -346,6 +351,9 @@ impl App {
         if let Some(timers) = &self.timers {
             timers.reset();
         }
+        self.timers_recorded.clear();
+        self.resumed_timers.clear();
+        self.stale_jobs.clear();
         self.background_modal = None;
         self.prompt_queue
             .retain(|queued| queued.kind == lofi_types::PromptKind::User);

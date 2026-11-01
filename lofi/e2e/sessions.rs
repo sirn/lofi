@@ -260,6 +260,54 @@ fn resume_reports_job_from_interrupted_process_as_stale() {
 }
 
 #[test]
+fn resume_rearms_a_timer_the_previous_run_left() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "wake",
+            "return await lofi.notifyAt(\"2030-01-01T00:00:00Z\", \"wake after restart\");",
+        ),
+        text_response("timer scenario settled"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut first = fixture.spawn(&[]);
+
+    first.submit("run timer scenario");
+    first.wait_for("timer scenario settled", WAIT);
+    fixture.wait_for_event_count("timer_state", 1);
+    assert_eq!(
+        event_types(&fixture.events())
+            .iter()
+            .filter(|kind| **kind == "timer_state")
+            .count(),
+        1,
+        "the pending timer is recorded once"
+    );
+
+    first.kill_now();
+    drop(first);
+
+    server.push(text_response("resumed timer scenario settled"));
+    let mut resumed = fixture.spawn(&["--continue"]);
+    resumed.submit("/timer");
+    // The dialog's own count, not the transcript's echo of the exec block.
+    resumed.wait_for("Timers (1)", WAIT);
+    resumed.wait_for("wake after restart", WAIT);
+    resumed.send(b"\x1b");
+    // A bare esc arrives with the next keys unless the dialog is gone first.
+    resumed.wait_gone("Timers (1)", WAIT);
+    resumed.submit("resumed timer scenario");
+    resumed.wait_for("resumed timer scenario settled", WAIT);
+    assert_eq!(
+        event_types(&fixture.events())
+            .iter()
+            .filter(|kind| **kind == "timer_state")
+            .count(),
+        1,
+        "a resume re-arms the recorded set without recording it again"
+    );
+}
+
+#[test]
 fn tree_rollback_excludes_future_turns_and_preserves_the_old_branch() {
     let server = MockServer::start(vec![
         text_response("rollback first answer"),

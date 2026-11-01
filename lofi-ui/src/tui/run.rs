@@ -316,20 +316,12 @@ pub(crate) async fn run_loop(
         // Jobs whose started marker is on this lineage but whose terminal
         // marker is not (process died, or user /tree'd a fresh branch
         // elsewhere). Their ids are stale; surface that on the first agent
-        // turn after resume so the model does not try to poll them. Reuses
-        // the already-built lineage index — no second file scan.
-        let outstanding =
-            lofi_core::session::replay::outstanding_job_ids_at(&cursor, &index).unwrap_or_default();
-        if !outstanding.is_empty() {
-            let ids = outstanding
-                .iter()
-                .map(u64::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            app.startup_notices.push(format!(
-                "session resumed: jobs [{ids}] from the previous run are no longer running; their ids are stale. Use jobSpawn for new background work."
-            ));
-        }
+        // turn after resume so the model does not try to poll them. Also
+        // takes the recorded timer set; re-armed below, once the agent hands
+        // the registry over. Reuses the already-built lineage index — no
+        // second file scan.
+        let stale = app.adopt_recorded_work(&cursor, &index)?;
+        app.announce_stale_jobs(&stale);
     }
     // The resume index is startup scratch. All persistent UI backing uses the
     // compact turn ranges/offsets built above and opens a fresh cursor snapshot
@@ -366,7 +358,11 @@ pub(crate) async fn run_loop(
         // Session-scoped state, read through the executor both backends own.
         let executor = a.tool_executor();
         app.jobs = Some(executor.jobs());
-        app.timers = Some(executor.timers());
+        // A resumed timer keeps the id the transcript lists, so the dialog
+        // and `notifyCancel` manage the same timer the previous run scheduled.
+        let timers = executor.timers();
+        timers.restore(&std::mem::take(&mut app.resumed_timers));
+        app.timers = Some(timers);
         app.subagents = Some(a.subagents());
         // The `/policy` dialog writes the choice here; every exec in the
         // session reads it. Cloned (not moved) so model switches keep it.
@@ -761,6 +757,10 @@ pub(crate) async fn run_loop(
                     }
                     dirty = true;
                 }
+                // A one-shot that just fired left the set, and a turn may
+                // have scheduled or cancelled one: the tick is where the
+                // transcript's copy catches up.
+                app.record_timer_state();
                 if app.refresh_confirmations() || !app.pending_confirms.is_empty() {
                     dirty = true;
                 }

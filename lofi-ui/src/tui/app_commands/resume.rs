@@ -246,6 +246,14 @@ impl App {
                 }
                 self.reset_session_jobs();
                 self.clear_subagents();
+                // A switch must show what a startup resume shows: the
+                // selected session's stale job ids and its pending timers.
+                match self.adopt_recorded_work(&cursor, &index) {
+                    Ok(stale) => self.announce_stale_jobs(&stale),
+                    Err(error) => {
+                        self.notify(NotifyKind::Error, format!("load session work: {error}"));
+                    }
+                }
                 if self.transcript.turns.len() > 1 {
                     let n = self.transcript.turns.len();
                     for turn in &mut self.transcript.turns[..n - 1] {

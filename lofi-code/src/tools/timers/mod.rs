@@ -2,12 +2,16 @@
 //! `lofi.notifyEvery`, and `lofi.notifyCancel`. Scheduling registers a
 //! timer here; when it comes due, its notice text leaves through
 //! [`TimerRegistry::take_notices`] and the host hands it to the agent the
-//! same way job notices are handed over. Nothing is persisted: timers live
-//! and die with the session registry.
+//! same way job notices are handed over. The registry lives and dies with
+//! the process; the host persists a snapshot through
+//! [`TimerRegistry::records`] and re-arms it with
+//! [`TimerRegistry::restore`] when the session resumes.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
+
+use lofi_types::TimerRecord;
 
 mod bindings;
 #[cfg(test)]
@@ -26,6 +30,18 @@ struct Timer {
 }
 
 impl Timer {
+    fn from_record(record: &TimerRecord) -> Self {
+        Self {
+            id: record.id,
+            due: SystemTime::UNIX_EPOCH + Duration::from_millis(record.due_ms),
+            every: record
+                .every_ms
+                .map(|every| Duration::from_millis(every).max(bindings::MIN_NOTIFY_EVERY)),
+            owner: record.owner.clone(),
+            message: record.message.clone(),
+        }
+    }
+
     fn notice_text(&self) -> String {
         let kind = if self.every.is_some() {
             "notifyEvery"
@@ -37,6 +53,15 @@ impl Timer {
             None => format!("{kind} fired"),
         }
     }
+}
+
+/// Unix milliseconds for a wall-clock instant; an instant before the epoch
+/// (never a real `due`) records as 0, which fires at once.
+fn unix_millis(at: SystemTime) -> u64 {
+    at.duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 /// One pending timer as the host lists it. `due` is absolute so the host
@@ -119,6 +144,41 @@ impl TimerRegistry {
             out.sort_by_key(|timer| timer.due);
             out
         })
+    }
+
+    /// The pending set as a transcript records it: the host snapshots this
+    /// when the set's shape changes and restores it when the session resumes.
+    #[must_use]
+    pub fn records(&self) -> Vec<TimerRecord> {
+        self.locked(|timers| {
+            let mut out: Vec<TimerRecord> = timers
+                .iter()
+                .map(|timer| TimerRecord {
+                    id: timer.id,
+                    due_ms: unix_millis(timer.due),
+                    every_ms: timer
+                        .every
+                        .map(|every| u64::try_from(every.as_millis()).unwrap_or(u64::MAX)),
+                    message: timer.message.clone(),
+                    owner: timer.owner.clone(),
+                })
+                .collect();
+            out.sort_by_key(|timer| timer.id);
+            out
+        })
+    }
+
+    /// Replace the pending set with a recorded snapshot, keeping the ids the
+    /// transcript lists so a cancel after a resume reaches the same timer.
+    /// New timers pick up above the highest restored id.
+    pub fn restore(&self, records: &[TimerRecord]) {
+        self.locked(|timers| {
+            *timers = records.iter().map(Timer::from_record).collect();
+            // Inside the lock: a schedule from another thread must not take
+            // an id this set already uses.
+            let highest = records.iter().map(|record| record.id).max().unwrap_or(0);
+            self.next_id.fetch_max(highest, Ordering::SeqCst);
+        });
     }
 
     /// Drop the timer `id`, whether one-shot or repeating. Returns whether

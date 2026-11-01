@@ -256,3 +256,238 @@ fn an_empty_tab_says_so_while_the_others_keep_their_counts() {
     assert!(screen.contains("no jobs"), "{screen}");
     assert!(screen.contains("Timers (1)"), "{screen}");
 }
+
+/// A transcript with only the header, ready to take events.
+fn session_file(dir: &tempfile::TempDir) -> PathBuf {
+    let path = dir.path().join("timers.jsonl");
+    std::fs::write(
+        &path,
+        b"{\"type\":\"meta\",\"version\":1,\"created\":0,\"cwd\":\"\",\"model\":\"p/m\"}\n",
+    )
+    .unwrap();
+    path
+}
+
+fn recorded_timers(path: &Path) -> Vec<lofi_types::TimerRecord> {
+    let cursor = store::SessionCursor::open(path.to_path_buf()).unwrap();
+    let snapshot = cursor.snapshot().unwrap();
+    lofi_core::session::replay::timer_records_at(&cursor, &snapshot.index).unwrap()
+}
+
+fn timer_state_count(path: &Path) -> usize {
+    store::SessionCursor::open(path.to_path_buf())
+        .unwrap()
+        .load_events()
+        .unwrap()
+        .iter()
+        .filter(|event| matches!(event.kind, SessionEventKind::TimerState { .. }))
+        .count()
+}
+
+#[test]
+fn a_changed_timer_set_reaches_the_transcript_once() {
+    use std::time::{Duration, SystemTime};
+    let dir = tempfile::tempdir().unwrap();
+    let path = session_file(&dir);
+    let mut a = app_with_timers();
+    a.session.cursor = Some(store::SessionCursor::new(path.clone(), None));
+    a.timers.as_ref().unwrap().schedule_at(
+        None,
+        SystemTime::now() + Duration::from_mins(1),
+        Some("check the build".into()),
+    );
+    a.record_timer_state();
+    a.record_timer_state();
+    assert_eq!(
+        timer_state_count(&path),
+        1,
+        "an unchanged set records nothing new"
+    );
+    let records = recorded_timers(&path);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].message.as_deref(), Some("check the build"));
+}
+
+#[test]
+fn a_repeating_timer_does_not_record_every_fire() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = session_file(&dir);
+    let mut a = app_with_timers();
+    a.session.cursor = Some(store::SessionCursor::new(path.clone(), None));
+    a.timers
+        .as_ref()
+        .unwrap()
+        .restore(&[lofi_types::TimerRecord {
+            id: 2,
+            due_ms: 1,
+            every_ms: Some(1_000),
+            message: Some("tick".into()),
+            owner: None,
+        }]);
+    a.record_timer_state();
+    assert_eq!(
+        a.take_timer_notices().len(),
+        1,
+        "the missed interval fires once"
+    );
+    a.record_timer_state();
+    assert_eq!(
+        timer_state_count(&path),
+        1,
+        "an advanced next fire alone is not worth a record"
+    );
+}
+
+#[test]
+fn the_jobs_tab_lists_a_job_the_previous_run_left() {
+    let mut a = app();
+    a.stale_jobs = vec![7];
+    a.open_background_modal(BackgroundTab::Jobs);
+    let screen = screen(&mut a);
+    assert!(screen.contains("stale"), "{screen}");
+    assert!(screen.contains('7'), "{screen}");
+    assert!(!screen.contains("no jobs"), "{screen}");
+}
+
+#[test]
+fn a_new_session_drops_the_stale_jobs() {
+    let mut a = app_with_timers();
+    a.stale_jobs = vec![7];
+    a.reset_session_jobs();
+    assert!(a.jobs_rows().is_empty());
+}
+
+#[test]
+fn a_failed_timer_record_is_retried() {
+    use std::time::{Duration, SystemTime};
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app_with_timers();
+    // A path whose parent is missing refuses the append.
+    a.session.cursor = Some(store::SessionCursor::new(
+        dir.path().join("gone").join("session.jsonl"),
+        None,
+    ));
+    a.timers.as_ref().unwrap().schedule_at(
+        None,
+        SystemTime::now() + Duration::from_mins(1),
+        Some("wake".into()),
+    );
+    a.record_timer_state();
+    assert!(
+        a.timers_recorded.is_empty(),
+        "an append that failed is not recorded"
+    );
+    let path = session_file(&dir);
+    a.session.cursor = Some(store::SessionCursor::new(path.clone(), None));
+    a.record_timer_state();
+    assert_eq!(recorded_timers(&path).len(), 1);
+}
+
+#[test]
+fn a_new_session_records_the_empty_set() {
+    use std::time::{Duration, SystemTime};
+    let dir = tempfile::tempdir().unwrap();
+    let path = session_file(&dir);
+    let mut a = app_with_timers();
+    a.session.cursor = Some(store::SessionCursor::new(path.clone(), None));
+    a.timers.as_ref().unwrap().schedule_at(
+        None,
+        SystemTime::now() + Duration::from_mins(1),
+        Some("wake".into()),
+    );
+    a.record_timer_state();
+    a.record_dropped_timers().unwrap();
+    assert!(
+        recorded_timers(&path).is_empty(),
+        "the old transcript drops the set this session shed"
+    );
+    assert_eq!(timer_state_count(&path), 2);
+}
+
+#[test]
+fn a_switch_adopts_the_recorded_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = session_file(&dir);
+    let cursor = store::SessionCursor::open(path).unwrap();
+    let mut events = [
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::JobStarted { job_id: 9 },
+        },
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::TimerState {
+                timers: vec![lofi_types::TimerRecord {
+                    id: 4,
+                    due_ms: 1,
+                    every_ms: None,
+                    message: Some("wake".into()),
+                    owner: None,
+                }],
+            },
+        },
+    ];
+    cursor.append_events(&mut events).unwrap();
+
+    let snapshot = cursor.snapshot().unwrap();
+    let mut a = app_with_timers();
+    // A timer the outgoing session still held must not survive the switch.
+    a.timers.as_ref().unwrap().schedule_at(
+        None,
+        std::time::SystemTime::now() + std::time::Duration::from_mins(1),
+        Some("outgoing".into()),
+    );
+    a.reset_session_jobs();
+    let stale = a.adopt_recorded_work(&cursor, &snapshot.index).unwrap();
+    assert_eq!(stale, vec![9]);
+    assert_eq!(a.stale_jobs, vec![9]);
+    assert_eq!(
+        a.timers.as_ref().unwrap().records().len(),
+        1,
+        "a switch replaces the outgoing set instead of merging with it"
+    );
+    assert_eq!(a.timers.as_ref().unwrap().listing()[0].id, 4);
+    assert_eq!(a.timers_recorded.len(), 1);
+}
+
+#[test]
+fn a_handover_warns_the_model_about_stale_job_ids() {
+    let mut a = app();
+    a.announce_stale_jobs(&[]);
+    assert!(a.startup_notices.is_empty(), "no dead ids, no notice");
+    a.announce_stale_jobs(&[9, 12]);
+    assert_eq!(a.startup_notices.len(), 1);
+    assert!(
+        a.startup_notices[0].contains("jobs [9, 12]"),
+        "{:?}",
+        a.startup_notices
+    );
+}
+
+#[test]
+fn a_new_session_reports_a_dropped_set_it_could_not_record() {
+    use std::time::{Duration, SystemTime};
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app_with_timers();
+    a.session.cursor = Some(store::SessionCursor::new(
+        dir.path().join("gone").join("session.jsonl"),
+        None,
+    ));
+    let timers = a.timers.as_ref().unwrap();
+    timers.schedule_at(
+        None,
+        SystemTime::now() + Duration::from_mins(1),
+        Some("wake".into()),
+    );
+    a.timers_recorded = timers.records();
+    assert!(
+        a.record_dropped_timers().is_err(),
+        "an append that failed is reported"
+    );
+    // `/new` sheds the timers either way; the warning is the transcript's.
+    a.reset_session_jobs();
+    assert!(a.timers.as_ref().unwrap().records().is_empty());
+    assert!(a.timers_recorded.is_empty());
+}

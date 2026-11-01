@@ -537,6 +537,7 @@ fn quick_entry_preview(path: &Path) -> Option<String> {
                     | "thinking_timing"
                     | "job_started"
                     | "job_finished"
+                    | "timer_state"
             ) || (matches!(event.kind.as_str(), "message" | "") && event.role == "system")
             {
                 continue;

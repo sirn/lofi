@@ -2,7 +2,7 @@
 use super::*;
 use crate::tui::{
     BackgroundKill, BackgroundModalState, BackgroundTab, BackgroundView, InfoLine, JobOutputView,
-    JobViewContent, SubagentRow, SubagentTranscriptView, Theme,
+    JobRow, JobViewContent, SubagentRow, SubagentTranscriptView, Theme,
 };
 
 use ratatui::style::Color;
@@ -1105,7 +1105,7 @@ fn render_background_view(f: &mut Frame, area: Rect, app: &App, view: &mut Backg
 fn render_background_list(f: &mut Frame, area: Rect, app: &App, modal: &mut BackgroundModalState) {
     use ratatui::widgets::ListState;
     let t = app.theme;
-    let jobs = app.jobs_snapshot();
+    let jobs = app.jobs_rows();
     let (rows, empty) = match modal.tab {
         BackgroundTab::Subagents => (
             modal
@@ -1118,7 +1118,7 @@ fn render_background_list(f: &mut Frame, area: Rect, app: &App, modal: &mut Back
         ),
         BackgroundTab::Jobs => (
             jobs.iter()
-                .map(|job| (job_row(job), job.running))
+                .map(|job| (job_row(job), job.running()))
                 .collect::<Vec<_>>(),
             "no jobs",
         ),
@@ -1237,13 +1237,13 @@ fn background_tab_bar(t: Theme, modal: &BackgroundModalState, labels: &[String])
 }
 
 /// What the armed kill would stop, for the help line.
-fn kill_label(modal: &BackgroundModalState, jobs: &[lofi_core::JobInfo]) -> String {
+fn kill_label(modal: &BackgroundModalState, jobs: &[JobRow]) -> String {
     let selected = modal.selected();
     match &modal.confirm {
         Some(BackgroundKill::All(tab)) => format!("all {}", tab.label()),
         Some(BackgroundKill::Job(_)) => jobs
             .get(selected)
-            .map_or_else(|| "this job".to_string(), |job| format!("job {}", job.id)),
+            .map_or_else(|| "this job".to_string(), |job| format!("job {}", job.id())),
         Some(BackgroundKill::Subagent(id)) => format!("subagent {id}"),
         Some(BackgroundKill::Timer(_)) => "this timer".to_string(),
         None => "this row".to_string(),
@@ -1275,7 +1275,18 @@ fn subagent_row(row: &SubagentRow) -> String {
     )
 }
 
-fn job_row(job: &lofi_core::JobInfo) -> String {
+fn job_row(row: &JobRow) -> String {
+    let JobRow::Live(job) = row else {
+        // A resumed transcript keeps only the id: the command, the duration
+        // and the log went with the process that owned them.
+        return format!(
+            "{:<9} #{:<6} {:>7}  {}",
+            "stale",
+            row.id(),
+            "",
+            "(from a previous run)"
+        );
+    };
     format!(
         "{:<9} #{:<6} {:>7}  {}",
         job.state,

@@ -83,7 +83,7 @@ impl App {
                 }
             }
             BackgroundTab::Jobs => {
-                let jobs = self.jobs_snapshot();
+                let jobs = self.jobs_rows();
                 let Some(mut modal) = self.background_modal.take() else {
                     return;
                 };
@@ -154,7 +154,7 @@ impl App {
 
         // Row list of the active tab. Letters belong to the tab bar, so a
         // row moves only on the arrow keys.
-        let jobs = self.jobs_snapshot();
+        let jobs = self.jobs_rows();
         let len = modal.len(&jobs);
         match k.code {
             KeyCode::Esc | KeyCode::Char('q') => return true,
@@ -237,7 +237,7 @@ impl App {
     fn background_view(
         &self,
         modal: &BackgroundModalState,
-        jobs: &[lofi_core::JobInfo],
+        jobs: &[JobRow],
     ) -> Option<BackgroundView> {
         let selected = modal.selected();
         match modal.tab {
@@ -246,8 +246,11 @@ impl App {
                 .rows
                 .get(selected)
                 .map(|row| BackgroundView::Subagent(self.subagent_transcript_view(row))),
+            // A stale job has no log and no screen left to show.
             BackgroundTab::Jobs => {
-                let job = jobs.get(selected)?;
+                let JobRow::Live(job) = jobs.get(selected)? else {
+                    return None;
+                };
                 let content = if job.tty {
                     self.jobs
                         .as_ref()
@@ -269,7 +272,7 @@ impl App {
     /// so `x` on one arms nothing.
     fn background_kill_target(
         modal: &BackgroundModalState,
-        jobs: &[lofi_core::JobInfo],
+        jobs: &[JobRow],
     ) -> Option<BackgroundKill> {
         let selected = modal.selected();
         match modal.tab {
@@ -279,8 +282,8 @@ impl App {
             }),
             BackgroundTab::Jobs => jobs
                 .get(selected)
-                .filter(|job| job.running)
-                .map(|job| BackgroundKill::Job(job.id)),
+                .filter(|job| job.running())
+                .map(|job| BackgroundKill::Job(job.id())),
             BackgroundTab::Timers => modal
                 .timers
                 .rows

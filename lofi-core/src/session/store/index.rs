@@ -145,6 +145,9 @@ pub enum IndexKind {
     /// Terminal record of a subagent run; rehydration finds it as the leaf
     /// of the selected lineage. Never model- or display-visible.
     RunSettled,
+    /// The pending wake-up timer set; a resume re-arms the last one on the
+    /// lineage. Never model- or display-visible.
+    TimerState,
     Other,
 }
 
@@ -171,6 +174,7 @@ pub(super) fn index_kind(kind_type: &str, role: Option<&str>) -> IndexKind {
         "context_reported" | "backend_usage" => IndexKind::ContextReported,
         "subagent_usage" => IndexKind::SubagentUsage,
         "run_settled" => IndexKind::RunSettled,
+        "timer_state" => IndexKind::TimerState,
         _ => IndexKind::Other,
     }
 }
@@ -198,6 +202,7 @@ pub(super) fn index_kind_for_event(kind: &SessionEventKind) -> IndexKind {
         SessionEventKind::ContextReported { .. } => IndexKind::ContextReported,
         SessionEventKind::SubagentUsage { .. } => IndexKind::SubagentUsage,
         SessionEventKind::RunSettled { .. } => IndexKind::RunSettled,
+        SessionEventKind::TimerState { .. } => IndexKind::TimerState,
         SessionEventKind::JobStarted { .. } | SessionEventKind::JobFinished { .. } => {
             IndexKind::JobLifecycle
         }

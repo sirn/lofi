@@ -137,6 +137,9 @@ impl App {
             jobs: None,
             timers: None,
             subagents: None,
+            timers_recorded: Vec::new(),
+            resumed_timers: Vec::new(),
+            stale_jobs: Vec::new(),
             background_modal: None,
         }
     }

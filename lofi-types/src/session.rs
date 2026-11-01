@@ -120,6 +120,13 @@ pub enum SessionEventKind {
     JobFinished {
         job_id: u64,
     },
+    /// The whole pending-timer set, appended whenever it changes. The last
+    /// record on the selected lineage is what a resume re-arms from, so a
+    /// cleared set (a `/new` session) persists as an empty list. Invisible to
+    /// the model and the transcript renderer.
+    TimerState {
+        timers: Vec<TimerRecord>,
+    },
     /// Spend of subagent runs that settled since the last record, as deltas.
     /// Accounting only: it never enters the model context.
     SubagentUsage {
@@ -147,6 +154,25 @@ pub enum SessionEventKind {
     /// stays loadable; consumers ignore these.
     #[serde(other)]
     Unknown,
+}
+
+/// One pending wake-up timer as the transcript records it. Times are unix
+/// milliseconds so a resumed session re-arms against a fixed wall clock. An
+/// `id` is kept as recorded: the host lists timers by it, so a cancel after a
+/// resume must reach the same timer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimerRecord {
+    pub id: u64,
+    /// Unix milliseconds of the next fire. One already in the past fires once
+    /// on the next poll instead of bursting every missed interval.
+    pub due_ms: u64,
+    /// `Some` for `notifyEvery`: the interval between fires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub every_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 /// One append-only line in a session transcript log.

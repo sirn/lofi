@@ -17,7 +17,7 @@ const MAX_SLEEP_SECS: f64 = 86_400.0;
 
 /// Shortest `notifyEvery` interval. A shorter one would queue a notice on
 /// every host poll and starve the turn it keeps waking.
-const MIN_NOTIFY_EVERY: Duration = Duration::from_secs(1);
+pub(super) const MIN_NOTIFY_EVERY: Duration = Duration::from_secs(1);
 
 /// Longest wake-up message carried in a notice.
 const MAX_MESSAGE_CHARS: usize = 500;
