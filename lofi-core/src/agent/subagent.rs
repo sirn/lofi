@@ -162,6 +162,12 @@ struct Entry {
     // background runs; a foreground run already blocks the parent's exec
     // block, so listing it there would duplicate it.
     background: bool,
+    // Resolved model of the run, so a status line names what runs instead
+    // of the session's model. A resume cannot change it.
+    model: Option<String>,
+    // Spend of the current run, shared with the settle guard: the event
+    // drain adds every `RoundUsage` here while the run is live.
+    totals: Option<Arc<std::sync::Mutex<ChildUsage>>>,
 }
 
 /// One running subagent, surfaced on the parent's status line.
@@ -169,6 +175,23 @@ pub struct SubagentRunning {
     pub id: String,
     pub elapsed_ms: u64,
     pub task: String,
+    /// The run's resolved model; `None` before the entry is claimed.
+    pub model: Option<String>,
+    /// The run's spend so far; `None` until the provider reports usage.
+    pub cost: Option<f64>,
+}
+
+/// One registry entry as `/subagent` lists it: the durable fields a store
+/// row cannot show for a run still in flight.
+pub struct SubagentLive {
+    pub id: String,
+    pub session: Option<String>,
+    pub running: bool,
+    pub model: Option<String>,
+    /// Elapsed milliseconds while the run is live; 0 once it settles.
+    pub elapsed_ms: u64,
+    /// The run's spend; after settle it is the terminal cost.
+    pub cost: Option<f64>,
 }
 
 /// One-line task summary for status surfaces: the first line, bounded so a
@@ -190,6 +213,14 @@ fn task_preview(prompt: &str) -> String {
 struct EventLog {
     events: VecDeque<Value>,
     next_seq: u64,
+}
+
+impl Entry {
+    fn spend(&self) -> Option<f64> {
+        let totals = self.totals.as_ref()?;
+        let totals = lock(totals);
+        totals.seen.then_some(totals.cost)
+    }
 }
 
 impl EventLog {
@@ -567,21 +598,72 @@ impl SubagentRegistry {
             .then(|| std::mem::take(&mut *u))
     }
 
-    /// Live overlay rows for `/subagent`: (id, transcript file name,
-    /// running). The store listing is the durable half; this covers runs
-    /// still in flight or not yet flushed.
+    /// Live overlay rows for `/subagent`. The store listing is the durable
+    /// half; this covers runs still in flight or not yet flushed.
     #[must_use]
-    pub fn live(&self) -> Vec<(String, Option<String>, bool)> {
+    pub fn live(&self) -> Vec<SubagentLive> {
         lock(&self.entries)
             .iter()
             .map(|(id, e)| {
-                (
-                    id.clone(),
-                    e.session.clone(),
-                    matches!(e.status, Status::Running),
-                )
+                let running = matches!(e.status, Status::Running);
+                SubagentLive {
+                    id: id.clone(),
+                    session: e.session.clone(),
+                    running,
+                    model: e.model.clone(),
+                    elapsed_ms: if running {
+                        e.started.elapsed().as_millis() as u64
+                    } else {
+                        0
+                    },
+                    cost: e.spend(),
+                }
             })
             .collect()
+    }
+
+    /// Cancel one run, from `subagentKill` or the host's dialog. A
+    /// terminal entry is left alone, so a kill stays idempotent and
+    /// reports the state it found. `None` means no entry has that id.
+    #[must_use]
+    pub fn kill(&self, id: &str, reason: Option<&str>) -> Option<&'static str> {
+        let (jobs, abort, status) = {
+            let mut entries = lock(&self.entries);
+            let entry = entries.get_mut(id)?;
+            if entry.status.is_terminal() {
+                return Some(entry.status.as_str());
+            }
+            entry.cancel.store(true, Ordering::SeqCst);
+            let mut state = json!({ "status": "cancelling" });
+            if let Some(reason) = reason {
+                state["reason"] = json!(reason);
+            }
+            entry.events.push("state", state);
+            (
+                entry.backend.tool_executor().jobs(),
+                entry.abort.clone(),
+                entry.status.as_str(),
+            )
+        };
+        // The child's process tree dies with it.
+        jobs.kill_owned(id);
+        // Backstop: a run that never observes the cancel flag is aborted
+        // after a grace period; its SettleOnDrop then settles it as
+        // cancelled.
+        if let Some(abort) = abort {
+            let registry = self.clone();
+            let id = id.to_string();
+            self.host_handle().spawn(async move {
+                tokio::time::sleep(KILL_GRACE).await;
+                let wedged = lock(&registry.entries)
+                    .get(&id)
+                    .is_some_and(|entry| !entry.status.is_terminal());
+                if wedged {
+                    abort.abort();
+                }
+            });
+        }
+        Some(status)
     }
 
     /// Currently running background runs, for the parent's status line.
@@ -593,15 +675,25 @@ impl SubagentRegistry {
         let mut running: Vec<_> = lock(&self.entries)
             .iter()
             .filter(|(_, e)| matches!(e.status, Status::Running) && e.background)
-            .map(|(id, e)| (e.started, id.clone(), e.task.clone()))
+            .map(|(id, e)| {
+                (
+                    e.started,
+                    id.clone(),
+                    e.task.clone(),
+                    e.spend(),
+                    e.model.clone(),
+                )
+            })
             .collect();
-        running.sort_by_key(|(started, _, _)| *started);
+        running.sort_by_key(|(started, _, _, _, _)| *started);
         running
             .into_iter()
-            .map(|(started, id, task)| SubagentRunning {
+            .map(|(started, id, task, cost, model)| SubagentRunning {
                 id,
                 elapsed_ms: started.elapsed().as_millis() as u64,
                 task,
+                model,
+                cost,
             })
             .collect()
     }
@@ -764,6 +856,9 @@ struct SettleOnDrop {
     // what the drain saw instead of losing it.
     totals: Arc<std::sync::Mutex<ChildUsage>>,
     generation: u64,
+    // The guard carries the model because a panic or a kill settles without
+    // the normal path, and the settled block still has to name it.
+    model: String,
     armed: bool,
 }
 
@@ -835,6 +930,7 @@ impl Drop for SettleOnDrop {
             "ok": false,
             "id": self.id,
             "status": status.as_str(),
+            "model": self.model,
             "error": if status == Status::Cancelled {
                 "cancelled"
             } else {
@@ -1308,44 +1404,13 @@ fn kill_op(registry: &SubagentRegistry, args: &Value) -> Value {
         Err(out) => return out,
     };
     let reason = match str_arg(args, "reason") {
-        Ok(reason) => reason.map(str::to_string),
+        Ok(reason) => reason,
         Err(e) => return arg_error_json(&e),
     };
-    let (jobs, abort) = {
-        let mut entries = lock(&registry.entries);
-        let Some(entry) = entries.get_mut(&id) else {
-            return unknown_id(&id);
-        };
-        if entry.status.is_terminal() {
-            // Idempotent: killing a finished run reports its state.
-            return json!({ "ok": true, "id": id, "status": entry.status.as_str() });
-        }
-        entry.cancel.store(true, Ordering::SeqCst);
-        let mut state = json!({ "status": "cancelling" });
-        if let Some(reason) = reason {
-            state["reason"] = json!(reason);
-        }
-        entry.events.push("state", state);
-        (entry.backend.tool_executor().jobs(), entry.abort.clone())
-    };
-    // The child's process tree dies with it.
-    jobs.kill_owned(&id);
-    // Backstop: a run that never observes the cancel flag is aborted after
-    // a grace period; its SettleOnDrop then settles it as cancelled.
-    if let Some(abort) = abort {
-        let registry = registry.clone();
-        let id = id.clone();
-        registry.host_handle().spawn(async move {
-            tokio::time::sleep(KILL_GRACE).await;
-            let wedged = lock(&registry.entries)
-                .get(&id)
-                .is_some_and(|entry| !entry.status.is_terminal());
-            if wedged {
-                abort.abort();
-            }
-        });
+    match registry.kill(&id, reason) {
+        Some(status) => json!({ "ok": true, "id": id, "status": status }),
+        None => unknown_id(&id),
     }
-    json!({ "ok": true, "id": id, "status": "running" })
 }
 
 fn notify_op(registry: &SubagentRegistry, args: &Value) -> Value {
@@ -1538,6 +1603,13 @@ async fn run_task(
     session_id: Option<String>,
 ) {
     let totals = Arc::new(std::sync::Mutex::new(ChildUsage::default()));
+    let model = backend.run_model().label();
+    if let Some(entry) = lock(&registry.entries).get_mut(&id) {
+        // The status surfaces read this accumulator through the entry, so a
+        // live cost needs no second copy of the run's spend.
+        entry.totals = Some(totals.clone());
+        entry.model = Some(model.clone());
+    }
     let guard = SettleOnDrop {
         registry: registry.clone(),
         id: id.clone(),
@@ -1546,6 +1618,7 @@ async fn run_task(
         cancel: cancel.clone(),
         totals: totals.clone(),
         generation,
+        model: model.clone(),
         armed: true,
     };
     let outcome = run_turn_with_timeout(
@@ -1579,7 +1652,7 @@ async fn run_task(
     if let Some(error) = retained.error.as_mut() {
         *error = cap_at_boundary(error, DEFAULT_OUTPUT_LIMIT);
     }
-    let out = outcome_json(&id, session_id.as_deref(), retained);
+    let out = outcome_json(&id, session_id.as_deref(), retained, &model);
     // Durable terminal record: after a restart the rehydration tail scan
     // restores exactly this status and outcome.
     let persisted = record_settled(
@@ -1646,7 +1719,7 @@ fn terminal_notice(id: &str, status: Status, outcome: &Value) -> String {
 
 /// The JSON body stored at settle and returned to the foreground caller,
 /// `subagentWait`, and (minus the result) `subagentStatus`.
-fn outcome_json(id: &str, session_id: Option<&str>, outcome: RunOutcome) -> Value {
+fn outcome_json(id: &str, session_id: Option<&str>, outcome: RunOutcome, model: &str) -> Value {
     let mut out = match (outcome.status, outcome.result, outcome.error) {
         (status @ Status::Completed, Some(result), _) => {
             json!({ "ok": true, "id": id, "status": status.as_str(), "result": result })
@@ -1674,6 +1747,9 @@ fn outcome_json(id: &str, session_id: Option<&str>, outcome: RunOutcome) -> Valu
     if let Some(session_id) = session_id {
         out["session_id"] = json!(session_id);
     }
+    // The settled block names the model the run used; the result text and
+    // the error never carry it.
+    out["model"] = json!(model);
     out
 }
 
@@ -2390,6 +2466,8 @@ async fn prepare(
                 // The notify argument marks the spawn path: only
                 // `subagentSpawn` starts a run with notices on.
                 background: notify,
+                model: Some(agent.run_model().label()),
+                totals: None,
             },
         );
         id
@@ -2499,7 +2577,6 @@ fn restore_entry(
             },
         ),
     };
-    let outcome = outcome_json(&id, Some(&session_id), outcome);
     // Restore the model the transcript ran with. When it is gone (provider
     // or model removed from the config), keep the session model and say so
     // on the entry instead of failing the restore.
@@ -2549,6 +2626,11 @@ fn restore_entry(
         None,
     ));
     let (state_tx, _) = watch::channel(status);
+    // The entry's model is the one a resume would run. The settled outcome
+    // names the model that produced it: the transcript's, even when the
+    // resume fell back to the session model.
+    let model = child.run_model().label();
+    let outcome = outcome_json(&id, Some(&session_id), outcome, &meta.model.label());
     let entry = Entry {
         status,
         backend: child,
@@ -2577,6 +2659,8 @@ fn restore_entry(
         // A rehydrated entry is settled; a resume re-claims it as
         // foreground and flips this flag itself.
         background: false,
+        model: Some(model),
+        totals: None,
     };
     (id, entry)
 }
@@ -2662,6 +2746,9 @@ fn prepare_resume(
         entry.used = registry.stamp();
         entry.started = std::time::Instant::now();
         entry.task = task;
+        // The previous run's spend belongs to it; this run installs its own
+        // accumulator when it starts.
+        entry.totals = None;
         // A previous kill barred this owner from acquiring jobs; the new run
         // needs them again.
         entry.backend.tool_executor().jobs().uncancel_owner(&id);

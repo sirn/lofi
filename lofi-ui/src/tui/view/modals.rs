@@ -1,6 +1,9 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
-use crate::tui::{InfoLine, JobViewContent, SubagentRow, SubagentsModalState, Theme};
+use crate::tui::{
+    BackgroundKill, BackgroundModalState, BackgroundTab, BackgroundView, InfoLine, JobOutputView,
+    JobViewContent, SubagentRow, SubagentTranscriptView, Theme,
+};
 
 use ratatui::style::Color;
 use ratatui::widgets::{Block as WidgetBlock, BorderType, Padding};
@@ -1072,110 +1075,240 @@ fn job_span_style(attrs: lofi_core::JobStyle) -> Style {
     style
 }
 
-/// `/subagent` modal. The list shows this session's subagents (live rows
-/// highlighted); `Enter` drills into a read-only transcript view.
-pub(super) fn render_subagents_modal(f: &mut Frame, area: Rect, app: &mut App) {
-    // Keep an open drill-in current while its run is live.
-    app.refresh_subagent_view();
-    // Take the modal out: the transcript drill-in renders turn components,
-    // whose render context borrows `&App`.
-    let Some(mut modal) = app.subagents_modal.take() else {
+/// The one dialog for running work. It keeps its own state on `App`, so
+/// it is taken out for the body: the drill-in renders turn components,
+/// whose render context borrows `&App`.
+pub(super) fn render_background_modal(f: &mut Frame, area: Rect, app: &mut App) {
+    app.refresh_background_modal();
+    let Some(mut modal) = app.background_modal.take() else {
         return;
     };
-    render_subagents_modal_inner(f, area, app, &mut modal);
-    app.subagents_modal = Some(modal);
+    if let Some(view) = &mut modal.view {
+        render_background_view(f, area, app, view);
+    } else {
+        render_background_list(f, area, app, &mut modal);
+    }
+    app.background_modal = Some(modal);
 }
 
-fn render_subagents_modal_inner(
-    f: &mut Frame,
-    area: Rect,
-    app: &App,
-    modal: &mut SubagentsModalState,
-) {
+/// The drill-in of one row: a job's output or a subagent's transcript.
+fn render_background_view(f: &mut Frame, area: Rect, app: &App, view: &mut BackgroundView) {
+    match view {
+        BackgroundView::Job(job) => render_job_output(f, area, app, job),
+        BackgroundView::Subagent(subagent) => {
+            render_subagent_transcript(f, area, app, subagent);
+        }
+    }
+}
+
+/// The list of the active tab, under the tab bar.
+fn render_background_list(f: &mut Frame, area: Rect, app: &App, modal: &mut BackgroundModalState) {
     use ratatui::widgets::ListState;
     let t = app.theme;
-
-    // Drill-in transcript view.
-    if modal.viewing.is_some() {
-        render_subagent_transcript(f, area, app, modal);
-        return;
-    }
-
-    // Subagent list.
-    let title = " subagents ";
-    let help = " ↑/↓ navigate  enter transcript  r reload  esc close ";
-    let row_for = |row: &SubagentRow| {
-        let mut preview = String::new();
-        let mut chars = row.preview.chars();
-        for _ in 0..40 {
-            match chars.next() {
-                Some(c) => preview.push(c),
-                None => break,
-            }
-        }
-        if chars.next().is_some() {
-            preview.push('\u{2026}');
-        }
-        let state = if row.running { "running" } else { "done" };
-        format!("{:<8} {:<24} {}", state, row.id, preview)
+    let jobs = app.jobs_snapshot();
+    let (rows, empty) = match modal.tab {
+        BackgroundTab::Subagents => (
+            modal
+                .subagents
+                .rows
+                .iter()
+                .map(|row| (subagent_row(row), row.running))
+                .collect::<Vec<_>>(),
+            "no subagents",
+        ),
+        BackgroundTab::Jobs => (
+            jobs.iter()
+                .map(|job| (job_row(job), job.running))
+                .collect::<Vec<_>>(),
+            "no jobs",
+        ),
+        BackgroundTab::Timers => (
+            modal
+                .timers
+                .rows
+                .iter()
+                .map(|timer| (timer_row(timer), true))
+                .collect::<Vec<_>>(),
+            "no timers",
+        ),
     };
-    let content_w = modal
-        .rows
+    let labels = background_tab_labels(modal, jobs.len());
+    let tabs_w = labels.iter().map(|label| prim::width(label)).sum::<usize>()
+        + 2 * labels.len().saturating_sub(1);
+    let title = " background ";
+    let help = if modal.confirm.is_some() {
+        format!(
+            " stop {}? y confirms  any other key cancels ",
+            kill_label(modal, &jobs)
+        )
+    } else {
+        " tab or letters switch  up/down select  enter open  x stop  X stop all  r reload  esc close "
+            .to_string()
+    };
+    let content_w = rows
         .iter()
-        .map(|row| prim::width(&row_for(row)))
+        .map(|(text, _)| prim::width(text))
         .max()
-        .unwrap_or(0);
-    let chrome_w = prim::width(title).max(prim::width(help));
-    let w = u16::try_from(content_w.max(chrome_w) + 4)
+        .unwrap_or(0)
+        .max(tabs_w)
+        .max(prim::width(empty));
+    let w = u16::try_from(content_w.max(prim::width(title).max(prim::width(&help))) + 4)
         .unwrap_or(40)
         .min(area.width);
-    let visible_rows = modal.rows.len().clamp(1, 18);
-    let desired_frame_h = u16::try_from(visible_rows + 4).unwrap_or(8);
+    let visible_rows = rows.len().clamp(1, 18);
+    let desired_frame_h = u16::try_from(visible_rows + 5).unwrap_or(9);
     let popup = centered_modal(area, w, desired_frame_h);
     f.render_widget(Clear, popup);
-    let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
-
-    if modal.rows.is_empty() {
+    let frame = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, &help));
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(frame.content);
+    f.render_widget(
+        Paragraph::new(background_tab_bar(t, modal, &labels)),
+        chunks[0],
+    );
+    let body = chunks[1];
+    if rows.is_empty() {
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "no subagents this session",
-                t.muted_style(),
-            ))),
-            rows.content,
+            Paragraph::new(Line::from(Span::styled(empty, t.muted_style()))),
+            body,
         );
         return;
     }
-
-    let items: Vec<ListItem> = modal
-        .rows
+    let items: Vec<ListItem> = rows
         .iter()
-        .map(|row| {
-            let style = if row.running {
+        .map(|(text, running)| {
+            let style = if *running {
                 t.text_style()
             } else {
                 t.muted_style()
             };
-            ListItem::new(Span::styled(row_for(row), style))
+            ListItem::new(Span::styled(text.clone(), style))
         })
         .collect();
     let list = List::new(items)
         .style(t.text_style())
         .highlight_style(t.selected_item_style());
-    let selected = modal.selected.min(modal.rows.len() - 1);
+    let selected = modal.selected().min(rows.len() - 1);
     let mut state = ListState::default().with_selected(Some(selected));
-    f.render_stateful_widget(list, rows.content, &mut state);
-    if modal.rows.len() > rows.content.height as usize {
-        let scroll_area = modal_scroll_area(rows.content);
+    f.render_stateful_widget(list, body, &mut state);
+    if rows.len() > body.height as usize {
+        let scroll_area = modal_scroll_area(body);
         prim::render_scrollbar(
             f,
             scroll_area.gutter,
             state.offset(),
-            rows.content.height as usize,
-            modal.rows.len(),
+            body.height as usize,
+            rows.len(),
             t.subtle,
             t.user,
         );
     }
+}
+
+/// Tab labels with the live count of every section, so a user on one tab
+/// still sees that work is running elsewhere.
+fn background_tab_labels(modal: &BackgroundModalState, jobs: usize) -> Vec<String> {
+    BackgroundTab::ALL
+        .iter()
+        .map(|tab| {
+            let count = match tab {
+                BackgroundTab::Subagents => modal.subagents.rows.len(),
+                BackgroundTab::Jobs => jobs,
+                BackgroundTab::Timers => modal.timers.rows.len(),
+            };
+            format!("{} ({count})", tab.title())
+        })
+        .collect()
+}
+
+fn background_tab_bar(t: Theme, modal: &BackgroundModalState, labels: &[String]) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, (tab, label)) in BackgroundTab::ALL.iter().zip(labels).enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        let style = if *tab == modal.tab {
+            t.selected_item_style()
+        } else {
+            t.muted_style()
+        };
+        spans.push(Span::styled(label.clone(), style));
+    }
+    Line::from(spans)
+}
+
+/// What the armed kill would stop, for the help line.
+fn kill_label(modal: &BackgroundModalState, jobs: &[lofi_core::JobInfo]) -> String {
+    let selected = modal.selected();
+    match &modal.confirm {
+        Some(BackgroundKill::All(tab)) => format!("all {}", tab.label()),
+        Some(BackgroundKill::Job(_)) => jobs
+            .get(selected)
+            .map_or_else(|| "this job".to_string(), |job| format!("job {}", job.id)),
+        Some(BackgroundKill::Subagent(id)) => format!("subagent {id}"),
+        Some(BackgroundKill::Timer(_)) => "this timer".to_string(),
+        None => "this row".to_string(),
+    }
+}
+
+fn subagent_row(row: &SubagentRow) -> String {
+    let state = if row.running { "running" } else { "done" };
+    // Model, cost, and elapsed come from the live registry only; a settled
+    // row read from the store leaves those columns empty.
+    let model = row
+        .model
+        .as_deref()
+        .map(|model| prim::truncate(model, 24))
+        .unwrap_or_default();
+    let cost = row
+        .cost
+        .map(|cost| format!("${cost:.4}"))
+        .unwrap_or_default();
+    let elapsed = if row.running {
+        prim::fmt_duration(std::time::Duration::from_millis(row.elapsed_ms))
+    } else {
+        String::new()
+    };
+    format!(
+        "{state:<8} {:<24} {model:<24} {cost:<8} {elapsed:<8} {}",
+        row.id,
+        one_line(&row.preview, 40)
+    )
+}
+
+fn job_row(job: &lofi_core::JobInfo) -> String {
+    format!(
+        "{:<9} #{:<6} {:>7}  {}",
+        job.state,
+        job.id,
+        fmt_job_duration(job.duration_ms),
+        one_line(&job.cmd, 40)
+    )
+}
+
+fn timer_row(timer: &lofi_core::TimerInfo) -> String {
+    let due = timer
+        .due
+        .duration_since(std::time::SystemTime::now())
+        .map_or_else(
+            |_| "due".to_string(),
+            |left| format!("in {}", fmt_job_duration(left.as_millis() as u64)),
+        );
+    let kind = timer.every.map_or_else(
+        || "once".to_string(),
+        |every| format!("every {}", fmt_job_duration(every.as_millis() as u64)),
+    );
+    let message = timer
+        .message
+        .as_deref()
+        .map_or_else(String::new, |message| one_line(message, 40));
+    format!("{due:<10} {kind:<14} {message}")
+}
+
+/// One row's worth of a command or a message: newlines collapse so a
+/// pasted body cannot turn one row into several.
+fn one_line(text: &str, max: usize) -> String {
+    let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    prim::truncate(&joined, max)
 }
 
 /// Subagent transcript drill-in: the same turn components as the main
@@ -1185,12 +1318,9 @@ fn render_subagent_transcript(
     f: &mut Frame,
     area: Rect,
     app: &App,
-    modal: &mut SubagentsModalState,
+    view: &mut SubagentTranscriptView,
 ) {
     let t = app.theme;
-    let Some(view) = &mut modal.viewing else {
-        return;
-    };
     let title = format!(" subagent {} transcript ", view.id);
     let help = " ↑/↓ scroll  g top  G bottom  esc back ";
     let w = area.width.saturating_sub(4).clamp(40, 100);
@@ -1331,167 +1461,67 @@ fn render_subagent_transcript(
 
 /// `/job` modal. PTY jobs show a parsed terminal screen. Plain jobs show a
 /// bounded log tail.
-pub(super) fn render_jobs_modal(f: &mut Frame, area: Rect, app: &mut App) {
-    use ratatui::widgets::ListState;
-    if app.jobs_modal.is_none() {
-        return;
-    }
-    // Keep the open output view current while the modal is rendered.
-    app.refresh_job_output();
+/// One job's output: its parsed terminal screen, or its log tail.
+fn render_job_output(f: &mut Frame, area: Rect, app: &App, view: &JobOutputView) {
     let t = app.theme;
-    let Some(modal) = app.jobs_modal.as_ref() else {
-        return;
-    };
-
-    // Drill-in output view.
-    if let Some(view) = &modal.viewing {
-        match &view.content {
-            JobViewContent::Terminal(screen) => {
-                let title = format!(" job {} terminal ", view.id);
-                let popup = centered_modal(
-                    area,
-                    screen.cols.saturating_add(4),
-                    screen.rows.saturating_add(4),
-                );
-                f.render_widget(Clear, popup);
-                let rows = render_modal_frame(
+    match &view.content {
+        JobViewContent::Terminal(screen) => {
+            let title = format!(" job {} terminal ", view.id);
+            let popup = centered_modal(
+                area,
+                screen.cols.saturating_add(4),
+                screen.rows.saturating_add(4),
+            );
+            f.render_widget(Clear, popup);
+            let rows = render_modal_frame(
+                f,
+                popup,
+                t,
+                modal_title(t, title),
+                modal_help(t, " esc back "),
+            );
+            let visible = screen.lines.iter().map(|line| {
+                Line::from(
+                    line.spans
+                        .iter()
+                        .map(|span| Span::styled(span.text.clone(), job_span_style(span.style)))
+                        .collect::<Vec<_>>(),
+                )
+            });
+            f.render_widget(Paragraph::new(visible.collect::<Vec<_>>()), rows.content);
+        }
+        JobViewContent::Log { lines, scroll, .. } => {
+            let title = format!(" job {} log ", view.id);
+            let help = " up/down scroll  g top  G follow  esc back ";
+            let w = area.width.saturating_sub(4).clamp(40, 100);
+            let h = area.height.saturating_sub(4).clamp(8, 28);
+            let popup = centered_modal(area, w, h);
+            f.render_widget(Clear, popup);
+            let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
+            let body_h = rows.content.height as usize;
+            let total = lines.len();
+            let end = total.saturating_sub(*scroll);
+            let start = end.saturating_sub(body_h);
+            let visible: Vec<Line> = lines
+                .iter()
+                .skip(start)
+                .take(body_h)
+                .map(|line| Line::from(Span::styled(line.clone(), t.text_style())))
+                .collect();
+            f.render_widget(Paragraph::new(visible), rows.content);
+            if total > body_h {
+                let scroll_area = modal_scroll_area(rows.content);
+                prim::render_scrollbar(
                     f,
-                    popup,
-                    t,
-                    modal_title(t, title),
-                    modal_help(t, " esc back "),
+                    scroll_area.gutter,
+                    start,
+                    body_h,
+                    total,
+                    t.subtle,
+                    t.user,
                 );
-                let visible = screen.lines.iter().map(|line| {
-                    Line::from(
-                        line.spans
-                            .iter()
-                            .map(|span| Span::styled(span.text.clone(), job_span_style(span.style)))
-                            .collect::<Vec<_>>(),
-                    )
-                });
-                f.render_widget(Paragraph::new(visible.collect::<Vec<_>>()), rows.content);
-            }
-            JobViewContent::Log { lines, scroll, .. } => {
-                let title = format!(" job {} log ", view.id);
-                let help = " ↑/↓ scroll  g top  G follow  esc back ";
-                let w = area.width.saturating_sub(4).clamp(40, 100);
-                let h = area.height.saturating_sub(4).clamp(8, 28);
-                let popup = centered_modal(area, w, h);
-                f.render_widget(Clear, popup);
-                let rows =
-                    render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
-                let body_h = rows.content.height as usize;
-                let total = lines.len();
-                let end = total.saturating_sub(*scroll);
-                let start = end.saturating_sub(body_h);
-                let visible: Vec<Line> = lines
-                    .iter()
-                    .skip(start)
-                    .take(body_h)
-                    .map(|line| Line::from(Span::styled(line.clone(), t.text_style())))
-                    .collect();
-                f.render_widget(Paragraph::new(visible), rows.content);
-                if total > body_h {
-                    let scroll_area = modal_scroll_area(rows.content);
-                    prim::render_scrollbar(
-                        f,
-                        scroll_area.gutter,
-                        start,
-                        body_h,
-                        total,
-                        t.subtle,
-                        t.user,
-                    );
-                }
             }
         }
-        return;
-    }
-
-    // Job list.
-    let jobs = app.jobs_snapshot();
-    let Some(modal) = app.jobs_modal.as_ref() else {
-        return;
-    };
-    let title = " background jobs ";
-    let help = if modal.confirm_kill.is_some() {
-        " kill this job? y confirm  any other key cancels "
-    } else {
-        " ↑/↓ navigate  enter output  x stop  esc close "
-    };
-    let row_for = |j: &lofi_core::JobInfo| {
-        let mut cmd = String::new();
-        let mut chars = j.cmd.chars();
-        for _ in 0..40 {
-            match chars.next() {
-                Some(c) => cmd.push(c),
-                None => break,
-            }
-        }
-        if chars.next().is_some() {
-            cmd.push('\u{2026}');
-        }
-        format!(
-            "{:<9} {:>7}  {}",
-            j.state,
-            fmt_job_duration(j.duration_ms),
-            cmd
-        )
-    };
-    let content_w = jobs
-        .iter()
-        .map(|j| prim::width(&row_for(j)))
-        .max()
-        .unwrap_or(0);
-    let chrome_w = prim::width(title).max(prim::width(help));
-    let w = u16::try_from(content_w.max(chrome_w) + 4)
-        .unwrap_or(40)
-        .min(area.width);
-    let visible_rows = jobs.len().clamp(1, 18);
-    let desired_frame_h = u16::try_from(visible_rows + 4).unwrap_or(8);
-    let popup = centered_modal(area, w, desired_frame_h);
-    f.render_widget(Clear, popup);
-    let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
-
-    if jobs.is_empty() {
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "no background jobs this session",
-                t.muted_style(),
-            ))),
-            rows.content,
-        );
-        return;
-    }
-
-    let items: Vec<ListItem> = jobs
-        .iter()
-        .map(|j| {
-            let style = if j.running {
-                t.text_style()
-            } else {
-                t.muted_style()
-            };
-            ListItem::new(Span::styled(row_for(j), style))
-        })
-        .collect();
-    let list = List::new(items)
-        .style(t.text_style())
-        .highlight_style(t.selected_item_style());
-    let selected = modal.selected.min(jobs.len() - 1);
-    let mut state = ListState::default().with_selected(Some(selected));
-    f.render_stateful_widget(list, rows.content, &mut state);
-    if jobs.len() > rows.content.height as usize {
-        let scroll_area = modal_scroll_area(rows.content);
-        prim::render_scrollbar(
-            f,
-            scroll_area.gutter,
-            state.offset(),
-            rows.content.height as usize,
-            jobs.len(),
-            t.subtle,
-            t.user,
-        );
     }
 }
 #[cfg(test)]

@@ -71,11 +71,15 @@ impl App {
                 true
             }
             "/job" | "/jobs" => {
-                self.open_jobs_modal();
+                self.open_background_modal(BackgroundTab::Jobs);
                 true
             }
             "/subagent" | "/subagents" => {
-                self.open_subagents_modal();
+                self.open_background_modal(BackgroundTab::Subagents);
+                true
+            }
+            "/timer" | "/timers" => {
+                self.open_background_modal(BackgroundTab::Timers);
                 true
             }
             _ if cmd.starts_with('/') => {
@@ -230,6 +234,11 @@ impl App {
             "list background jobs, view output, stop",
         ));
         lines.push(info_kv(t, "/subagent", "list subagents, view a transcript"));
+        lines.push(info_kv(t, "/timer", "list pending timers"));
+        lines.push(info_note(
+            t,
+            "ctrl+b opens the background dialog (subagents, jobs, timers) on an empty prompt.",
+        ));
         lines.push(info_kv(t, "/quit", "exit"));
         lines.push(InfoLine::Text(Line::from("")));
         lines.push(info_note(
@@ -337,7 +346,7 @@ impl App {
         if let Some(timers) = &self.timers {
             timers.reset();
         }
-        self.jobs_modal = None;
+        self.background_modal = None;
         self.prompt_queue
             .retain(|queued| queued.kind == lofi_types::PromptKind::User);
         self.startup_notices.clear();

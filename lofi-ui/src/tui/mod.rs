@@ -150,7 +150,6 @@ const YANK_NOTIFY: Duration = Duration::from_secs(2);
 const NOTIFY_TTL: Duration = Duration::from_secs(5);
 /// Cap on the notification area height: a long transient message wraps
 /// across up to this many rows instead of truncating to one.
-const NOTIFY_MAX_LINES: usize = 3;
 /// Byte budget for the plain-job output viewer. PTY jobs use their bounded
 /// terminal screen instead.
 const JOB_LOG_WINDOW_BYTES: usize = 128 * 1024;
@@ -187,6 +186,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/resume", "pick a past session to resume"),
     ("/session", "show session info"),
     ("/subagent", "list subagents, view a transcript"),
+    ("/timer", "list pending timers"),
     ("/tree", "roll back to a past turn"),
     ("/model", "switch the active model"),
     ("/policy", "change bash approval mode for this session"),
@@ -303,8 +303,8 @@ pub(crate) struct App {
     /// `jobs`. `/new` clears it so old subagent ids cannot resume into the
     /// new session.
     subagents: Option<lofi_core::SubagentRegistry>,
-    jobs_modal: Option<JobsModalState>,
-    subagents_modal: Option<SubagentsModalState>,
+    /// One dialog for every kind of running work: subagents, jobs, timers.
+    background_modal: Option<BackgroundModalState>,
     model_choices: Vec<lofi_types::ModelChoice>,
     pending_model_switch: Option<String>,
     info: Option<InfoModal>,

@@ -125,7 +125,7 @@ pub(super) fn abbreviate_path(path: &std::path::Path, max: usize) -> String {
 
 /// Clips the string to the given number of display columns, marking a cut
 /// with a trailing ellipsis.
-fn clip_marked(s: &str, max: usize) -> String {
+pub(super) fn clip_marked(s: &str, max: usize) -> String {
     let w = |t: &str| unicode_width::UnicodeWidthStr::width(t);
     if w(s) <= max {
         return s.to_string();

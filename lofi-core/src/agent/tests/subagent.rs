@@ -1257,6 +1257,9 @@ async fn kill_is_idempotent_and_reports_terminal_state() {
     assert_eq!(first["ok"], json!(true), "{first}");
     let done = hook(SubagentOp::Wait, json!({ "id": id, "timeout_ms": 30_000 })).await;
     assert_eq!(done["status"], json!("cancelled"), "{done}");
+    // The kill backstop settles through the drop guard, which names the
+    // model like the normal settle does.
+    assert_eq!(done["model"], json!("p/m"), "{done}");
     let second = hook(SubagentOp::Kill, json!({ "id": id })).await;
     assert_eq!(second["ok"], json!(true), "{second}");
     assert_eq!(second["status"], json!("cancelled"), "{second}");
@@ -1609,6 +1612,29 @@ async fn rehydrate_legacy_transcript_falls_back_to_file_stem() {
 }
 
 #[tokio::test]
+async fn a_restored_outcome_names_the_transcript_model() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let store = crate::session::store::SessionStore::open().unwrap();
+    let cursor = store
+        .create_subagent_cursor(dir.path(), &"gone/m".into(), Some("parent-x"), "runid006")
+        .unwrap();
+    cursor.append_events(&mut [user_event("a")]).unwrap();
+
+    let agent = agent_with(vec![], dir.path()).with_subagent_support(support(dir.path()));
+    agent.subagents().set_parent_session("parent-x");
+    agent.subagents().rehydrate(&agent, &support(dir.path()));
+    let hook = agent.subagent_hook().unwrap();
+
+    // The resume may fall back to the session model when the transcript
+    // model is gone; the settled outcome still describes the run that
+    // produced it.
+    let out = hook(SubagentOp::Wait, json!({ "id": "runid006" })).await;
+    assert_eq!(out["model"], json!("gone/m"), "{out}");
+}
+
+#[tokio::test]
 async fn rehydrate_runs_once_per_parent_and_after_clear() {
     let _env = env_lock();
     let _state = StateEnv::new();
@@ -1696,6 +1722,94 @@ async fn resume_after_rehydrate_trims_dangling_tool_calls() {
     assert!(texts.contains(&"b".to_string()), "{texts:?}");
 }
 
+// Reports usage on the tool round, then pends on the follow-up: the run
+// stays live with a spent amount, the state the status line and the
+// `/subagent` rows read.
+struct SpendThenPendProvider;
+
+#[async_trait]
+impl Provider for SpendThenPendProvider {
+    async fn stream(
+        &self,
+        _model: &Model,
+        messages: &[Message],
+        _tools: &[ToolSchema],
+    ) -> Result<futures::stream::BoxStream<'static, Result<StreamingEvent>>> {
+        let round = match messages.last() {
+            Some(m) if m.role == Role::Tool => std::future::pending().await,
+            _ => {
+                let mut round = exec_round("return 1");
+                if let Some(StreamingEvent::Done { usage, .. }) = round.last_mut() {
+                    usage.input_tokens = 1_000_000;
+                }
+                round
+            }
+        };
+        Ok(Box::pin(stream::iter(round.into_iter().map(Ok))))
+    }
+}
+
+#[tokio::test]
+async fn a_live_run_reports_its_model_and_spend() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let mut agent = agent_with(vec![], dir.path()).with_subagent_support(support(dir.path()));
+    // A priced model: one million input tokens bill at the input price.
+    agent.model.input_price = Some(3.0);
+    agent.model.output_price = Some(15.0);
+    agent.provider = Arc::new(SpendThenPendProvider);
+    let hook = agent.subagent_hook().unwrap();
+    let registry = agent.subagents();
+
+    let out = hook(SubagentOp::Spawn, json!({ "prompt": "spend one" })).await;
+    assert_eq!(out["ok"], json!(true), "{out}");
+    let id = out["id"].as_str().unwrap().to_string();
+
+    let mut observed = None;
+    for _ in 0..200 {
+        if let Some(run) = registry
+            .running()
+            .into_iter()
+            .find(|run| run.id == id && run.cost.is_some())
+        {
+            observed = Some(run);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let Some(run) = observed else {
+        panic!("the live spend never reached the registry");
+    };
+    assert_eq!(run.model.as_deref(), Some("p/m"));
+    assert_eq!(run.cost, Some(3.0));
+    // The dialog reads the same fields through `live`.
+    let Some(live) = registry.live().into_iter().find(|run| run.id == id) else {
+        panic!("live row");
+    };
+    assert!(live.running);
+    assert_eq!(live.cost, Some(3.0));
+
+    hook(SubagentOp::Kill, json!({ "id": id })).await;
+}
+
+#[tokio::test]
+async fn the_settled_outcome_names_the_model() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let mut agent = agent_with(vec![], dir.path()).with_subagent_support(support(dir.path()));
+    agent.provider = Arc::new(SpendThenPendProvider);
+    let hook = agent.subagent_hook().unwrap();
+
+    let out = hook(
+        SubagentOp::Run,
+        json!({ "prompt": "spend two", "timeout_ms": 100 }),
+    )
+    .await;
+    assert_eq!(out["model"], json!("p/m"), "{out}");
+}
+
 #[tokio::test]
 async fn running_reports_in_flight_runs_with_a_bounded_task_preview() {
     let _env = env_lock();
@@ -1745,7 +1859,8 @@ async fn running_lists_background_runs_only() {
     });
     let mut foreground_id = None;
     for _ in 0..200 {
-        if let Some((id, _, true)) = registry.live().into_iter().next() {
+        if let Some(run) = registry.live().into_iter().find(|run| run.running) {
+            let id = run.id;
             foreground_id = Some(id);
             break;
         }

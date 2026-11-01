@@ -895,12 +895,14 @@ fn jobs_modal_lists_opens_output_and_stops_a_running_job() {
 
     tui.submit("start modal job");
     tui.wait_for("modal job answer marker", WAIT);
+    // The footer counts the running job without the dialog open.
+    tui.wait_for("1 job", WAIT);
     let mut job = ProcessGuard::new(spawned_pid(&fixture));
     assert!(process_is_alive(job.pid()));
 
     tui.clear_output();
     tui.submit("/job");
-    tui.wait_for("background jobs", WAIT);
+    tui.wait_for("Jobs (1)", WAIT);
     tui.send(b"\r");
     // The drill-in footer proves the modal opened. Its body marker alone does
     // not: the transcript carries the same text inside the spawned command.
@@ -913,10 +915,12 @@ fn jobs_modal_lists_opens_output_and_stops_a_running_job() {
     tui.wait_gone("esc back", WAIT);
     tui.clear_output();
     tui.send(b"x");
-    tui.wait_for("this job?", WAIT);
+    tui.wait_for("? y confirms", WAIT);
     tui.send(b"y");
     wait_for_process_exit(job.pid());
     job.disarm();
+    // The count leaves with the job.
+    tui.wait_gone("1 job", WAIT);
 }
 
 #[test]

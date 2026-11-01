@@ -913,7 +913,7 @@ fn subagent_command_opens_empty_modal_without_a_session() {
     assert!(a.slash_command("/subagent"));
     // The test app has no session sink: the modal opens with live registry
     // rows only, and there are none.
-    let modal = a.subagents_modal.as_ref().expect("subagents modal");
+    let modal = subagents_tab(&a);
     assert!(modal.rows.is_empty());
 }
 
@@ -921,10 +921,10 @@ fn subagent_command_opens_empty_modal_without_a_session() {
 fn subagent_modal_esc_closes() {
     let mut a = app();
     assert!(a.slash_command("/subagent"));
-    assert!(a.subagents_modal.is_some());
+    assert!(a.background_modal.is_some());
     let mut run = None;
     handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
-    assert!(a.subagents_modal.is_none());
+    assert!(a.background_modal.is_none());
 }
 
 #[test]
@@ -985,8 +985,7 @@ fn subagent_transcript_view_builds_main_transcript_turns() {
     let mut run = None;
     handle_event(&plain_key(KeyCode::Enter), &mut a, None, &mut run);
 
-    let modal = a.subagents_modal.as_ref().expect("subagents modal");
-    let view = modal.viewing.as_ref().expect("transcript view");
+    let view = subagent_view(&a).expect("transcript view");
     assert!(view.load_error.is_none());
     assert_eq!(view.turns.len(), 1);
     assert_eq!(view.turns[0].prompt, "inspect the repo");
@@ -1004,28 +1003,30 @@ fn subagent_transcript_view_builds_main_transcript_turns() {
 fn subagent_transcript_view_esc_returns_to_list() {
     let mut a = app();
     assert!(a.slash_command("/subagent"));
-    a.subagents_modal.as_mut().unwrap().viewing = Some(SubagentTranscriptView {
-        id: "run-1".to_string(),
-        file: None,
-        path: None,
-        turns: Vec::new(),
-        load_error: Some("transcript not found".to_string()),
-        live: false,
-        reloaded: false,
-        heights: Vec::new(),
-        signatures: Vec::new(),
-        prior_heights: Vec::new(),
-        parsed_len: None,
-        width: 0,
-        total: 0,
-        scroll: 0,
-        last_reload: std::time::Instant::now(),
-        view_h: 10,
-    });
+    open_subagent_view(
+        &mut a,
+        SubagentTranscriptView {
+            id: "run-1".to_string(),
+            file: None,
+            path: None,
+            turns: Vec::new(),
+            load_error: Some("transcript not found".to_string()),
+            live: false,
+            reloaded: false,
+            heights: Vec::new(),
+            signatures: Vec::new(),
+            prior_heights: Vec::new(),
+            parsed_len: None,
+            width: 0,
+            total: 0,
+            scroll: 0,
+            last_reload: std::time::Instant::now(),
+            view_h: 10,
+        },
+    );
     let mut run = None;
     handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
-    let modal = a.subagents_modal.as_ref().expect("subagents modal");
-    assert!(modal.viewing.is_none());
+    assert!(subagent_view(&a).is_none(), "esc returns to the list");
 }
 
 #[test]
@@ -1081,12 +1082,76 @@ fn subagent_transcript_view_keeps_turns_across_compaction() {
     let mut run = None;
     handle_event(&plain_key(KeyCode::Enter), &mut a, None, &mut run);
 
-    let modal = a.subagents_modal.as_ref().expect("subagents modal");
-    let view = modal.viewing.as_ref().expect("transcript view");
+    let view = subagent_view(&a).expect("transcript view");
     let prompts: Vec<&str> = view.turns.iter().map(|turn| turn.prompt.as_str()).collect();
     // The compaction marker's parent is a hidden checkpoint copy; a replay
     // that walked parent links would stop there and drop the first turn.
     assert_eq!(prompts, ["first prompt", "second prompt"]);
+}
+
+#[test]
+fn subagent_rows_name_the_model_the_live_cost_and_the_elapsed_time() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let mut a = app();
+    a.background_modal = Some(background_modal(BackgroundTab::Subagents));
+    a.background_modal.as_mut().unwrap().subagents.rows = vec![SubagentRow {
+        id: "abc12345".into(),
+        running: true,
+        preview: "fix the parser".into(),
+        file: None,
+        model: Some("plexus/gpt-6.1-sol:high".into()),
+        cost: Some(0.0123),
+        elapsed_ms: 65_000,
+    }];
+    let mut term = Terminal::new(TestBackend::new(120, 20)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let screen = subagent_screen(&term);
+    for expected in [
+        "running",
+        "abc12345",
+        "plexus/gpt-6.1-sol:high",
+        "$0.0123",
+        "65s",
+        "fix the parser",
+    ] {
+        assert!(screen.contains(expected), "missing {expected}:\n{screen}");
+    }
+}
+
+#[test]
+fn the_open_subagent_list_takes_the_live_cost_from_the_registry() {
+    let row = |id: &str, file: &str| SubagentRow {
+        id: id.to_string(),
+        running: false,
+        preview: "p".to_string(),
+        file: Some(file.to_string()),
+        model: None,
+        cost: None,
+        elapsed_ms: 0,
+    };
+    let mut modal = SubagentsModalState {
+        selected: 0,
+        rows: vec![row("a", "file-a"), row("b", "file-b")],
+    };
+    let runs = vec![lofi_core::SubagentLive {
+        id: "a".to_string(),
+        session: Some("file-a".to_string()),
+        running: true,
+        model: Some("p/m".to_string()),
+        elapsed_ms: 1500,
+        cost: Some(0.5),
+    }];
+    modal.overlay_live(&runs);
+    let rows = &modal.rows;
+    assert!(rows[0].running);
+    assert_eq!(rows[0].model.as_deref(), Some("p/m"));
+    assert_eq!(rows[0].cost, Some(0.5));
+    assert_eq!(rows[0].elapsed_ms, 1500);
+    // A row no live run covers keeps what the last listing gave it.
+    assert!(!rows[1].running);
+    assert!(rows[1].cost.is_none());
 }
 
 fn subagent_screen(term: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
@@ -1179,38 +1244,37 @@ fn subagent_transcript_view_renders_bottom_anchored_and_scrolls_to_top() {
 fn refresh_subagent_view_skips_reload_when_the_run_is_not_live() {
     let mut a = app();
     assert!(a.slash_command("/subagent"));
-    a.subagents_modal.as_mut().unwrap().viewing = Some(SubagentTranscriptView {
-        id: "run-1".to_string(),
-        file: None,
-        path: None,
-        turns: vec![Turn {
-            kind: lofi_types::PromptKind::User,
-            prompt: "p".to_string(),
-            blocks: Vec::new(),
-        }],
-        load_error: None,
-        heights: vec![Some(3)],
-        signatures: Vec::new(),
-        prior_heights: Vec::new(),
-        parsed_len: None,
-        width: 80,
-        total: 3,
-        scroll: 0,
-        // Long past the throttle interval: only liveness gates the reload.
-        last_reload: std::time::Instant::now()
-            .checked_sub(std::time::Duration::from_mins(1))
-            .unwrap(),
-        live: false,
-        reloaded: false,
-        view_h: 10,
-    });
-    a.refresh_subagent_view();
+    open_subagent_view(
+        &mut a,
+        SubagentTranscriptView {
+            id: "run-1".to_string(),
+            file: None,
+            path: None,
+            turns: vec![Turn {
+                kind: lofi_types::PromptKind::User,
+                prompt: "p".to_string(),
+                blocks: Vec::new(),
+            }],
+            load_error: None,
+            heights: vec![Some(3)],
+            signatures: Vec::new(),
+            prior_heights: Vec::new(),
+            parsed_len: None,
+            width: 80,
+            total: 3,
+            scroll: 0,
+            // Long past the throttle interval: only liveness gates the reload.
+            last_reload: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_mins(1))
+                .unwrap(),
+            live: false,
+            reloaded: false,
+            view_h: 10,
+        },
+    );
+    a.refresh_background_modal();
     // The test app has no registry, so the run is not live: no reload.
-    let view = a
-        .subagents_modal
-        .as_ref()
-        .and_then(|modal| modal.viewing.as_ref())
-        .unwrap();
+    let view = subagent_view(&a).unwrap();
     assert_eq!(view.turns.len(), 1);
     assert_eq!(view.heights, vec![Some(3)]);
 }
@@ -1249,27 +1313,18 @@ fn subagent_transcript_view_watermark_stops_at_a_torn_trailing_line() {
     let mut run = None;
     handle_event(&plain_key(KeyCode::Enter), &mut a, None, &mut run);
 
-    let view = a
-        .subagents_modal
-        .as_ref()
-        .and_then(|modal| modal.viewing.as_ref())
-        .unwrap();
+    let view = subagent_view(&a).unwrap();
     // The watermark covers only the parsed bytes, so the torn tail still
     // counts as unseen and earns a later reload.
     assert_eq!(view.parsed_len, Some(complete_len));
 
-    let modal = a.subagents_modal.as_mut().unwrap();
-    let view = modal.viewing.as_mut().unwrap();
+    let view = subagent_view_mut(&mut a).unwrap();
     view.live = true;
     view.last_reload = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_mins(1))
         .unwrap();
-    a.refresh_subagent_view();
-    let view = a
-        .subagents_modal
-        .as_ref()
-        .and_then(|modal| modal.viewing.as_ref())
-        .unwrap();
+    a.refresh_background_modal();
+    let view = subagent_view(&a).unwrap();
     // The file is longer than the watermark, so the settle reload ran.
     assert!(view.reloaded);
     assert_eq!(view.parsed_len, Some(complete_len));
@@ -1295,10 +1350,10 @@ fn refresh_subagent_view_skips_the_final_reload_when_the_file_is_unchanged() {
 
     let mut a = app();
     attach_session_sink(&mut a, store, cwd, parent);
-    a.subagents_modal = Some(SubagentsModalState {
-        selected: 0,
-        rows: Vec::new(),
-        viewing: Some(SubagentTranscriptView {
+    a.background_modal = Some(background_modal(BackgroundTab::Subagents));
+    open_subagent_view(
+        &mut a,
+        SubagentTranscriptView {
             id: "run-1".to_string(),
             file: Some(
                 sub.path()
@@ -1322,15 +1377,11 @@ fn refresh_subagent_view_skips_the_final_reload_when_the_file_is_unchanged() {
             live: true,
             reloaded: false,
             view_h: 10,
-        }),
-    });
-    a.refresh_subagent_view();
+        },
+    );
+    a.refresh_background_modal();
 
-    let view = a
-        .subagents_modal
-        .as_ref()
-        .and_then(|modal| modal.viewing.as_ref())
-        .unwrap();
+    let view = subagent_view(&a).unwrap();
     // The settle would reload once, but the file length matches the parsed
     // watermark: only the liveness bookkeeping moves.
     assert!(!view.live);
@@ -1362,10 +1413,10 @@ fn refresh_subagent_view_reloads_once_when_a_live_run_settles() {
 
     let mut a = app();
     attach_session_sink(&mut a, store, cwd, parent);
-    a.subagents_modal = Some(SubagentsModalState {
-        selected: 0,
-        rows: Vec::new(),
-        viewing: Some(SubagentTranscriptView {
+    a.background_modal = Some(background_modal(BackgroundTab::Subagents));
+    open_subagent_view(
+        &mut a,
+        SubagentTranscriptView {
             id: "run-1".to_string(),
             file: Some(file_name),
             path: None,
@@ -1386,15 +1437,11 @@ fn refresh_subagent_view_reloads_once_when_a_live_run_settles() {
             live: true,
             reloaded: false,
             view_h: 10,
-        }),
-    });
-    a.refresh_subagent_view();
+        },
+    );
+    a.refresh_background_modal();
 
-    let view = a
-        .subagents_modal
-        .as_ref()
-        .and_then(|modal| modal.viewing.as_ref())
-        .unwrap();
+    let view = subagent_view(&a).unwrap();
     assert!(!view.live);
     assert_eq!(view.turns.len(), 1);
     assert_eq!(view.turns[0].prompt, "late answer");
@@ -1452,22 +1499,15 @@ fn subagent_transcript_reload_keeps_a_scrolled_up_view_on_the_same_content() {
     ]);
     test_append_events(sub.path(), &mut second, None).unwrap();
     {
-        let modal = a.subagents_modal.as_mut().unwrap();
-        let view = modal.viewing.as_mut().unwrap();
+        let view = subagent_view_mut(&mut a).unwrap();
         // No registry in the test app: the settle path does the reload.
         view.live = true;
         view.last_reload = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_mins(1))
             .unwrap();
     }
-    a.refresh_subagent_view();
-    assert!(
-        a.subagents_modal
-            .as_ref()
-            .and_then(|modal| modal.viewing.as_ref())
-            .unwrap()
-            .reloaded
-    );
+    a.refresh_background_modal();
+    assert!(subagent_view(&a).unwrap().reloaded);
 
     term.draw(|frame| crate::tui::view::render(frame, &mut a))
         .unwrap();
@@ -1563,22 +1603,15 @@ fn subagent_transcript_reload_compensates_a_shrink_below_the_window_top() {
     ]);
     cursor.append_events(&mut shorter).unwrap();
     {
-        let modal = a.subagents_modal.as_mut().unwrap();
-        let view = modal.viewing.as_mut().unwrap();
+        let view = subagent_view_mut(&mut a).unwrap();
         // No registry in the test app: the settle path does the reload.
         view.live = true;
         view.last_reload = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_mins(1))
             .unwrap();
     }
-    a.refresh_subagent_view();
-    assert!(
-        a.subagents_modal
-            .as_ref()
-            .and_then(|modal| modal.viewing.as_ref())
-            .unwrap()
-            .reloaded
-    );
+    a.refresh_background_modal();
+    assert!(subagent_view(&a).unwrap().reloaded);
 
     term.draw(|frame| crate::tui::view::render(frame, &mut a))
         .unwrap();
@@ -1650,22 +1683,15 @@ fn subagent_transcript_reload_compensates_when_the_straddling_turn_grows() {
     let mut more = blank_events([msg(assistant(&growth))]);
     test_append_events(sub.path(), &mut more, None).unwrap();
     {
-        let modal = a.subagents_modal.as_mut().unwrap();
-        let view = modal.viewing.as_mut().unwrap();
+        let view = subagent_view_mut(&mut a).unwrap();
         // No registry in the test app: the settle path does the reload.
         view.live = true;
         view.last_reload = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_mins(1))
             .unwrap();
     }
-    a.refresh_subagent_view();
-    assert!(
-        a.subagents_modal
-            .as_ref()
-            .and_then(|modal| modal.viewing.as_ref())
-            .unwrap()
-            .reloaded
-    );
+    a.refresh_background_modal();
+    assert!(subagent_view(&a).unwrap().reloaded);
 
     term.draw(|frame| crate::tui::view::render(frame, &mut a))
         .unwrap();

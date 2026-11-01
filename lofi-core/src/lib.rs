@@ -20,8 +20,8 @@ pub mod state;
 
 pub use agent::{
     exec_input_code_and_label, exec_result_display, rebuild_agent, select_model, Agent, AgentEvent,
-    ConfirmRequest, ConfirmResponse, RunControls, SubagentNotice, SubagentNoticeKind, SubagentOp,
-    SubagentRegistry, SubagentRunning, SubagentSupport, TurnInput, TurnRequest,
+    ConfirmRequest, ConfirmResponse, RunControls, SubagentLive, SubagentNotice, SubagentNoticeKind,
+    SubagentOp, SubagentRegistry, SubagentRunning, SubagentSupport, TurnInput, TurnRequest,
 };
 pub use compact::{compact, compacted_history, CompactOptions, Compaction, HANDOFF_PREAMBLE};
 pub use lifecycle::{AgentLifecycle, HardCompactOutcome, LineageJobReconciliation};
@@ -30,7 +30,7 @@ pub use lofi_code::memory::release_freed_memory;
 pub use lofi_code::policy::{default_mode as default_approval_mode, PolicyOverride};
 pub use lofi_code::tools::{
     JobAttributes, JobColor, JobInfo, JobNotice, JobRegistry, JobScreen, JobScreenLine, JobSpan,
-    JobStyle, TimerRegistry,
+    JobStyle, TimerInfo, TimerRegistry,
 };
 pub use lofi_code::ConfirmReason;
 pub use lofi_error::{Error, Result};

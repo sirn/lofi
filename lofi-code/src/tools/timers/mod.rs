@@ -5,6 +5,7 @@
 //! same way job notices are handed over. Nothing is persisted: timers live
 //! and die with the session registry.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -14,6 +15,8 @@ mod tests;
 
 #[derive(Debug)]
 struct Timer {
+    /// Identity for the host's timer list; scheduling order, never reused.
+    id: u64,
     /// Next fire time. A `notifyAt` in the past fires on the next poll.
     due: SystemTime,
     /// `Some` for `notifyEvery`, which re-arms past every fire.
@@ -36,12 +39,25 @@ impl Timer {
     }
 }
 
+/// One pending timer as the host lists it. `due` is absolute so the host
+/// can count down without a clock of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimerInfo {
+    pub id: u64,
+    pub due: SystemTime,
+    /// `Some` for `notifyEvery`: the interval between fires.
+    pub every: Option<Duration>,
+    pub message: Option<String>,
+    pub owner: Option<String>,
+}
+
 /// Per-session registry of wake-up timers. Cheap to clone; every clone
 /// shares the same list, so the exec-time tool bundle, the agent that owns
 /// the session, and the host that polls notices see the same timers.
 #[derive(Clone, Debug, Default)]
 pub struct TimerRegistry {
     timers: Arc<Mutex<Vec<Timer>>>,
+    next_id: Arc<AtomicU64>,
 }
 
 impl TimerRegistry {
@@ -54,6 +70,7 @@ impl TimerRegistry {
     /// the next [`take_notices`](Self::take_notices).
     pub fn schedule_at(&self, owner: Option<&str>, at: SystemTime, message: Option<String>) {
         self.push(Timer {
+            id: 0,
             due: at,
             every: None,
             owner: owner.map(str::to_owned),
@@ -65,6 +82,7 @@ impl TimerRegistry {
     /// interval from now. Callers must pass a non-zero `every`.
     pub fn schedule_every(&self, owner: Option<&str>, every: Duration, message: Option<String>) {
         self.push(Timer {
+            id: 0,
             due: SystemTime::now() + every,
             every: Some(every),
             owner: owner.map(str::to_owned),
@@ -81,6 +99,36 @@ impl TimerRegistry {
                 .iter()
                 .filter(|t| t.owner.as_deref() == owner)
                 .count()
+        })
+    }
+
+    /// Every pending timer, soonest first. The host renders one row each.
+    #[must_use]
+    pub fn listing(&self) -> Vec<TimerInfo> {
+        self.locked(|timers| {
+            let mut out: Vec<TimerInfo> = timers
+                .iter()
+                .map(|timer| TimerInfo {
+                    id: timer.id,
+                    due: timer.due,
+                    every: timer.every,
+                    message: timer.message.clone(),
+                    owner: timer.owner.clone(),
+                })
+                .collect();
+            out.sort_by_key(|timer| timer.due);
+            out
+        })
+    }
+
+    /// Drop the timer `id`, whether one-shot or repeating. Returns whether
+    /// a timer was there to drop.
+    #[must_use]
+    pub fn cancel(&self, id: u64) -> bool {
+        self.locked(|timers| {
+            let before = timers.len();
+            timers.retain(|timer| timer.id != id);
+            timers.len() != before
         })
     }
 
@@ -134,7 +182,8 @@ impl TimerRegistry {
         })
     }
 
-    fn push(&self, timer: Timer) {
+    fn push(&self, mut timer: Timer) {
+        timer.id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
         self.locked(|timers| timers.push(timer));
     }
 

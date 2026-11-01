@@ -145,9 +145,8 @@ pub(super) fn native_body(nt: &NativeTool) -> NativeBody {
                 notice: b("truncated").then_some("(truncated)".into()),
             }
         }
-        // A settled run answers with result and a failed one with error;
-        // neither carries the model name, so the body reports status and
-        // spend instead.
+        // The result and error text carry no status, model, or spend, so the
+        // notice line reports them beside the body.
         "subagent" | "subagentWait" => {
             let text = if s("result").is_empty() {
                 s("error")
@@ -167,11 +166,27 @@ pub(super) fn native_body(nt: &NativeTool) -> NativeBody {
                         .unwrap_or(0)
                 )
             });
+            // The outcome names the model the run used, so the settled
+            // block says which model spent the cost beside it.
+            let model = v.get("model").and_then(serde_json::Value::as_str);
+            let head = match (status.is_empty(), model) {
+                (true, None) => String::new(),
+                (true, Some(model)) => model.to_string(),
+                (false, Some(model)) => format!("{status}, {model}"),
+                (false, None) => status.to_string(),
+            };
             let notice = match (cost, truncated) {
-                (Some(cost), Some(t)) => Some(format!("({status}, ${cost:.4}) {t}")),
-                (Some(cost), None) => Some(format!("({status}, ${cost:.4})")),
+                (Some(cost), Some(t)) => Some(format!("({head}, ${cost:.4}) {t}")),
+                (Some(cost), None) => Some(format!("({head}, ${cost:.4})")),
                 (None, truncated) => {
-                    truncated.or_else(|| (!status.is_empty()).then(|| format!("({status})")))
+                    // A truncated result still names the model that spent
+                    // the run; only the cost is missing.
+                    let label = (!head.is_empty()).then(|| format!("({head})"));
+                    match (label, truncated) {
+                        (Some(label), Some(t)) => Some(format!("{label} {t}")),
+                        (Some(label), None) => Some(label),
+                        (None, t) => t,
+                    }
                 }
             };
             NativeBody {

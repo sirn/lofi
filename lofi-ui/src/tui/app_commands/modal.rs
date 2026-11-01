@@ -97,8 +97,7 @@ impl App {
             || self.policy_picker.is_some()
             || self.service_picker.is_some()
             || self.theme_picker.is_some()
-            || self.jobs_modal.is_some()
-            || self.subagents_modal.is_some()
+            || self.background_modal.is_some()
             || self.paths_picker.is_some()
             || !self.pending_confirms.is_empty()
     }
@@ -112,8 +111,7 @@ impl App {
         if self.info.is_some() {
             return self.handle_info_key(k);
         }
-        if self.jobs_modal.is_some()
-            || self.subagents_modal.is_some()
+        if self.background_modal.is_some()
             || self.paths_picker.is_some()
             || self.active_modal_slot().is_some()
         {
@@ -353,11 +351,8 @@ impl App {
     /// key (so the caller skips normal Input-mode processing).
     #[allow(clippy::too_many_lines)]
     pub(in crate::tui) fn handle_modal_key(&mut self, k: &KeyEvent) -> bool {
-        if self.jobs_modal.is_some() {
-            return self.handle_jobs_key(k);
-        }
-        if self.subagents_modal.is_some() {
-            return self.handle_subagents_key(k);
+        if self.background_modal.is_some() {
+            return self.handle_background_key(k);
         }
         if self.paths_picker.is_some() {
             return self.handle_paths_key(k);

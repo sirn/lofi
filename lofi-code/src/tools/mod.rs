@@ -37,7 +37,7 @@ pub use jobs::{
     JobAttributes, JobColor, JobInfo, JobNotice, JobRegistry, JobScreen, JobScreenLine, JobSpan,
     JobStyle,
 };
-pub use timers::TimerRegistry;
+pub use timers::{TimerInfo, TimerRegistry};
 pub use truncate::{
     format_size, truncate_head, truncate_head_with, truncate_tail, truncate_tail_with, Truncated,
 };

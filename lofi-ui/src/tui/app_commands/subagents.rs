@@ -43,23 +43,10 @@ impl App {
         }
     }
 
-    /// `/subagent`: open the subagents modal. Lists subagents spawned by the
-    /// live session: persisted transcripts (store) merged with in-flight runs
-    /// (registry). `Enter` opens a read-only transcript view, `r` reloads.
-    /// Without a session sink only the live registry rows show.
-    pub(in crate::tui) fn open_subagents_modal(&mut self) {
-        let mut modal = SubagentsModalState {
-            selected: 0,
-            rows: Vec::new(),
-            viewing: None,
-        };
-        self.reload_subagent_rows(&mut modal);
-        self.subagents_modal = Some(modal);
-    }
-
     /// Rebuild the row list: store transcripts of this session's children,
-    /// then live registry rows without a transcript yet.
-    fn reload_subagent_rows(&mut self, modal: &mut SubagentsModalState) {
+    /// then live registry rows without a transcript yet. Without a session
+    /// sink only the live registry rows show.
+    pub(in crate::tui) fn reload_subagent_rows(&mut self, modal: &mut SubagentsModalState) {
         let parent = self.session.cursor.as_ref().and_then(|cursor| {
             cursor
                 .path()
@@ -79,32 +66,18 @@ impl App {
                         .path()
                         .file_name()
                         .map(|name| name.to_string_lossy().into_owned()),
+                    model: None,
+                    cost: None,
+                    elapsed_ms: 0,
                 })
                 .collect(),
             _ => Vec::new(),
         };
         if let Some(registry) = &self.subagents {
-            for (id, session, running) in registry.live() {
-                match session {
-                    Some(file)
-                        if rows
-                            .iter()
-                            .any(|row| row.file.as_deref() == Some(file.as_str())) =>
-                    {
-                        if let Some(row) = rows
-                            .iter_mut()
-                            .find(|row| row.file.as_deref() == Some(file.as_str()))
-                        {
-                            row.running = running;
-                            row.id = id;
-                        }
-                    }
-                    _ => rows.push(SubagentRow {
-                        id,
-                        running,
-                        preview: String::new(),
-                        file: session,
-                    }),
+            for run in registry.live() {
+                match rows.iter_mut().find(|row| row.is_run(&run)) {
+                    Some(row) => row.fill_live(&run),
+                    None => rows.push(SubagentRow::from_live(&run)),
                 }
             }
         }
@@ -114,61 +87,13 @@ impl App {
         }
     }
 
-    /// Keys for the `/subagent` modal. Two levels: the list, and the
-    /// transcript view. Always returns true while the modal is open.
-    pub(super) fn handle_subagents_key(&mut self, k: &KeyEvent) -> bool {
-        // Take the modal out so the body can call `&mut self` helpers without
-        // overlapping the modal borrow; put it back (or not, on close).
-        let Some(mut modal) = self.subagents_modal.take() else {
-            return true;
-        };
-
-        // Transcript view.
-        if let Some(view) = &mut modal.viewing {
-            let max_scroll = view.total.saturating_sub(view.view_h.max(1));
-            match k.code {
-                KeyCode::Esc | KeyCode::Char('q') => modal.viewing = None,
-                KeyCode::Up | KeyCode::Char('k') => view.scroll = (view.scroll + 1).min(max_scroll),
-                KeyCode::Down | KeyCode::Char('j') => view.scroll = view.scroll.saturating_sub(1),
-                KeyCode::Char('g') => view.scroll = max_scroll,
-                KeyCode::Char('G') => view.scroll = 0,
-                _ => {}
-            }
-            self.subagents_modal = Some(modal);
-            return true;
-        }
-
-        // List.
-        match k.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                // Closed: do not restore the modal.
-                return true;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                modal.selected = modal.selected.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if !modal.rows.is_empty() {
-                    modal.selected = (modal.selected + 1).min(modal.rows.len() - 1);
-                }
-            }
-            KeyCode::Char('r') => self.reload_subagent_rows(&mut modal),
-            KeyCode::Enter => {
-                if let Some(row) = modal.rows.get(modal.selected) {
-                    let view = self.subagent_transcript_view(row);
-                    modal.viewing = Some(view);
-                }
-            }
-            _ => {}
-        }
-        self.subagents_modal = Some(modal);
-        true
-    }
-
     /// Load one subagent transcript as main-transcript turns. Settled rows
     /// read through a fresh snapshot so a just-finished file is consistent;
     /// live rows reload through the same path once the view is open.
-    fn subagent_transcript_view(&self, row: &SubagentRow) -> SubagentTranscriptView {
+    pub(in crate::tui) fn subagent_transcript_view(
+        &self,
+        row: &SubagentRow,
+    ) -> SubagentTranscriptView {
         let loaded = match &row.file {
             Some(file) => self.load_subagent_turns(file, None),
             None => Err(if row.running {
@@ -207,23 +132,13 @@ impl App {
     /// file grows as the run works. Throttled so a frame never costs more
     /// than one bounded reload per second. Bottom-anchored scroll stays
     /// pinned to the newest content; a scrolled-up view keeps its place.
-    pub(in crate::tui) fn refresh_subagent_view(&mut self) {
+    pub(in crate::tui) fn refresh_subagent_view(&mut self, view: &mut SubagentTranscriptView) {
         const RELOAD_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
-        let (id, file, cached, was_live, due) = {
-            let Some(modal) = self.subagents_modal.as_mut() else {
-                return;
-            };
-            let Some(view) = modal.viewing.as_mut() else {
-                return;
-            };
-            (
-                view.id.clone(),
-                view.file.clone(),
-                view.path.clone(),
-                view.live,
-                view.last_reload.elapsed() >= RELOAD_INTERVAL,
-            )
-        };
+        let id = view.id.clone();
+        let file = view.file.clone();
+        let cached = view.path.clone();
+        let was_live = view.live;
+        let due = view.last_reload.elapsed() >= RELOAD_INTERVAL;
         let live = self
             .subagents
             .as_ref()
@@ -234,13 +149,7 @@ impl App {
             // Record the observed liveness before the throttle returns: a
             // run that resumes and settles within one interval still earns
             // the final reload.
-            if let Some(view) = self
-                .subagents_modal
-                .as_mut()
-                .and_then(|modal| modal.viewing.as_mut())
-            {
-                view.live = true;
-            }
+            view.live = true;
             return;
         }
         if !live && !was_live {
@@ -248,7 +157,7 @@ impl App {
         }
         // An unchanged file has nothing new to show; stat it instead of
         // parsing the transcript again.
-        if self.skip_unchanged_reload(cached.as_deref(), live) {
+        if Self::skip_unchanged_reload(view, cached.as_deref(), live) {
             return;
         }
         // A view opened before the run's cursor file existed has no file
@@ -259,8 +168,8 @@ impl App {
                 registry
                     .live()
                     .into_iter()
-                    .find(|(run, _, _)| *run == id)
-                    .and_then(|(_, session, _)| session)
+                    .find(|run| run.id == id)
+                    .and_then(|run| run.session)
             }),
         };
         let loaded = match &file {
@@ -270,12 +179,6 @@ impl App {
             } else {
                 "no transcript (session persistence is disabled)".to_string()
             }),
-        };
-        let Some(modal) = self.subagents_modal.as_mut() else {
-            return;
-        };
-        let Some(view) = modal.viewing.as_mut() else {
-            return;
         };
         view.last_reload = std::time::Instant::now();
         view.live = live;
@@ -290,18 +193,15 @@ impl App {
 
     /// Whether the transcript file did not change since the last load; in
     /// that case the refresh only updates the liveness bookkeeping.
-    fn skip_unchanged_reload(&mut self, cached: Option<&std::path::Path>, live: bool) -> bool {
+    fn skip_unchanged_reload(
+        view: &mut SubagentTranscriptView,
+        cached: Option<&std::path::Path>,
+        live: bool,
+    ) -> bool {
         let Some(path) = cached else {
             return false;
         };
         let len = std::fs::metadata(path).ok().map(|meta| meta.len());
-        let Some(view) = self
-            .subagents_modal
-            .as_mut()
-            .and_then(|modal| modal.viewing.as_mut())
-        else {
-            return false;
-        };
         if len.is_none() || len != view.parsed_len {
             return false;
         }

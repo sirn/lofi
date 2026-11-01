@@ -85,11 +85,30 @@ impl Component for RunningSubagentLine<'_> {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let t = cx.theme;
         let dur = prim::fmt_duration(Duration::from_millis(self.run.elapsed_ms));
+        let mut head = format!("subagent {} running ({dur})", self.run.id);
+        if let Some(model) = &self.run.model {
+            head.push_str(" - ");
+            head.push_str(model);
+        }
+        // The settled block reports the same four decimals, so a run's cost
+        // does not change shape when it finishes.
+        if let Some(cost) = self.run.cost {
+            head = format!("{head} - ${cost:.4}");
+        }
+        // Status lines stay one row each: a long model label clips rather
+        // than wrap.
+        let width = cx.width.saturating_sub(2);
+        if prim::width(&head) > width {
+            head = crate::tui::text::clip_marked(&head, width);
+        }
+        // The model and the cost outrank the task preview: the row clips
+        // the preview rather than wrap the run's identity off the screen.
         let task = self.run.task.trim();
-        let text = if task.is_empty() {
-            format!("subagent {} running ({dur})", self.run.id)
+        let room = width.saturating_sub(prim::width(&head) + 2);
+        let text = if task.is_empty() || room < 12 {
+            head
         } else {
-            format!("subagent {} running ({dur}): {task}", self.run.id)
+            format!("{head}: {}", crate::tui::text::clip_marked(task, room))
         };
         let mark = Style::new().fg(t.info);
         let body_style = t.muted_style();

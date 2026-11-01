@@ -233,7 +233,7 @@ impl Modal for PathsPickerState {
     }
 }
 
-/// `/subagent` modal. Lists the subagents spawned by the live session:
+/// The subagents tab. Lists the subagents spawned by the live session:
 /// store rows (durable, survive restarts) merged with the registry's live
 /// overlay (in-flight runs). `Enter` opens a read-only transcript view.
 pub(crate) struct SubagentsModalState {
@@ -241,8 +241,6 @@ pub(crate) struct SubagentsModalState {
     /// Rows loaded at open and on `r`; store order (newest first), then live
     /// rows not yet on disk.
     pub(crate) rows: Vec<SubagentRow>,
-    /// Set while viewing one transcript; `Esc` returns to the list.
-    pub(crate) viewing: Option<SubagentTranscriptView>,
 }
 
 /// One `/subagent` list row. `file` is present for settled runs with a
@@ -253,6 +251,186 @@ pub(crate) struct SubagentRow {
     pub(crate) preview: String,
     /// Transcript file name (`<millis>_<rand>.jsonl`), when one exists.
     pub(crate) file: Option<String>,
+    /// The run's resolved model; only the registry knows it, so a row read
+    /// from the store alone leaves it empty.
+    pub(crate) model: Option<String>,
+    /// The run's spend; a settled transcript row leaves it empty because
+    /// reading every file to find the terminal cost is not worth a frame.
+    pub(crate) cost: Option<f64>,
+    /// Elapsed time of a live run, 0 for a settled one.
+    pub(crate) elapsed_ms: u64,
+}
+
+impl SubagentRow {
+    /// A row for a run the registry knows and the store has not listed yet.
+    pub(crate) fn from_live(run: &lofi_core::SubagentLive) -> Self {
+        let mut row = Self {
+            id: run.id.clone(),
+            running: run.running,
+            preview: String::new(),
+            file: run.session.clone(),
+            model: None,
+            cost: None,
+            elapsed_ms: 0,
+        };
+        row.fill_live(run);
+        row
+    }
+
+    /// Whether this row is `run`: by id, or by transcript file when the row
+    /// has one. A run spawned moments ago has no file yet, so the id is the
+    /// only key that finds it.
+    pub(crate) fn is_run(&self, run: &lofi_core::SubagentLive) -> bool {
+        self.id == run.id
+            || self
+                .file
+                .as_deref()
+                .zip(run.session.as_deref())
+                .is_some_and(|(file, session)| file == session)
+    }
+
+    /// Overlay what only the live registry knows onto this row.
+    pub(crate) fn fill_live(&mut self, run: &lofi_core::SubagentLive) {
+        self.id.clone_from(&run.id);
+        self.running = run.running;
+        self.model.clone_from(&run.model);
+        self.cost = run.cost;
+        self.elapsed_ms = run.elapsed_ms;
+    }
+}
+
+impl SubagentsModalState {
+    /// Overlay the registry's live fields onto the loaded rows, matching
+    /// each run by id, or by transcript file when the row has one. A row
+    /// no live run covers keeps the cost the last listing gave it.
+    pub(crate) fn overlay_live(&mut self, runs: &[lofi_core::SubagentLive]) {
+        for row in &mut self.rows {
+            if let Some(run) = runs.iter().find(|run| row.is_run(run)) {
+                row.fill_live(run);
+            } else {
+                // The row claims a live run the registry no longer has, and
+                // only a settle ends one: stop showing it as running.
+                row.running = false;
+                row.elapsed_ms = 0;
+            }
+        }
+        // A run that started after the listing was read has no row yet. The
+        // dialog adds it here rather than re-reading the store each frame.
+        for run in runs {
+            if !self.rows.iter().any(|row| row.is_run(run)) {
+                self.rows.push(SubagentRow::from_live(run));
+            }
+        }
+    }
+}
+
+/// The timers tab. Rows are the pending wake-up timers, soonest first.
+pub(crate) struct TimersModalState {
+    pub(crate) selected: usize,
+    pub(crate) rows: Vec<lofi_core::TimerInfo>,
+}
+
+/// The sections of the background dialog, in tab order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackgroundTab {
+    Subagents,
+    Jobs,
+    Timers,
+}
+
+impl BackgroundTab {
+    pub(crate) const ALL: [BackgroundTab; 3] = [Self::Subagents, Self::Jobs, Self::Timers];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Subagents => "subagents",
+            Self::Jobs => "jobs",
+            Self::Timers => "timers",
+        }
+    }
+
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::Subagents => "Subagents",
+            Self::Jobs => "Jobs",
+            Self::Timers => "Timers",
+        }
+    }
+
+    /// Tab keys jump by number or by first letter, so labels stay unique.
+    pub(crate) fn from_key(key: char) -> Option<Self> {
+        match key {
+            '1' | 's' => Some(Self::Subagents),
+            '2' | 'j' => Some(Self::Jobs),
+            '3' | 't' => Some(Self::Timers),
+            _ => None,
+        }
+    }
+}
+
+/// One background dialog for every kind of running work: a tab per kind,
+/// the drill-in of the active tab, and the armed kill.
+pub(crate) struct BackgroundModalState {
+    pub(crate) tab: BackgroundTab,
+    pub(crate) jobs: JobsModalState,
+    pub(crate) subagents: SubagentsModalState,
+    pub(crate) timers: TimersModalState,
+    /// Set while drilling into one row; `Esc` returns to the list.
+    pub(crate) view: Option<BackgroundView>,
+    /// Armed when the user picks a kill: the next `y` confirms, anything
+    /// else cancels. The target survives a re-render.
+    pub(crate) confirm: Option<BackgroundKill>,
+}
+
+pub(crate) enum BackgroundView {
+    Job(JobOutputView),
+    Subagent(SubagentTranscriptView),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BackgroundKill {
+    Job(u64),
+    Subagent(String),
+    Timer(u64),
+    /// Every row of the tab, so a runaway fan-out is one keystroke.
+    All(BackgroundTab),
+}
+
+impl BackgroundModalState {
+    /// Rows of the active tab. Jobs come from the registry snapshot, which
+    /// the renderer reads fresh each frame.
+    pub(crate) fn len(&self, jobs: &[lofi_core::JobInfo]) -> usize {
+        match self.tab {
+            BackgroundTab::Subagents => self.subagents.rows.len(),
+            BackgroundTab::Jobs => jobs.len(),
+            BackgroundTab::Timers => self.timers.rows.len(),
+        }
+    }
+
+    pub(crate) fn selected(&self) -> usize {
+        match self.tab {
+            BackgroundTab::Subagents => self.subagents.selected,
+            BackgroundTab::Jobs => self.jobs.selected,
+            BackgroundTab::Timers => self.timers.selected,
+        }
+    }
+
+    pub(crate) fn select(&mut self, row: usize) {
+        match self.tab {
+            BackgroundTab::Subagents => self.subagents.selected = row,
+            BackgroundTab::Jobs => self.jobs.selected = row,
+            BackgroundTab::Timers => self.timers.selected = row,
+        }
+    }
+
+    /// Switch tabs, keeping each tab's own selection. A drill-in belongs to
+    /// the tab it was opened from, so a switch closes it.
+    pub(crate) fn show(&mut self, tab: BackgroundTab) {
+        if self.tab != tab {
+            self.tab = tab;
+            self.view = None;
+        }
+    }
 }
 
 /// Read-only drill-in of one subagent transcript. Turns are built with the
@@ -298,17 +476,12 @@ pub(crate) struct SubagentTranscriptView {
     pub(crate) view_h: usize,
 }
 
-/// State for the `/job` modal. The list is rebuilt from a fresh
-/// [`lofi_core::JobRegistry::snapshot`] each render, so only `selected` and
-/// the drill-in output view are kept here. Plain-job logs page bounded
-/// windows from disk, so an unbounded log never inflates memory.
+/// The jobs tab. The list is rebuilt from a fresh
+/// [`lofi_core::JobRegistry::snapshot`] each render, so only `selected` is
+/// kept here. Plain-job logs page bounded windows from disk, so an
+/// unbounded log never inflates memory.
 pub(crate) struct JobsModalState {
     pub(crate) selected: usize,
-    /// Set while drilling into one job's output; `Esc` returns to the list.
-    pub(crate) viewing: Option<JobOutputView>,
-    /// Armed when the user picks kill: the next `y` confirms, anything else
-    /// cancels. Holds the target job id so the confirm survives a re-render.
-    pub(crate) confirm_kill: Option<u64>,
 }
 
 /// Drill-in output view for one job. PTY jobs show their parsed terminal

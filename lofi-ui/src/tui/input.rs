@@ -178,6 +178,14 @@ pub(super) fn handle_event(
         KeyCode::PageDown => app.page_down(),
         KeyCode::Char('a') if k.modifiers.contains(KeyModifiers::CONTROL) => app.move_line_start(),
         KeyCode::Char('e') if k.modifiers.contains(KeyModifiers::CONTROL) => app.move_line_end(),
+        // ctrl+b opens the background dialog on an empty prompt, so the
+        // readline binding still works while the user is typing.
+        KeyCode::Char('b')
+            if k.modifiers.contains(KeyModifiers::CONTROL) && app.input.is_empty() =>
+        {
+            let tab = app.newest_background_tab();
+            app.open_background_modal(tab);
+        }
         KeyCode::Char('b') if k.modifiers.contains(KeyModifiers::CONTROL) => app.move_left(),
         KeyCode::Char('f') if k.modifiers.contains(KeyModifiers::CONTROL) => app.move_right(),
         KeyCode::Char('n') if k.modifiers.contains(KeyModifiers::CONTROL) => app.cursor_down(),

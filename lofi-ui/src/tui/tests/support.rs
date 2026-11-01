@@ -189,3 +189,52 @@ pub(super) fn plain_key(code: KeyCode) -> Event {
         KeyEventKind::Press,
     ))
 }
+
+/// The background dialog's subagents tab, for tests that drive it directly.
+pub(super) fn subagents_tab(a: &App) -> &SubagentsModalState {
+    &a.background_modal
+        .as_ref()
+        .expect("background modal")
+        .subagents
+}
+
+/// The subagent drill-in, when the dialog shows one.
+pub(super) fn subagent_view(a: &App) -> Option<&SubagentTranscriptView> {
+    match a.background_modal.as_ref()?.view.as_ref()? {
+        BackgroundView::Subagent(view) => Some(view),
+        BackgroundView::Job(_) => None,
+    }
+}
+
+pub(super) fn subagent_view_mut(a: &mut App) -> Option<&mut SubagentTranscriptView> {
+    match a.background_modal.as_mut()?.view.as_mut()? {
+        BackgroundView::Subagent(view) => Some(view),
+        BackgroundView::Job(_) => None,
+    }
+}
+
+/// Put a subagent drill-in on the dialog, the way `Enter` does.
+pub(super) fn open_subagent_view(a: &mut App, view: SubagentTranscriptView) {
+    let modal = a
+        .background_modal
+        .get_or_insert_with(|| background_modal(BackgroundTab::Subagents));
+    modal.view = Some(BackgroundView::Subagent(view));
+}
+
+/// A fresh dialog on one tab, with no rows yet.
+pub(super) fn background_modal(tab: BackgroundTab) -> BackgroundModalState {
+    BackgroundModalState {
+        tab,
+        jobs: JobsModalState { selected: 0 },
+        subagents: SubagentsModalState {
+            selected: 0,
+            rows: Vec::new(),
+        },
+        timers: TimersModalState {
+            selected: 0,
+            rows: Vec::new(),
+        },
+        view: None,
+        confirm: None,
+    }
+}

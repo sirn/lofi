@@ -137,8 +137,7 @@ impl App {
             jobs: None,
             timers: None,
             subagents: None,
-            jobs_modal: None,
-            subagents_modal: None,
+            background_modal: None,
         }
     }
 

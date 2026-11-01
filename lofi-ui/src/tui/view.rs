@@ -9,7 +9,7 @@
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Padding, Paragraph};
+use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
 use crate::tui::SLASH_COMMANDS;
@@ -21,10 +21,9 @@ mod markdown;
 mod modals;
 mod prim;
 use modals::{
-    render_confirm_modal, render_info_modal, render_jobs_modal, render_model_picker,
+    render_background_modal, render_confirm_modal, render_info_modal, render_model_picker,
     render_paths_picker, render_picker, render_policy_picker, render_service_picker,
-    render_slash_complete, render_subagents_modal, render_theme_picker, render_thinking_picker,
-    render_tree_picker,
+    render_slash_complete, render_theme_picker, render_thinking_picker, render_tree_picker,
 };
 
 #[allow(unused_imports)] // used by tests and render harnesses
@@ -110,7 +109,6 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     }
     if let Some(r) = rects[4] {
         render_footer_block(f, r, app);
-        render_toast(f, area, r.y, app);
     }
     if let Some(r) = rects[5] {
         render_debug_bar(f, r, app);
@@ -142,11 +140,8 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     if app.theme_picker.is_some() {
         render_theme_picker(f, area, app);
     }
-    if app.jobs_modal.is_some() {
-        render_jobs_modal(f, area, app);
-    }
-    if app.subagents_modal.is_some() {
-        render_subagents_modal(f, area, app);
+    if app.background_modal.is_some() {
+        render_background_modal(f, area, app);
     }
     if app.info.is_some() {
         render_info_modal(f, area, app);
@@ -778,48 +773,45 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
         w.saturating_sub(2),
         panel.height,
     );
-    let prompt_h = inner.height.saturating_sub(3);
+    let (prompt_h, notice_h) = footer_rows(inner.height);
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(prompt_h),
-        Constraint::Length(1),
+        Constraint::Length(notice_h),
         Constraint::Length(1),
     ])
     .split(inner);
     app.input_rect = prim::scroll_area(chunks[1]).content;
     render_input(f, chunks[1], app);
+    if notice_h == 1 {
+        render_notice(f, chunks[2], app);
+    }
     render_info(f, chunks[3], app);
 }
 
-fn render_toast(f: &mut Frame, area: Rect, footer_y: u16, app: &App) {
-    let max_toast_w = (area.width as usize).min(64);
-    let Some((lines, color)) = app.toast_lines(max_toast_w) else {
+/// Rows the footer block spends below its top gap: the prompt, and the
+/// notice row above the counter. The notice is the first row to go when the
+/// terminal is too short, because the counter row under it is the only view
+/// of running work the user cannot scroll back to.
+pub(crate) fn footer_rows(height: u16) -> (u16, u16) {
+    let notice_h = u16::from(height >= 4);
+    (height.saturating_sub(2 + notice_h), notice_h)
+}
+
+/// The transient notice row above the footer's counter. One row, aged out
+/// by the notice's own TTL, so it never covers the transcript the way the
+/// floating toast it replaced did.
+fn render_notice(f: &mut Frame, area: Rect, app: &App) {
+    let width = area.width as usize;
+    // A marker column keeps the notice aligned with the prompt gutter.
+    let Some((text, color)) = app.notice_line(width.saturating_sub(2)) else {
         return;
     };
-    let content_w = lines.iter().map(|l| prim::width(l)).max().unwrap_or(0);
-    let toast_w = u16::try_from(content_w.saturating_add(4))
-        .unwrap_or(area.width)
-        .min(area.width);
-    let toast_h = u16::try_from(lines.len().saturating_add(2)).unwrap_or(3);
-    if footer_y < toast_h || toast_w < 4 {
-        return;
-    }
-    let x = area.right().saturating_sub(toast_w);
-    let y = footer_y.saturating_sub(toast_h);
-    let rect = Rect::new(x, y, toast_w, toast_h);
-    f.render_widget(Clear, rect);
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(color))
-        .padding(Padding::horizontal(1))
-        .style(app.theme.text_style());
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
-    let text_lines: Vec<Line<'static>> = lines
-        .into_iter()
-        .map(|line| Line::from(Span::styled(line, app.theme.text_style())))
-        .collect();
-    f.render_widget(Paragraph::new(text_lines), inner);
+    let line = Line::from(vec![
+        Span::styled("! ", Style::new().fg(color)),
+        Span::styled(text, Style::new().fg(color)),
+    ]);
+    f.render_widget(Paragraph::new(line), area);
 }
 
 fn render_debug_bar(f: &mut Frame, area: Rect, app: &App) {

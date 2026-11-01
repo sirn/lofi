@@ -67,10 +67,19 @@ fn tail_rows(
     jobs: &[lofi_core::JobInfo],
     subagents: &[lofi_core::SubagentRunning],
 ) -> Vec<String> {
+    tail_rows_at(a, jobs, subagents, 80)
+}
+
+fn tail_rows_at(
+    a: &crate::tui::App,
+    jobs: &[lofi_core::JobInfo],
+    subagents: &[lofi_core::SubagentRunning],
+    width: usize,
+) -> Vec<String> {
     let cx = super::Cx {
         app: a,
         theme: a.theme,
-        width: 80,
+        width,
         active_turn: false,
     };
     super::render_transcript_tail(&cx, false, jobs, subagents)
@@ -148,6 +157,34 @@ fn job_completion_swaps_running_line_for_its_notice_without_height_change() {
 }
 
 #[test]
+fn a_running_subagent_line_clips_its_task_before_it_wraps() {
+    let a = crate::tui::App::new(
+        "m".to_string(),
+        lofi_types::ThinkingLevel::Off,
+        lofi_types::ServiceTier::Auto,
+        200_000,
+        lofi_types::CompactionConfig::default(),
+        String::new(),
+    );
+    let runs = [lofi_core::SubagentRunning {
+        id: "ab12cd34".to_string(),
+        elapsed_ms: 65_000,
+        task: "survey the parser and report every failure it finds".to_string(),
+        model: Some("plexus/gpt-6.1-sol:high".to_string()),
+        cost: Some(0.0123),
+    }];
+    let rows = tail_rows_at(&a, &[], &runs, 100);
+    assert_eq!(rows.len(), 1, "the line must stay one row: {rows:#?}");
+    let row = &rows[0];
+    assert!(row.ends_with('…'), "the preview is clipped: {row}");
+    assert!(
+        row.contains("subagent ab12cd34 running (65s) - plexus/gpt-6.1-sol:high - $0.0123: "),
+        "{row}"
+    );
+    assert!(crate::tui::view::prim::width(row) <= 100, "{row}");
+}
+
+#[test]
 fn transcript_tail_renders_running_subagents_above_running_jobs() {
     let a = crate::tui::App::new(
         "m".to_string(),
@@ -161,11 +198,17 @@ fn transcript_tail_renders_running_subagents_above_running_jobs() {
         id: "ab12cd34".to_string(),
         elapsed_ms: 65_000,
         task: "survey the repo".to_string(),
+        model: Some("plexus/gpt-6.1-sol:high".to_string()),
+        cost: Some(0.0123),
     }];
     let rows = tail_rows(&a, &[running_job(9, "sleep 9")], &runs);
     let subagent_idx = rows
         .iter()
-        .position(|r| r.contains("subagent ab12cd34 running (65s): survey the repo"))
+        // At 80 columns the model and the cost leave no room for the
+        // preview, which is clipped rather than wrapped.
+        .position(|r| {
+            r.contains("subagent ab12cd34 running (65s) - plexus/gpt-6.1-sol:high - $0.0123")
+        })
         .expect("running subagent row");
     let job_idx = rows
         .iter()
@@ -245,6 +288,34 @@ fn subagent_body_renders_the_outcome_result_and_spend() {
     let body = native_body(&tool);
     assert_eq!(body.lines, vec!["done", "second line"]);
     assert_eq!(body.notice.as_deref(), Some("(completed, $0.0200)"));
+}
+
+#[test]
+fn a_truncated_subagent_body_still_names_the_model() {
+    let raw = serde_json::json!({
+        "ok": true,
+        "id": "s1",
+        "status": "completed",
+        "result": "done",
+        "model": "plexus/gpt-6.1-sol:high",
+        "truncated": true,
+        "full_bytes": 4096
+    })
+    .to_string();
+    let tool = NativeTool {
+        id: 1,
+        name: "subagent".to_string(),
+        args: String::new(),
+        result: Some(raw),
+        preview: None,
+        is_error: false,
+        done: true,
+    };
+    let body = native_body(&tool);
+    assert_eq!(
+        body.notice.as_deref(),
+        Some("(completed, plexus/gpt-6.1-sol:high) (truncated, 4096 bytes)")
+    );
 }
 
 #[test]

@@ -775,13 +775,6 @@ pub(crate) async fn run_loop(
                     dirty = true;
                 }
                 jobs_shown = jobs_shown_now;
-                if app
-                    .jobs_modal
-                    .as_ref()
-                    .is_some_and(|modal| modal.viewing.is_some())
-                {
-                    dirty = true;
-                }
                 // A running background subagent ticks the status line and
                 // the drill-in refresh even while the parent is idle. The
                 // transition away from what the last frame showed also
@@ -791,11 +784,10 @@ pub(crate) async fn run_loop(
                 if subagents_running || subagents_shown != subagents_running {
                     dirty = true;
                 }
-                if app
-                    .subagents_modal
-                    .as_ref()
-                    .is_some_and(|modal| modal.viewing.is_some())
-                {
+                // An open background dialog redraws on every tick: the
+                // drill-in and the live cost columns both move on their
+                // own.
+                if app.background_modal.is_some() {
                     dirty = true;
                 }
                 // The only path that starts a mailbox turn: every other

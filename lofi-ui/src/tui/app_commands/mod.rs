@@ -2,6 +2,7 @@
 
 use super::*;
 
+mod background;
 mod jobs;
 mod modal;
 mod resume;

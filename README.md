@@ -68,6 +68,7 @@ Model-generated shell commands run on the host through `sh -c`; QuickJS isolatio
 | `Esc` | Cancel the active run; otherwise clear input. |
 | `Ctrl+C` | Clear input, cancel the active run, or quit after a second press when idle and empty. |
 | `Ctrl+D` | Delete the next character; cancel an active run or quit when input is empty. |
+| `Ctrl+B` | Open the background dialog on the most recently started work (empty prompt only). |
 
 ### Shell commands
 
@@ -91,7 +92,9 @@ Prefix input with `!` to run it directly through `sh -c` in the workspace. The c
 | `/thinking` | Switch the thinking level. |
 | `/service` | Switch the service tier. |
 | `/theme` | Switch the color scheme for this session. |
-| `/job` | List jobs, view output, or stop a job. |
+| `/job` | Open the background dialog on jobs. |
+| `/subagent` | Open the background dialog on subagents. |
+| `/timer` | Open the background dialog on pending timers. |
 | `/quit` / `/exit` | Exit Lofi. |
 
 ## Configuration

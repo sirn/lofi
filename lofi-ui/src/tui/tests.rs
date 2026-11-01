@@ -16,6 +16,7 @@ use ratatui::backend::TestBackend;
 mod support;
 use support::*;
 
+mod background;
 mod compaction_resume;
 mod detail;
 mod input_and_modals;

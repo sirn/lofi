@@ -1,40 +1,48 @@
 use super::*;
 
 #[test]
-fn jobs_modal_opens_only_with_registry() {
+fn background_modal_opens_on_the_requested_tab() {
     let mut a = app();
-    a.open_jobs_modal();
-    assert!(a.jobs_modal.is_none());
-    a.jobs = Some(lofi_core::JobRegistry::new());
-    a.open_jobs_modal();
-    assert!(a.jobs_modal.is_some());
+    // No session yet: the dialog still opens, and its empty state says
+    // there is nothing running.
+    a.open_background_modal(BackgroundTab::Jobs);
+    let modal = a.background_modal.as_ref().expect("background modal");
+    assert_eq!(modal.tab, BackgroundTab::Jobs);
     assert!(a.modal_open());
+    a.open_background_modal(BackgroundTab::Subagents);
+    assert_eq!(
+        a.background_modal.as_ref().map(|modal| modal.tab),
+        Some(BackgroundTab::Subagents)
+    );
 }
 
 #[test]
-fn jobs_modal_esc_closes() {
+fn background_modal_esc_closes() {
     let mut a = app();
     a.jobs = Some(lofi_core::JobRegistry::new());
-    a.open_jobs_modal();
+    a.open_background_modal(BackgroundTab::Jobs);
     let esc = crossterm::event::KeyEvent::new(
         crossterm::event::KeyCode::Esc,
         crossterm::event::KeyModifiers::NONE,
     );
     a.handle_modal_key(&esc);
-    assert!(a.jobs_modal.is_none());
+    assert!(a.background_modal.is_none());
 }
 
 #[test]
-fn jobs_modal_empty_list_no_underflow() {
+fn background_modal_empty_list_no_underflow() {
     let mut a = app();
     a.jobs = Some(lofi_core::JobRegistry::new());
-    a.open_jobs_modal();
+    a.open_background_modal(BackgroundTab::Jobs);
     let down = crossterm::event::KeyEvent::new(
         crossterm::event::KeyCode::Down,
         crossterm::event::KeyModifiers::NONE,
     );
     a.handle_modal_key(&down);
-    assert_eq!(a.jobs_modal.as_ref().map(|m| m.selected), Some(0));
+    assert_eq!(
+        a.background_modal.as_ref().map(|m| m.jobs.selected),
+        Some(0)
+    );
 }
 
 #[test]
@@ -42,9 +50,18 @@ fn jobs_terminal_view_clips_to_the_available_viewport() {
     use ratatui::Terminal;
 
     let mut a = app();
-    a.jobs_modal = Some(JobsModalState {
-        selected: 0,
-        viewing: Some(JobOutputView {
+    a.background_modal = Some(BackgroundModalState {
+        tab: BackgroundTab::Jobs,
+        jobs: JobsModalState { selected: 0 },
+        subagents: SubagentsModalState {
+            selected: 0,
+            rows: Vec::new(),
+        },
+        timers: TimersModalState {
+            selected: 0,
+            rows: Vec::new(),
+        },
+        view: Some(BackgroundView::Job(JobOutputView {
             id: 7,
             content: JobViewContent::Terminal(lofi_core::JobScreen {
                 cols: 80,
@@ -58,8 +75,8 @@ fn jobs_terminal_view_clips_to_the_available_viewport() {
                     })
                     .collect(),
             }),
-        }),
-        confirm_kill: None,
+        })),
+        confirm: None,
     });
     let mut term = Terminal::new(TestBackend::new(32, 12)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
@@ -82,9 +99,18 @@ fn jobs_terminal_view_preserves_cell_colors_and_attributes() {
     use ratatui::{style::Color, Terminal};
 
     let mut a = app();
-    a.jobs_modal = Some(JobsModalState {
-        selected: 0,
-        viewing: Some(JobOutputView {
+    a.background_modal = Some(BackgroundModalState {
+        tab: BackgroundTab::Jobs,
+        jobs: JobsModalState { selected: 0 },
+        subagents: SubagentsModalState {
+            selected: 0,
+            rows: Vec::new(),
+        },
+        timers: TimersModalState {
+            selected: 0,
+            rows: Vec::new(),
+        },
+        view: Some(BackgroundView::Job(JobOutputView {
             id: 8,
             content: JobViewContent::Terminal(lofi_core::JobScreen {
                 cols: 1,
@@ -103,8 +129,8 @@ fn jobs_terminal_view_preserves_cell_colors_and_attributes() {
                     }],
                 }],
             }),
-        }),
-        confirm_kill: None,
+        })),
+        confirm: None,
     });
     let mut term = Terminal::new(TestBackend::new(24, 8)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();

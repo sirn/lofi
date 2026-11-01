@@ -210,7 +210,7 @@ fn branch_switch_retains_then_releases_owned_job() {
     tui.send(b"\x03");
     tui.clear_output();
     tui.submit("/jobs");
-    tui.wait_for("no background jobs this session", WAIT);
+    tui.wait_for("no jobs", WAIT);
     let events = fixture.events();
     assert_eq!(server.request_count(), 3);
     assert_eq!(job_events(&events, "job_started").len(), 1);
