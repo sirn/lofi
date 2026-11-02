@@ -1,4 +1,6 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use lofi_error::{Error, Result};
 use lofi_types::{Message, PromptKind, SessionEvent, SessionEventKind};
@@ -42,8 +44,20 @@ pub struct SessionTreeSnapshot {
 #[derive(Debug, Clone)]
 pub struct SessionCursor {
     path: PathBuf,
-    leaf_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    compaction_index: std::sync::Arc<std::sync::Mutex<Option<Vec<EventIndex>>>>,
+    leaf_id: Arc<Mutex<Option<String>>>,
+    compaction_index: Arc<Mutex<Option<Vec<EventIndex>>>>,
+    /// Counts head moves. Appends only extend the head, so a marker recorded
+    /// at the current generation is still on the lineage. A move may have
+    /// switched branches, so a stale generation needs the ancestry scan.
+    branch: Arc<AtomicU64>,
+}
+
+/// A job's start-marker id tagged with the branch generation it was minted in,
+/// so a release can skip the lineage scan when the head never moved.
+#[derive(Debug)]
+pub(crate) struct JobOwner {
+    id: String,
+    branch: u64,
 }
 
 impl SessionCursor {
@@ -54,10 +68,9 @@ impl SessionCursor {
     pub fn new(path: PathBuf, leaf_id: Option<String>) -> Self {
         Self {
             path,
-            leaf_id: std::sync::Arc::new(std::sync::Mutex::new(
-                leaf_id.filter(|id| !id.is_empty()),
-            )),
-            compaction_index: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            leaf_id: Arc::new(Mutex::new(leaf_id.filter(|id| !id.is_empty()))),
+            compaction_index: Arc::new(Mutex::new(None)),
+            branch: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -150,6 +163,13 @@ impl SessionCursor {
             .unwrap_or_default()
     }
 
+    pub(crate) fn job_owner(&self, id: String) -> JobOwner {
+        JobOwner {
+            id,
+            branch: self.branch.load(Ordering::SeqCst),
+        }
+    }
+
     #[must_use]
     pub fn leaf_id(&self) -> Option<String> {
         self.lock_leaf().clone()
@@ -164,6 +184,7 @@ impl SessionCursor {
         persist_cursor(&self.path, next.as_deref(), true)?;
         *leaf = next;
         *self.lock_compaction_index() = None;
+        self.branch.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -534,19 +555,26 @@ impl SessionCursor {
         Ok((start, end))
     }
 
-    /// Append events only while `ancestor_id` remains on the selected
-    /// lineage. The lineage check and append share the cursor-head lock, so a
-    /// branch switch cannot land between them.
+    /// Append events only while `owner` remains on the selected lineage. The
+    /// lineage check and append share the cursor-head lock, so a branch switch
+    /// cannot land between them.
+    ///
+    /// The owner carries the branch generation it was minted on. An unchanged
+    /// generation proves the marker is still an ancestor, because appends only
+    /// extend the head. A moved head may have switched branches, so the scan
+    /// runs.
     pub(crate) fn append_events_if_ancestor(
         &self,
-        ancestor_id: &str,
+        owner: &JobOwner,
         events: &mut [SessionEvent],
     ) -> Result<Option<(u64, u64)>> {
         let mut leaf = self.lock_leaf();
-        let (_meta, index, _file_size) = load_index(&self.path)?;
-        let selected = indexed_lineage(index, leaf.as_deref())?;
-        if !selected.iter().any(|entry| entry.id.matches(ancestor_id)) {
-            return Ok(None);
+        if owner.branch != self.branch.load(Ordering::SeqCst) {
+            let (_meta, index, _file_size) = load_index(&self.path)?;
+            let selected = indexed_lineage(index, leaf.as_deref())?;
+            if !selected.iter().any(|entry| entry.id.matches(&owner.id)) {
+                return Ok(None);
+            }
         }
         self.append_events_at_leaf(events, &mut leaf).map(Some)
     }

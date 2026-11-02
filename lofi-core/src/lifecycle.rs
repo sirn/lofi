@@ -894,6 +894,26 @@ mod tests {
     }
 
     #[test]
+    fn job_release_attaches_after_later_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
+        let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
+        let owner = cursor.record_job_started(42, "cargo test").unwrap();
+        // Only a branch move can take the start marker off the selected
+        // lineage, but the head does move as the job runs.
+        cursor
+            .record(SessionRecord::System { prompt: "sys" })
+            .unwrap();
+        cursor.record_job_finished(&owner, 42).unwrap();
+
+        let snapshot = cursor.snapshot().unwrap();
+        let lineage =
+            crate::session::replay::job_lifecycle_ids_at(&cursor, &snapshot.index).unwrap();
+        assert_eq!(lineage.started, vec![42]);
+        assert!(lineage.outstanding.is_empty());
+    }
+
+    #[test]
     fn job_release_does_not_attach_after_owner_branch_is_abandoned() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
@@ -916,15 +936,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
         let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
-        let mut started = [SessionEvent {
-            id: String::new(),
-            parent_id: None,
-            kind: SessionEventKind::JobStarted {
-                job_id: 42,
-                cmd: Some("cargo test".into()),
-            },
-        }];
-        cursor.append_events(&mut started).unwrap();
+        let owner = cursor.record_job_started(42, "cargo test").unwrap();
         let lifecycle = AgentLifecycle::new(CompactionConfig::default(), 100_000);
         let jobs = lofi_code::tools::JobRegistry::new();
 
@@ -935,7 +947,7 @@ mod tests {
         assert!(reconciliation.killed.is_empty());
         assert_eq!(reconciliation.stale, vec![42]);
 
-        cursor.record_job_finished(&started[0].id, 42).unwrap();
+        cursor.record_job_finished(&owner, 42).unwrap();
         let snapshot = cursor.snapshot().unwrap();
         let reconciliation = lifecycle
             .reconcile_jobs_after_lineage_switch(&cursor, &snapshot.index, &jobs)
@@ -950,10 +962,11 @@ mod tests {
         let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
         let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
         let owner = cursor.record_job_started(42, "cargo test").unwrap();
+        let started_id = cursor.leaf_id();
         cursor.record_job_finished(&owner, 42).unwrap();
         // Roll back to the JobStarted event so the JobFinished marker lands on
         // the pruned branch while JobStarted stays on the selected lineage.
-        cursor.restore_branch(Some(owner)).unwrap();
+        cursor.restore_branch(started_id).unwrap();
 
         let lifecycle = AgentLifecycle::new(CompactionConfig::default(), 100_000);
         // An empty registry models the state after a prior branch switch

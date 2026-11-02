@@ -11,7 +11,7 @@ use lofi_types::{
     Message, NativeToolRecord, Role, RunModel, SessionEvent, SessionEventKind, Usage,
 };
 
-use crate::session::store::{self, CompactionCounts};
+use crate::session::store::{self, CompactionCounts, JobOwner};
 use crate::shell::UserShellResult;
 use lofi_error::Result;
 
@@ -114,10 +114,10 @@ impl store::SessionCursor {
         self.record(SessionRecord::Turn(batch)).map(|_| ())
     }
 
-    /// Record a job acquisition and return its durable event id. The id owns
-    /// the corresponding release marker and remains stable across branch
-    /// switches.
-    pub(crate) fn record_job_started(&self, job_id: u64, cmd: &str) -> Result<String> {
+    /// Record a job acquisition and return its owner handle, which carries the
+    /// durable event id. The id owns the corresponding release marker and
+    /// remains stable across branch switches.
+    pub(crate) fn record_job_started(&self, job_id: u64, cmd: &str) -> Result<JobOwner> {
         let mut events = [SessionEvent {
             id: String::new(),
             parent_id: None,
@@ -127,19 +127,19 @@ impl store::SessionCursor {
             },
         }];
         self.append_events(&mut events)?;
-        Ok(events[0].id.clone())
+        Ok(self.job_owner(events[0].id.clone()))
     }
 
     /// Record a job release only if its acquisition is still on the selected
     /// lineage. A job that finishes after a branch switch cannot attach its
     /// release marker to the replacement branch.
-    pub(crate) fn record_job_finished(&self, owner_event_id: &str, job_id: u64) -> Result<()> {
+    pub(crate) fn record_job_finished(&self, owner: &JobOwner, job_id: u64) -> Result<()> {
         let mut events = [SessionEvent {
             id: String::new(),
             parent_id: None,
             kind: SessionEventKind::JobFinished { job_id },
         }];
-        self.append_events_if_ancestor(owner_event_id, &mut events)?;
+        self.append_events_if_ancestor(owner, &mut events)?;
         Ok(())
     }
 
