@@ -12,7 +12,7 @@ impl App {
         if let Some((cursor, col)) = self.yank_cursor.take() {
             let total = self.log_total;
             let last = total.saturating_sub(1);
-            self.nav_cursor = cursor.min(last);
+            self.place_nav_cursor(cursor.min(last));
             self.nav_col = col;
             // Un-pin so the viewport stays where the cursor is, not the
             // bottom of the transcript. The render loop will clamp the
@@ -26,7 +26,7 @@ impl App {
                 .log_off
                 .saturating_add(self.log_view_h)
                 .saturating_sub(1);
-            self.nav_cursor = last.min(self.log_total.saturating_sub(1));
+            self.place_nav_cursor(last.min(self.log_total.saturating_sub(1)));
             self.nav_col = 0;
         }
     }
@@ -59,7 +59,7 @@ impl App {
             return;
         };
         if let Some(header) = header {
-            self.nav_cursor = header;
+            self.place_nav_cursor(header);
         }
         self.invalidate_detail_layout(state.turn);
     }
@@ -139,7 +139,7 @@ impl App {
         }) else {
             return;
         };
-        self.nav_cursor = self.log_off.saturating_add(rel);
+        self.place_nav_cursor(self.log_off.saturating_add(rel));
         self.nav_col = col;
     }
 
@@ -213,7 +213,7 @@ impl App {
                 return false;
             };
             if let Some(header) = header {
-                self.nav_cursor = header;
+                self.place_nav_cursor(header);
             }
             self.mode = Mode::Navigate;
             self.sel = None;
@@ -263,10 +263,11 @@ impl App {
         } else {
             0
         };
-        self.nav_cursor = self
-            .nav_cursor
-            .saturating_add(header_rows)
-            .saturating_add(body_row);
+        self.place_nav_cursor(
+            self.nav_cursor
+                .saturating_add(header_rows)
+                .saturating_add(body_row),
+        );
     }
 
     pub(super) fn scroll_cursor_detail(&mut self, delta: i32) -> bool {
@@ -498,13 +499,17 @@ impl App {
             }
             return;
         }
+        // The step is one line of content, so it applies to the line the
+        // cursor sits on now, not to the absolute line of the last frame.
+        self.reanchor_nav_cursor();
         let max = self.log_total.saturating_sub(1);
         let step = delta.unsigned_abs() as usize;
-        self.nav_cursor = if delta > 0 {
+        let next = if delta > 0 {
             self.nav_cursor.saturating_add(step).min(max)
         } else {
             self.nav_cursor.saturating_sub(step)
         };
+        self.place_nav_cursor(next);
         if self.mode == Mode::Select {
             self.sel = Some(self.select_sel());
         }
@@ -518,7 +523,7 @@ impl App {
             }
             return;
         }
-        self.nav_cursor = 0;
+        self.place_nav_cursor(0);
         if self.mode == Mode::Select {
             self.sel = Some(self.select_sel());
         }
@@ -532,17 +537,33 @@ impl App {
             }
             return;
         }
-        self.nav_cursor = self.log_total.saturating_sub(1);
+        self.place_nav_cursor(self.log_total.saturating_sub(1));
         if self.mode == Mode::Select {
             self.sel = Some(self.select_sel());
         }
         self.nav_show_cursor();
     }
 
-    /// Adjust [`top_line`] so the cursor is visible. Navigate never auto-pins
-    /// (it doesn't follow new output); only the minimal scroll needed to keep
-    /// the cursor on screen is applied.
+    /// Adjust [`top_line`] so the cursor is visible, and record reaching the
+    /// latest line as tail intent. Only input handlers call this: rendering and
+    /// the convergence tick must use [`Self::nav_scroll_into_view`], because a
+    /// total that is still settling can make an unmoved cursor look like it
+    /// reached the end.
     pub(super) fn nav_show_cursor(&mut self) {
+        self.nav_scroll_into_view();
+        let base = self.log_total.saturating_sub(self.log_view_h);
+        // Reaching the latest transcript line is an explicit request to
+        // follow the tail. Record that intent immediately rather than waiting
+        // for a render to infer it from offsets: a settling event can append
+        // or reflow rows before that render and otherwise make the viewport
+        // fall back to the previous bottom.
+        self.pinned = self.nav_cursor == self.log_total.saturating_sub(1) && self.top_line >= base;
+    }
+
+    /// Adjust [`top_line`] so the cursor is visible, without recording tail
+    /// intent. Navigate never auto-pins (it doesn't follow new output); only
+    /// the minimal scroll needed to keep the cursor on screen is applied.
+    pub(super) fn nav_scroll_into_view(&mut self) {
         let h = self.log_view_h;
         let total = self.log_total;
         if h == 0 || total == 0 {
@@ -559,12 +580,6 @@ impl App {
             off
         };
         self.top_line = new_top.min(base);
-        // Reaching the latest transcript line is an explicit request to
-        // follow the tail. Record that intent immediately rather than waiting
-        // for a render to infer it from offsets: a settling event can append
-        // or reflow rows before that render and otherwise make the viewport
-        // fall back to the previous bottom.
-        self.pinned = cur == total.saturating_sub(1) && self.top_line >= base;
     }
 
     fn render_turn_at(&self, idx: usize, width: usize, active_turn: bool) -> Vec<view::RenderLine> {
@@ -654,7 +669,7 @@ impl App {
         width: usize,
     ) {
         if let Some((cursor, col)) = self.reseat_position(anchor, last_lines, width) {
-            self.nav_cursor = cursor;
+            self.place_nav_cursor(cursor);
             self.nav_col = col;
             if self.mode == Mode::Select {
                 self.sel = Some(self.select_sel());
@@ -699,6 +714,11 @@ impl App {
         if n == 0 {
             return;
         }
+        // Which turn the cursor is in depends on the heights in force, and the
+        // cursor may still be the absolute line of a frame whose heights the
+        // tick loop has since replaced. Read it back from its content first, or
+        // the jump starts from the wrong turn and skips the ones between.
+        self.reanchor_nav_cursor();
         let mut cur = 0;
         for i in 0..n {
             if self.nav_cursor < self.turn_start_line(i) {
@@ -712,7 +732,7 @@ impl App {
             cur.saturating_sub(1)
         };
         let max = self.log_total.saturating_sub(1);
-        self.nav_cursor = self.turn_start_line(target_turn).min(max);
+        self.place_nav_cursor(self.turn_start_line(target_turn).min(max));
         self.nav_col = 0;
         if self.mode == Mode::Select {
             self.sel = Some(self.select_sel());
@@ -730,7 +750,10 @@ impl App {
         let step: i32 = h.try_into().unwrap_or(i32::MAX);
         match self.mode {
             Mode::Input => {
-                self.top_line = self.top_line.saturating_sub(h);
+                // Page from where the frame actually is, not from a stale
+                // `top_line`: a tail-following view never stores its own
+                // offset (`top_line` keeps the value from before it paged).
+                self.top_line = self.view_off().saturating_sub(h);
                 self.pinned = false;
             }
             Mode::Navigate | Mode::Select if self.detail_focus.is_some() => {
@@ -748,9 +771,8 @@ impl App {
         let step: i32 = h.try_into().unwrap_or(i32::MAX);
         match self.mode {
             Mode::Input => {
-                let base = self.last_base;
-                let new = self.top_line.saturating_add(h);
-                if new >= base {
+                let new = self.view_off().saturating_add(h);
+                if new >= self.last_base {
                     self.pinned = true;
                 } else {
                     self.top_line = new;
@@ -807,24 +829,188 @@ impl App {
             return;
         }
         self.sel = None;
+        // Scroll from the offset the frame is drawn at. `top_line` can sit
+        // past the base (the view is clamped for display) and a tail-following
+        // view does not store its own offset at all, so a step from it would
+        // move by more or less than asked.
         if delta < 0 {
             let n = delta.unsigned_abs() as usize;
-            if self.pinned {
-                self.pinned = false;
-                self.top_line = self.last_base.saturating_sub(n);
-            } else {
-                self.top_line = self.top_line.saturating_sub(n);
-            }
+            self.top_line = self.view_off().saturating_sub(n);
+            self.pinned = false;
         } else {
             let n = usize::try_from(delta).unwrap_or(0);
             if self.pinned {
                 return;
             }
-            self.top_line = self.top_line.saturating_add(n);
+            self.top_line = self.view_off().saturating_add(n);
             if self.top_line >= self.last_base {
                 self.pinned = true;
             }
         }
+    }
+
+    /// Record the top visible row as a content position: the turn holding it
+    /// and the row within that turn. Absolute line numbers shift whenever
+    /// estimated frozen heights are replaced by exact ones, but the content at
+    /// the top row does not.
+    pub(super) fn remember_view_anchor(&mut self) {
+        self.view_anchor = if self.pinned {
+            None
+        } else {
+            self.content_row_anchor(self.log_off)
+        };
+        self.view_anchor_line = self.top_line;
+    }
+
+    /// Re-derive `top_line` from the recorded content anchor, so a height
+    /// change above the viewport cannot slide the content under it.
+    /// A `top_line` changed since the anchor was recorded is a position the
+    /// user just asked for; it becomes the new anchor. Adopting it here, before
+    /// the heights move, is what keeps a page step from being swallowed: the
+    /// step is one screen up from the tail, but measuring the prefix shrinks
+    /// the base until the absolute offset it produced no longer means that.
+    pub(super) fn reanchor_view_top(&mut self) {
+        if self.pinned {
+            return;
+        }
+        if self.view_anchor.is_none() || self.top_line != self.view_anchor_line {
+            self.view_anchor = self.content_row_anchor(self.top_line);
+            self.view_anchor_line = self.top_line;
+            return;
+        }
+        let Some((turn, row)) = self.view_anchor else {
+            return;
+        };
+        let height = self
+            .layout
+            .frozen_heights
+            .get(turn)
+            .copied()
+            .unwrap_or(self.last_turn_height);
+        self.top_line = self.turn_start_line(turn).saturating_add(row.min(height));
+        self.view_anchor_line = self.top_line;
+    }
+
+    /// Set the cursor line and pair it with the content it sits on in the same
+    /// breath.
+    ///
+    /// `nav_cursor` is an absolute line, so it stops meaning the same content as
+    /// soon as a frozen height above it is replaced by an exact one. Navigation
+    /// handlers run between renders, on heights the tick loop may have moved
+    /// since the last frame; a line set without its `(turn, row)` would later be
+    /// turned back into content by whichever step runs next, using heights it
+    /// was never computed with. A jump back would then land turns away — it
+    /// read the stale line with the new heights and clamped it to the end of
+    /// the transcript.
+    fn place_nav_cursor(&mut self, line: usize) {
+        self.nav_cursor = line;
+        self.nav_anchor = self.content_row_anchor(line);
+        self.nav_anchor_line = line;
+        self.nav_anchor_row = None;
+    }
+
+    /// Record the cursor as a content position and its screen row, so a height
+    /// change above it cannot move it.
+    pub(super) fn remember_nav_anchor(&mut self) {
+        self.nav_anchor = self.content_row_anchor(self.nav_cursor);
+        self.nav_anchor_line = self.nav_cursor;
+        let drawn = matches!(self.mode, Mode::Navigate | Mode::Select);
+        let on_screen =
+            self.nav_cursor >= self.log_off && self.nav_cursor < self.log_off + self.log_view_h;
+        self.nav_anchor_row = (drawn && on_screen).then(|| self.nav_cursor - self.log_off);
+    }
+
+    /// Put the cursor back on its content, on the screen row it had.
+    ///
+    /// `nav_cursor` is an absolute line. Frozen heights converge from
+    /// estimates between frames, so measuring a turn above the cursor moves
+    /// every line after it, and `nav_scroll_into_view` then drags the viewport
+    /// along with the cursor: the whole transcript slides while the cursor
+    /// stays put on screen. Deriving the line from its content holds both.
+    ///
+    /// A cursor that changed since the anchor was recorded is a position the
+    /// user asked for; it becomes the new anchor.
+    pub(super) fn reanchor_nav_cursor(&mut self) {
+        if !matches!(self.mode, Mode::Navigate | Mode::Select) {
+            return;
+        }
+        if self.nav_anchor.is_none() || self.nav_cursor != self.nav_anchor_line {
+            // A position set outside the navigation handlers: adopt it, but
+            // claim no screen row. The row is only known once the frame has
+            // put the cursor in a window.
+            self.place_nav_cursor(self.nav_cursor);
+            return;
+        }
+        let Some((turn, row)) = self.nav_anchor else {
+            return;
+        };
+        let height = self
+            .layout
+            .frozen_heights
+            .get(turn)
+            .copied()
+            .unwrap_or(self.last_turn_height);
+        self.nav_cursor = self.turn_start_line(turn).saturating_add(row.min(height));
+        self.nav_anchor_line = self.nav_cursor;
+        if let Some(row) = self.nav_anchor_row {
+            self.top_line = self.nav_cursor.saturating_sub(row);
+        }
+    }
+
+    /// Record the selection's free end as a content position.
+    pub(super) fn remember_sel_anchor(&mut self) {
+        self.sel_anchor = self.content_row_anchor(self.select_anchor.0);
+        self.sel_anchor_line = self.select_anchor.0;
+    }
+
+    /// Put the selection's free end back on its content, for the same reason
+    /// as the cursor: a converging height above it moves its absolute line, and
+    /// an endpoint left behind highlights the wrong text.
+    pub(super) fn reanchor_sel(&mut self) {
+        if self.mode != Mode::Select {
+            return;
+        }
+        if self.sel_anchor.is_none() || self.select_anchor.0 != self.sel_anchor_line {
+            self.remember_sel_anchor();
+            return;
+        }
+        let Some((turn, row)) = self.sel_anchor else {
+            return;
+        };
+        let height = self
+            .layout
+            .frozen_heights
+            .get(turn)
+            .copied()
+            .unwrap_or(self.last_turn_height);
+        self.select_anchor.0 = self.turn_start_line(turn).saturating_add(row.min(height));
+        self.sel_anchor_line = self.select_anchor.0;
+        self.sel = Some(self.select_sel());
+    }
+
+    /// `line` as (turn index, row within that turn), walking the same heights
+    /// `turn_start_line` sums.
+    fn content_row_anchor(&self, line: usize) -> Option<(usize, usize)> {
+        let n = self.transcript.turns.len();
+        if n == 0 {
+            return None;
+        }
+        let frozen = self.layout.frozen_heights.len();
+        let mut start = 0usize;
+        let mut anchor = (0, line);
+        for turn in 0..n {
+            if start > line {
+                break;
+            }
+            anchor = (turn, line - start);
+            let height = if turn < frozen {
+                self.layout.frozen_heights[turn]
+            } else {
+                self.last_turn_height
+            };
+            start = start.saturating_add(height).saturating_add(1);
+        }
+        Some(anchor)
     }
 
     /// Viewport offset that will be used at the next render: `base` when
@@ -852,9 +1038,9 @@ impl App {
             .saturating_sub(1)
             .min(self.log_total.saturating_sub(1));
         if self.nav_cursor < after {
-            self.nav_cursor = after;
+            self.place_nav_cursor(after);
         } else if self.nav_cursor > last {
-            self.nav_cursor = last;
+            self.place_nav_cursor(last);
         }
     }
 

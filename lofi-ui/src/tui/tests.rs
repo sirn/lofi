@@ -30,6 +30,7 @@ mod replay;
 mod resize;
 mod session_lifecycle;
 mod session_tree;
+mod startup_geometry;
 mod status_and_replay;
 mod streaming;
 mod yank;

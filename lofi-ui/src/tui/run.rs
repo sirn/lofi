@@ -824,29 +824,13 @@ pub(crate) async fn run_loop(
                 }
                 // Drain pending height re-measure a little each tick so a
                 // width change or estimate-seeded resume never stalls a
-                // frame. Absolute line indices shift while the estimates
-                // converge, so a Navigate/Select cursor must follow its
-                // content through each step instead of drifting (the cursor
-                // visibly jumps around while the user scrolls otherwise).
-                let navigating = matches!(app.mode, Mode::Navigate | Mode::Select);
-                if navigating && app.layout.height_remeasure_from.is_some() {
-                    let nav_anchor = app.nav_content_anchor();
-                    let sel_anchor = match app.mode {
-                        Mode::Select => app.sel_content_anchor(),
-                        _ => None,
-                    };
-                    app.remeasure_heights_step(16);
-                    if let Some(anchor) = nav_anchor {
-                        // The converging geometry is frozen-turn-only at
-                        // rest, so an empty live last turn renders correctly.
-                        app.reseat_nav_cursor(anchor, &[], app.layout.frozen_width);
-                    }
-                    if let Some(anchor) = sel_anchor {
-                        app.reseat_sel_anchor(anchor, &[], app.layout.frozen_width);
-                    }
-                    app.nav_show_cursor();
-                    dirty = true;
-                } else if app.remeasure_heights_step(16) {
+                // frame. Nothing moves here: the frame that follows re-derives
+                // the cursor and the viewport top from their content anchors,
+                // which is the only place the heights they depend on are
+                // final. Moving them here, from mid-convergence heights, is
+                // what made a scroll in Navigate/Select drift one row per
+                // tick.
+                if app.remeasure_heights_step(16) {
                     dirty = true;
                 }
             }

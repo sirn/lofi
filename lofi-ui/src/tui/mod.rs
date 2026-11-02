@@ -269,6 +269,34 @@ pub(crate) struct App {
     pinned: bool,
     top_line: usize,
     last_base: usize,
+    /// Top visible row as content: (turn index, row within that turn). Frozen
+    /// heights converge from estimates after a resume, which shifts absolute
+    /// line numbers; this pair keeps the same content at the top row.
+    view_anchor: Option<(usize, usize)>,
+    /// The `top_line` that produced `view_anchor`. Any other value means the
+    /// view moved since, so the anchor is stale.
+    view_anchor_line: usize,
+    /// The Navigate/Select cursor as content: (turn index, row within that
+    /// turn). Same reason as `view_anchor`, and more urgent: the viewport
+    /// follows the cursor, so a cursor dragged by a shrinking prefix estimate
+    /// takes the whole transcript with it.
+    nav_anchor: Option<(usize, usize)>,
+    /// The `nav_cursor` that produced `nav_anchor`. Any other value means the
+    /// user moved the cursor since.
+    nav_anchor_line: usize,
+    /// The cursor's screen row when `nav_anchor` was recorded, when it was on
+    /// screen at all. Re-deriving the cursor from its content puts it back on
+    /// this row; a cursor that was already off screen stays where the scroll
+    /// handlers put the viewport.
+    nav_anchor_row: Option<usize>,
+    /// Scrollbar geometry (offset, extent) as of the last frame whose extent
+    /// was final. Estimated heights converge by an order of magnitude, and a
+    /// thumb drawn from a moving extent slides and stretches with no input.
+    scroll_gauge: Option<(usize, usize)>,
+    /// Turn count and live turn height when `scroll_gauge` was adopted. Both
+    /// change only when content changes, never when an estimate converges, so
+    /// a difference means the extent moved for real and must reach the thumb.
+    scroll_gauge_stamp: Option<(usize, usize)>,
     expanded_details: HashMap<DetailKey, DetailState>,
     detail_focus: Option<DetailFocus>,
     debug_after_draw: Option<&'static str>,
@@ -372,6 +400,12 @@ pub(crate) struct App {
     nav_cursor: usize,
     nav_col: usize,
     select_anchor: (usize, usize),
+    /// The selection's free end as content: (turn index, row within that
+    /// turn), and the `select_anchor` line that produced it. The same
+    /// convergence shift moves it, and a drifting endpoint highlights the
+    /// wrong text.
+    sel_anchor: Option<(usize, usize)>,
+    sel_anchor_line: usize,
     /// Total transcript line count (frozen + last turn + separators), stashed
     /// at render time so the Navigate cursor can be clamped between events.
     log_total: usize,

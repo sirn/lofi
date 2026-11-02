@@ -390,6 +390,9 @@ fn resize_keeps_nav_cursor_at_its_viewport_row() {
         push_turn(&mut a);
     }
     a.mode = Mode::Navigate;
+    // `enter_nav` always leaves the tail; the fixture must too, or the view
+    // keeps following the bottom and never materializes the turns it scrolls to.
+    a.pinned = false;
 
     let mut term = Terminal::new(TestBackend::new(28, 24)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();

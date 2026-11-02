@@ -238,6 +238,12 @@ fn feed_segment(
     }
 }
 
+/// Bounds the frame geometry loop. Each pass measures turns the previous one
+/// made visible, so the number of estimates strictly falls; the bound only
+/// protects a frame from a pathological rewrap that keeps swapping one turn
+/// for another.
+const MAX_GEOMETRY_PASSES: usize = 4;
+
 fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     let scroll_area = prim::scroll_area(area);
     let content = scroll_area.content;
@@ -309,27 +315,40 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
 
     let turn_gaps = if n_turns == 0 { 1 } else { n_turns - 1 };
 
-    // Firm up estimated heights around the viewport before the total/base/off
-    // math below: a bottom-pinned view computed from estimates would slice
-    // frozen turns at rows that disagree with their measured lines, drawing
-    // the wrong content (e.g. clipping the first turn entirely after a /tree
-    // rollback onto an estimate-seeded restore). The dedicated pass at the
-    // end of the frame stays: it converges what this provisional prediction
-    // missed.
-    let est_total = app.layout.frozen_heights.iter().sum::<usize>() + last_h + turn_gaps;
+    if !width_changed {
+        // Heights converge between frames, and an absolute `top_line` slides
+        // the content when they do. Re-derive it from the content position
+        // recorded at the last frame. A width change re-anchors by proportion
+        // instead, because the row layout itself changes.
+        //
+        // The cursor comes first: it is an absolute line too, and the viewport
+        // follows it. Held only at the top, a cursor dragged by the shrinking
+        // prefix estimate would take the transcript down with it.
+        app.reanchor_nav_cursor();
+        app.reanchor_sel();
+        app.reanchor_view_top();
+    }
+
+    // Converge the heights the viewport shows before publishing any geometry.
+    // An estimate-seeded restore can be off by an order of magnitude, and every
+    // published number derives from those heights: measuring a turn changes its
+    // height, which moves the base, which changes which turns the window shows.
+    // So locate, measure, and locate again until nothing moves. A frame that
+    // publishes before the last height change slices rows at boundaries that
+    // disagree with their content, and draws a scrollbar from a total that no
+    // longer holds.
+    let est_total: usize = app.layout.frozen_heights.iter().sum::<usize>() + last_h + turn_gaps;
     let est_base = est_total.saturating_sub(height);
     let est_off = if app.pinned {
         est_base
     } else {
         app.top_line.min(est_base)
     };
-    app.sync_frozen_cache_for_viewport(est_off, height, w);
+    app.measure_visible_turns(est_off, height, w);
 
-    let frozen_total: usize = app.layout.frozen_heights.iter().sum();
+    let mut total: usize = app.layout.frozen_heights.iter().sum::<usize>() + last_h + turn_gaps;
+    let mut base = total.saturating_sub(height);
     app.last_turn_height = last_h;
-    let total: usize = frozen_total + last_h + turn_gaps;
-
-    let base = total.saturating_sub(height);
     app.log_rect = content;
     // A re-wrap shifts absolute line indices, so a `top_line` carried over
     // from the previous width may now point past the new bottom — clamping it
@@ -375,41 +394,63 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     if let Some(row) = nav_row {
         app.top_line = app.nav_cursor.saturating_sub(row).min(base);
     }
-    app.last_base = base;
-    let mut off = if app.pinned {
-        base
-    } else {
-        app.top_line.min(base)
-    };
-    app.pinned = off >= base;
-    app.log_off = off;
-    // Stash the total / viewport height so the Navigate cursor can be clamped
-    // and scrolled between events; clamp the cursor if the log shrank.
-    app.log_total = total;
-    app.log_view_h = height;
-    // The cursor must stay visible in Navigate/Select every frame, not only
-    // on a view change: between renders the estimated frozen heights keep
-    // converging on a resumed session, shifting totals and the base, and a
-    // tick-time reseat can otherwise leave the cursor above the window.
-    if matches!(app.mode, Mode::Navigate | Mode::Select) {
-        app.nav_show_cursor();
-        off = if app.pinned {
-            base
-        } else {
-            app.top_line.min(base)
-        };
+    // Everything below the one-shot re-anchoring is re-derived on every pass:
+    // a pass that measured turns changed their heights, so it changed `total`,
+    // the base, and possibly the cursor's clamp.
+    let mut off = app.view_off();
+    for pass in 0..=MAX_GEOMETRY_PASSES {
+        if !width_changed {
+            // Measuring turns (before the loop, or in the pass before this
+            // one) moved their heights, and with them the base. Hold the
+            // cursor and the viewport on their content instead of letting the
+            // base slide under them.
+            app.reanchor_nav_cursor();
+            app.reanchor_sel();
+            app.reanchor_view_top();
+        }
+        total = app.layout.frozen_heights.iter().sum::<usize>() + last_h + turn_gaps;
+        base = total.saturating_sub(height);
+        app.last_base = base;
+        off = app.view_off();
         app.log_off = off;
-    }
-    if app.nav_cursor >= total {
-        app.nav_cursor = total.saturating_sub(1);
-        if app.mode == Mode::Select {
-            app.sel = Some(app.select_sel());
+        // Stash the total / viewport height so the Navigate cursor can be
+        // clamped and scrolled between events; clamp the cursor if the log
+        // shrank.
+        app.log_total = total;
+        app.log_view_h = height;
+        // The cursor must stay visible in Navigate/Select every frame, not only
+        // on a view change: between renders the estimated frozen heights keep
+        // converging on a resumed session, shifting totals and the base, and a
+        // tick-time reseat can otherwise leave the cursor above the window.
+        if matches!(app.mode, Mode::Navigate | Mode::Select) {
+            app.nav_scroll_into_view();
+            off = app.view_off();
+            app.log_off = off;
+        }
+        if app.nav_cursor >= total {
+            app.nav_cursor = total.saturating_sub(1);
+            if app.mode == Mode::Select {
+                app.sel = Some(app.select_sel());
+            }
+        }
+        // Measuring can change the heights the pass above just published, so a
+        // pass that measures runs again; the last one always publishes from
+        // the heights as they stand, even when the budget ran out with
+        // estimates left.
+        if pass == MAX_GEOMETRY_PASSES || !app.measure_visible_turns(off, height, w) {
+            break;
         }
     }
 
+    // Cache fills only: the heights this frame published must not change again.
     let phase_started = std::time::Instant::now();
-    app.sync_frozen_cache_for_viewport(off, height, w);
+    app.cache_frozen_lines_for_viewport(off, height, w);
     app.render_profile.viewport_cache_us = phase_started.elapsed().as_micros();
+    // Record where this frame's top row sits in content, so the next frame can
+    // keep it there while the remaining estimates converge.
+    app.remember_view_anchor();
+    app.remember_nav_anchor();
+    app.remember_sel_anchor();
 
     let blank = prim::rblank();
     let mut vis: Vec<Line<'static>> = Vec::with_capacity(height);
@@ -690,7 +731,16 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     let active = matches!(app.mode, Mode::Navigate | Mode::Select)
         && app.detail_focus.is_none()
         && !app.modal_open();
-    draw_scrollbar(f, scroll_area.gutter, off, height, total, app.theme, active);
+    let (gauge_off, gauge_total) = app.scrollbar_gauge(off, total);
+    draw_scrollbar(
+        f,
+        scroll_area.gutter,
+        gauge_off,
+        height,
+        gauge_total,
+        app.theme,
+        active,
+    );
 }
 
 fn draw_scrollbar(

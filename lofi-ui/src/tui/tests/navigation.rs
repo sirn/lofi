@@ -712,6 +712,7 @@ fn page_down_in_input_pins_at_bottom() {
     a.log_view_h = 10;
     a.last_base = 30;
     a.top_line = 0;
+    a.pinned = false;
     let mut run = None;
     handle_event(&plain_key(KeyCode::PageDown), &mut a, None, &mut run);
     assert_eq!(a.top_line, 10);

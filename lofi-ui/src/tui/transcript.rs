@@ -2,6 +2,12 @@
 
 use super::*;
 
+/// Bounds the window measure loop in `measure_visible_turns`. Each pass either
+/// measures a turn (a strictly smaller set of estimates) or stops, so the loop
+/// converges; the bound only protects a frame from a pathological rewrap that
+/// keeps swapping one turn for another.
+const MAX_WINDOW_MEASURE_PASSES: usize = 4;
+
 /// Retains compressed, width-independent display models so scrolling back
 /// into a resumed transcript does not rescan its JSONL file. Successful
 /// native results are reduced to their collapsed previews before insertion;
@@ -314,6 +320,30 @@ impl App {
 
     pub(super) fn bump_render_epoch(&mut self) {
         self.layout.render_epoch = self.layout.render_epoch.wrapping_add(1);
+        // Wholesale content replacement makes both the drawn scrollbar extent
+        // and the viewport's content anchor meaningless: adopt the next
+        // frame's.
+        self.scroll_gauge = None;
+        self.scroll_gauge_stamp = None;
+        self.view_anchor = None;
+        self.nav_anchor = None;
+        self.sel_anchor = None;
+    }
+
+    /// Scrollbar geometry to draw: the offset and extent of the last frame
+    /// whose extent was final. While estimated heights are still converging the
+    /// total moves by an order of magnitude, so a live one makes the thumb
+    /// slide and stretch with no input; the final extent is adopted once the
+    /// last estimate is gone. A frame whose content changed is adopted at once,
+    /// because that extent moved for real: holding it hid a submitted prompt
+    /// from the thumb until the last estimate converged.
+    pub(super) fn scrollbar_gauge(&mut self, off: usize, total: usize) -> (usize, usize) {
+        let stamp = (self.transcript.turns.len(), self.last_turn_height);
+        if self.scroll_gauge_stamp != Some(stamp) || self.layout.height_remeasure_from.is_none() {
+            self.scroll_gauge = Some((off, total));
+            self.scroll_gauge_stamp = Some(stamp);
+        }
+        self.scroll_gauge.unwrap_or((off, total))
     }
 
     pub(super) fn turn_has_expanded_detail(&self, idx: usize) -> bool {
@@ -551,8 +581,12 @@ impl App {
 
     /// Re-measure up to `budget` stale frozen heights at the current
     /// `frozen_width`, advancing `height_remeasure_from`. Runs on the tick
-    /// loop after a width-only resize so no single frame pays the full cost.
-    /// Returns true while work remains (so the caller keeps the frame dirty).
+    /// loop after a width-only resize or an estimate-seeded resume, so no
+    /// single frame pays the full cost.
+    /// Returns true when this step changed a height or work remains: the
+    /// caller must redraw. A final batch that only finishes the sequence
+    /// changes geometry too, and skipping its redraw leaves the frame showing
+    /// a total that no longer matches the heights.
     pub(super) fn remeasure_heights_step(&mut self, budget: usize) -> bool {
         let next_hi = match self.layout.height_remeasure_from {
             Some(hi) => hi.min(self.layout.frozen_heights.len()),
@@ -581,14 +615,60 @@ impl App {
         }
         if idx == 0 {
             self.layout.height_remeasure_from = None;
-            false
         } else {
             self.layout.height_remeasure_from = Some(idx);
-            true
         }
+        measured > 0 || idx > 0
     }
 
-    pub(super) fn sync_frozen_cache_for_viewport(
+    /// Measure the turns the window at `off` shows, plus one either side.
+    /// Their stored heights drive both the rows sliced for display and the
+    /// total every offset is computed from, so they must be exact even while
+    /// the off-screen prefix is still estimated. Measuring shrinks or grows a
+    /// turn, which moves the window, so the selection repeats until it stops
+    /// changing. Returns true when a height changed.
+    pub(super) fn measure_visible_turns(
+        &mut self,
+        off: usize,
+        height: usize,
+        width: usize,
+    ) -> bool {
+        let frozen = self.layout.frozen_heights.len();
+        if frozen == 0 {
+            return false;
+        }
+        let mut any = false;
+        for _ in 0..MAX_WINDOW_MEASURE_PASSES {
+            let (lo, hi) = match self.frozen_range_at(off, height) {
+                Some((first, last)) => (first.saturating_sub(1), last.saturating_add(1)),
+                // The window is past the stored heights: a bottom-anchored view
+                // whose off-screen prefix is over-estimated. Nothing intersects
+                // it, so fill the last screenful from the end — that is what the
+                // user is looking at, and it must be exact however wrong the
+                // prefix is.
+                None => (self.tail_window_start(height), frozen - 1),
+            };
+            let hi = hi.min(frozen - 1);
+            let mut measured = false;
+            for idx in lo..=hi {
+                if self.layout.frozen_heights_estimated[idx] {
+                    self.layout.frozen_heights[idx] = self.measure_turn_height(idx, width);
+                    self.layout.frozen_heights_estimated[idx] = false;
+                    measured = true;
+                }
+            }
+            any |= measured;
+            if !measured {
+                break;
+            }
+        }
+        any
+    }
+
+    /// Retain rendered lines only around the window, and materialize them.
+    /// Never measures: the geometry published for this frame must not change
+    /// once it is published.
+    pub(super) fn cache_frozen_lines_for_viewport(
         &mut self,
         off: usize,
         height: usize,
@@ -599,28 +679,7 @@ impl App {
             self.layout.frozen_render.clear();
             return;
         }
-        // Stored heights drive which rows of a turn are drawn, so window and
-        // margin turns need exact values even while the off-screen prefix is
-        // still estimated. Measure those first, then recompute the window —
-        // one correction pass settles the selection in practice.
-        let mut visible = self.visible_frozen_range(off, height);
-        for _ in 0..2 {
-            let (first, last) = visible;
-            let lo = first.saturating_sub(1);
-            let hi = last.saturating_add(1).min(frozen - 1);
-            let mut measured = false;
-            for idx in lo..=hi {
-                if self.layout.frozen_heights_estimated[idx] {
-                    self.layout.frozen_heights[idx] = self.measure_turn_height(idx, width);
-                    self.layout.frozen_heights_estimated[idx] = false;
-                    measured = true;
-                }
-            }
-            visible = self.visible_frozen_range(off, height);
-            if !measured {
-                break;
-            }
-        }
+        let visible = self.visible_frozen_range(off, height);
         self.layout.frozen_render.retain_near(Some(visible), frozen);
         let (first, last) = visible;
         let first = first.saturating_sub(1);
@@ -630,10 +689,20 @@ impl App {
         }
     }
 
-    /// Turns whose stored height intersects the window
-    /// [off, off + height). Falls back to the last turn when the window is
-    /// past the end.
-    fn visible_frozen_range(&self, off: usize, height: usize) -> (usize, usize) {
+    #[cfg(test)]
+    pub(super) fn sync_frozen_cache_for_viewport(
+        &mut self,
+        off: usize,
+        height: usize,
+        width: usize,
+    ) {
+        self.measure_visible_turns(off, height, width);
+        self.cache_frozen_lines_for_viewport(off, height, width);
+    }
+
+    /// Turns whose stored height intersects the window [off, off + height).
+    /// None when the window is past the end of the stored heights.
+    fn frozen_range_at(&self, off: usize, height: usize) -> Option<(usize, usize)> {
         let frozen = self.layout.frozen_heights.len();
         let end = off.saturating_add(height);
         let mut pos = 0usize;
@@ -645,7 +714,30 @@ impl App {
             }
             pos = turn_end.saturating_add(1);
         }
-        visible.unwrap_or((frozen - 1, frozen - 1))
+        visible
+    }
+
+    /// Turns whose stored height intersects the window
+    /// [off, off + height). Falls back to the last turn when the window is
+    /// past the end.
+    fn visible_frozen_range(&self, off: usize, height: usize) -> (usize, usize) {
+        let frozen = self.layout.frozen_heights.len();
+        self.frozen_range_at(off, height)
+            .unwrap_or((frozen - 1, frozen - 1))
+    }
+
+    /// First frozen turn that covers the last `height` rows of the stored
+    /// heights, at most one either side.
+    fn tail_window_start(&self, height: usize) -> usize {
+        let mut rows = 0usize;
+        let mut idx = self.layout.frozen_heights.len();
+        while idx > 0 && rows < height {
+            idx -= 1;
+            rows = rows
+                .saturating_add(self.layout.frozen_heights[idx])
+                .saturating_add(1);
+        }
+        idx.saturating_sub(1)
     }
 }
 
