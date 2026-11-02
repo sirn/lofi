@@ -152,17 +152,17 @@ impl App {
             return true;
         }
 
-        // Row list of the active tab. Letters belong to the tab bar, so a
-        // row moves only on the arrow keys.
+        // Row list of the active tab. The tab bar took every key it owns, so
+        // a row moves the vim way or under the arrows.
         let jobs = self.jobs_rows();
         let len = modal.len(&jobs);
         match k.code {
             KeyCode::Esc | KeyCode::Char('q') => return true,
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 let row = modal.selected();
                 modal.select(row.saturating_sub(1));
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 if len > 0 {
                     let row = modal.selected().saturating_add(1).min(len - 1);
                     modal.select(row);

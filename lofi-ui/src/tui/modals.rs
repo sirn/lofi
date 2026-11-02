@@ -248,14 +248,16 @@ pub(crate) struct SubagentsModalState {
 pub(crate) struct SubagentRow {
     pub(crate) id: String,
     pub(crate) running: bool,
+    /// The run's one-line label: its task while live, its last answer once a
+    /// store row stands in for it.
     pub(crate) preview: String,
     /// Transcript file name (`<millis>_<rand>.jsonl`), when one exists.
     pub(crate) file: Option<String>,
-    /// The run's resolved model; only the registry knows it, so a row read
-    /// from the store alone leaves it empty.
+    /// The run's model: the registry knows the one it started, and a row read
+    /// from the store takes it from the transcript header.
     pub(crate) model: Option<String>,
-    /// The run's spend; a settled transcript row leaves it empty because
-    /// reading every file to find the terminal cost is not worth a frame.
+    /// The run's spend: live from the registry, terminal from the settle
+    /// marker a row read from the store keeps.
     pub(crate) cost: Option<f64>,
     /// Elapsed time of a live run, 0 for a settled one.
     pub(crate) elapsed_ms: u64,
@@ -296,6 +298,11 @@ impl SubagentRow {
         self.model.clone_from(&run.model);
         self.cost = run.cost;
         self.elapsed_ms = run.elapsed_ms;
+        // The task names what a run in flight is doing; a store preview is the
+        // answer so far, which says nothing about work still going on.
+        if run.running && !run.task.is_empty() {
+            self.preview.clone_from(&run.task);
+        }
     }
 }
 
@@ -357,12 +364,13 @@ impl BackgroundTab {
         }
     }
 
-    /// Tab keys jump by number or by first letter, so labels stay unique.
+    /// A digit jumps to its tab, so a digit never reaches the row list. `h`
+    /// and `l` step the tabs; the list keeps `j` and `k`.
     pub(crate) fn from_key(key: char) -> Option<Self> {
         match key {
-            '1' | 's' => Some(Self::Subagents),
-            '2' | 'j' => Some(Self::Jobs),
-            '3' | 't' => Some(Self::Timers),
+            '1' => Some(Self::Subagents),
+            '2' => Some(Self::Jobs),
+            '3' => Some(Self::Timers),
             _ => None,
         }
     }

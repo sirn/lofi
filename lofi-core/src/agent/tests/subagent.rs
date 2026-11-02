@@ -1840,6 +1840,59 @@ async fn running_reports_in_flight_runs_with_a_bounded_task_preview() {
     // The first line only, cut to 80 chars plus an ellipsis.
     assert_eq!(running[0].task.chars().count(), 81);
     assert!(running[0].task.ends_with('\u{2026}'));
+    // Nothing has run or streamed yet, so the row names only the handle.
+    assert!(running[0].activity.is_empty());
+
+    hook(SubagentOp::Kill, json!({ "id": id })).await;
+}
+
+struct SpeakThenPendProvider;
+
+#[async_trait]
+impl Provider for SpeakThenPendProvider {
+    async fn stream(
+        &self,
+        _model: &Model,
+        _messages: &[Message],
+        _tools: &[ToolSchema],
+    ) -> Result<futures::stream::BoxStream<'static, Result<StreamingEvent>>> {
+        let said = vec![Ok(StreamingEvent::TextDelta(
+            "planning the change\nchecking the parser".to_string(),
+        ))];
+        Ok(Box::pin(stream::iter(said).chain(stream::pending())))
+    }
+}
+
+#[tokio::test]
+async fn running_names_the_start_of_the_response_not_its_tail() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let mut agent = agent_with(vec![], dir.path()).with_subagent_support(support(dir.path()));
+    // The hook clones the agent as its template, so the speaking provider
+    // must be in place first.
+    agent.provider = Arc::new(SpeakThenPendProvider);
+    let hook = agent.subagent_hook().unwrap();
+    let registry = agent.subagents();
+
+    let out = hook(SubagentOp::Spawn, json!({ "prompt": "survey the parser" })).await;
+    assert_eq!(out["ok"], json!(true), "{out}");
+    let id = out["id"].as_str().unwrap().to_string();
+
+    // The row holds the first line of the answer, not the line the child has
+    // reached: a row that followed the tail would scroll as the child writes.
+    let mut activity = String::new();
+    for _ in 0..200 {
+        activity = registry
+            .running()
+            .first()
+            .map_or_else(String::new, |run| run.activity.clone());
+        if activity == "planning the change" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(activity, "planning the change");
 
     hook(SubagentOp::Kill, json!({ "id": id })).await;
 }

@@ -691,7 +691,7 @@ fn queued_notice_renders_with_quarter_block_and_italic_body() {
 }
 
 #[test]
-fn the_notice_row_sits_above_the_counter_inside_the_footer() {
+fn toast_renders_with_rounded_border_on_bottom_right_above_input() {
     use ratatui::Terminal;
     let mut a = app();
     a.notify(NotifyKind::Warn, "something happened".to_string());
@@ -699,15 +699,13 @@ fn the_notice_row_sits_above_the_counter_inside_the_footer() {
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
     let buf = term.backend().buffer();
     let row = |y: u16| -> String { (0..60).map(|x| buf[(x, y)].symbol()).collect() };
-    // The footer panel runs to the last row; the notice owns the row above
-    // the counter, and the counter keeps the row below it.
-    let notice_y = 12 - 2;
+    assert!(row(5).trim_end().ends_with('╮'), "top border: {}", row(5));
+    assert!(row(6).contains("something happened"), "body: {}", row(6));
     assert!(
-        row(notice_y).contains("something happened"),
-        "notice row: {}",
-        row(notice_y)
+        row(7).trim_end().ends_with('╯'),
+        "bottom border: {}",
+        row(7)
     );
-    assert!(row(11).contains('▌'), "counter row: {}", row(11));
 }
 
 #[test]

@@ -4,6 +4,7 @@ use std::time::Duration;
 use ratatui::style::Style;
 use ratatui::text::Span;
 
+use crate::tui::text::fmt_cost;
 use crate::tui::theme::active_indicator;
 use crate::tui::{DetailKey, ToolCall, SPINNER};
 
@@ -44,85 +45,143 @@ impl Component for WorkingLine {
             content.push(Span::styled(text, style));
         }
         vec![prim::render(
-            vec![
-                Span::raw("  "),
-                Span::styled(format!("{frame} "), Style::new().fg(active_indicator(t))),
-            ],
+            vec![Span::styled(
+                format!("{frame} "),
+                Style::new().fg(active_indicator(t)),
+            )],
             content,
             vec![],
         )]
     }
 }
 
-pub(super) struct RunningJobLine<'a> {
-    pub(super) job: &'a lofi_core::JobInfo,
-}
-
-impl Component for RunningJobLine<'_> {
-    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
-        let t = cx.theme;
-        let dur = prim::fmt_duration(Duration::from_millis(self.job.duration_ms));
-        let cmd = self.job.cmd.trim();
-        let text = format!(
-            "job {} running ({dur}): {cmd}",
-            lofi_types::short_id(self.job.id)
-        );
-        let mark = Style::new().fg(t.info);
-        let body_style = t.muted_style();
-        render_markdown_body(
-            &text,
-            t,
-            cx.width,
-            cx.width.saturating_sub(2),
-            body_style,
-            move |_| vec![Span::styled("┆ ", mark)],
-        )
+/// One row per running item in the block above the input: `job 3: cargo
+/// test` with its elapsed time on the right edge. A row never wraps.
+pub(super) fn running_rows(
+    cx: &Cx,
+    jobs: &[lofi_core::JobInfo],
+    subagents: &[lofi_core::SubagentRunning],
+    timers: &[lofi_core::TimerInfo],
+) -> Vec<RenderLine> {
+    let mut rows: Vec<(String, Vec<String>)> = Vec::new();
+    for job in jobs {
+        rows.push((
+            format!(
+                "job {}: {}",
+                lofi_types::short_id(job.id),
+                prim::one_line(&job.cmd)
+            ),
+            vec![prim::fmt_duration_short(Duration::from_millis(
+                job.duration_ms,
+            ))],
+        ));
     }
-}
-
-pub(super) struct RunningSubagentLine<'a> {
-    pub(super) run: &'a lofi_core::SubagentRunning,
-}
-
-impl Component for RunningSubagentLine<'_> {
-    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
-        let t = cx.theme;
-        let dur = prim::fmt_duration(Duration::from_millis(self.run.elapsed_ms));
-        let mut head = format!("subagent {} running ({dur})", self.run.id);
-        if let Some(model) = &self.run.model {
-            head.push_str(" - ");
-            head.push_str(model);
+    for run in subagents {
+        // The message goes first when the row runs out of room, so the model,
+        // the spend, and the clock survive it.
+        let mut columns = Vec::new();
+        if let Some(model) = &run.model {
+            columns.push(model.clone());
         }
-        // The settled block reports the same four decimals, so a run's cost
-        // does not change shape when it finishes.
-        if let Some(cost) = self.run.cost {
-            head = format!("{head} - ${cost:.4}");
+        if let Some(cost) = run.cost {
+            columns.push(fmt_cost(cost));
         }
-        // Status lines stay one row each: a long model label clips rather
-        // than wrap.
-        let width = cx.width.saturating_sub(2);
-        if prim::width(&head) > width {
-            head = crate::tui::text::clip_marked(&head, width);
-        }
-        // The model and the cost outrank the task preview: the row clips
-        // the preview rather than wrap the run's identity off the screen.
-        let task = self.run.task.trim();
-        let room = width.saturating_sub(prim::width(&head) + 2);
-        let text = if task.is_empty() || room < 12 {
-            head
+        columns.push(prim::fmt_duration_short(Duration::from_millis(
+            run.elapsed_ms,
+        )));
+        // A run that has not started talking yet shows its handle alone
+        // rather than a dangling colon.
+        let label = if run.activity.is_empty() {
+            format!("subagent {}", run.id)
         } else {
-            format!("{head}: {}", crate::tui::text::clip_marked(task, room))
+            format!("subagent {}: {}", run.id, run.activity)
         };
-        let mark = Style::new().fg(t.info);
-        let body_style = t.muted_style();
-        render_markdown_body(
-            &text,
-            t,
-            cx.width,
-            cx.width.saturating_sub(2),
-            body_style,
-            move |_| vec![Span::styled("┆ ", mark)],
-        )
+        rows.push((label, columns));
+    }
+    for timer in timers {
+        rows.push((timer_label(timer), vec![timer_remaining(timer)]));
+    }
+    rows.iter()
+        .map(|(label, columns)| work_row(cx, label, columns))
+        .collect()
+}
+
+/// A running item's row at `cx.width`: the label on the left, the columns it
+/// still affords on the right edge, and at least one blank cell between them.
+fn work_row(cx: &Cx, label: &str, columns: &[String]) -> RenderLine {
+    let t = cx.theme;
+    // The marker sits in the block's left column, in line with the queued
+    // prompts' bars and the working spinner.
+    let body_w = cx.width.saturating_sub(2);
+    let (label, columns) = fit(label, columns, body_w);
+    let right = columns.join(" ");
+    let gap = body_w
+        .saturating_sub(prim::width(&label) + prim::width(&right))
+        .max(usize::from(!right.is_empty()));
+    let mut content = vec![Span::styled(label, t.muted_style())];
+    if !right.is_empty() {
+        content.push(Span::raw(" ".repeat(gap)));
+        content.push(Span::styled(right, t.subtle_style()));
+    }
+    prim::rline(vec![Span::styled("┆ ", Style::new().fg(t.info))], content)
+}
+
+/// The label as much as `body_w` affords, and the columns worth keeping. A
+/// column drops only when the label could not say anything with it there:
+/// the message first, then the model, then the spend. The clock is the
+/// column a narrow row keeps longest.
+fn fit(label: &str, columns: &[String], body_w: usize) -> (String, Vec<String>) {
+    // Room the label needs before a column costs it more than it is worth.
+    const MIN_LABEL: usize = 12;
+    // The clock alone is still worth a stub of a label.
+    const MIN_STUB: usize = 6;
+    for drop in 0..columns.len() {
+        let kept = &columns[drop..];
+        let right_w: usize = kept.iter().map(|c| prim::width(c)).sum::<usize>() + kept.len() - 1;
+        let room = body_w.saturating_sub(right_w + 1);
+        let need = if drop + 1 == columns.len() {
+            MIN_STUB
+        } else {
+            MIN_LABEL
+        };
+        if room >= need {
+            return (clip(label, room), kept.to_vec());
+        }
+    }
+    (clip(label, body_w), Vec::new())
+}
+
+/// Cut `text` to `room` cells, marking the cut with an ellipsis.
+fn clip(text: &str, room: usize) -> String {
+    if prim::width(text) <= room {
+        return text.to_string();
+    }
+    if room == 0 {
+        return String::new();
+    }
+    let mut out = prim::truncate(text, room - 1);
+    out.push('\u{2026}');
+    out
+}
+
+/// What a pending timer waits for: its schedule, in the words the agent used.
+fn timer_label(timer: &lofi_core::TimerInfo) -> String {
+    let id = lofi_types::short_id(timer.id);
+    if let Some(every) = timer.every {
+        return format!(
+            "timer {id}: notify every {}",
+            prim::fmt_duration_short(every)
+        );
+    }
+    let due = chrono::DateTime::<chrono::Local>::from(timer.due);
+    format!("timer {id}: notify at {}", due.format("%Y-%m-%d %H:%M"))
+}
+
+/// How long until a timer fires, or `due` once the poll is late.
+fn timer_remaining(timer: &lofi_core::TimerInfo) -> String {
+    match timer.due.duration_since(std::time::SystemTime::now()) {
+        Ok(left) if left.as_secs() > 0 => format!("{} remaining", prim::fmt_duration_short(left)),
+        _ => "due".to_string(),
     }
 }
 

@@ -9,11 +9,11 @@
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Padding, Paragraph};
 use ratatui::Frame;
 
 use crate::tui::SLASH_COMMANDS;
-use crate::tui::{App, Mode};
+use crate::tui::{App, Mode, NOTIFY_CHROME};
 
 pub(crate) mod blocks;
 pub(crate) mod component;
@@ -85,6 +85,9 @@ impl VStack {
     }
 }
 
+/// Transcript rows a short terminal keeps before the live block yields.
+const MIN_LOG_H: usize = 2;
+
 pub(crate) fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let input_lines = app.input_lines(area.width as usize).max(1);
@@ -92,10 +95,24 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     app.sync_input_scroll(area.width.saturating_sub(3) as usize, input_lines);
 
     let footer_h = input_h.saturating_add(3);
+    // The live block above the input: the turn status, the prompts queued
+    // behind the turn, and the running work. It is measured before the split
+    // so the transcript gives up exactly the rows it needs, and capped so a
+    // short terminal keeps the prompt and its last transcript rows.
+    let fixed = 2 // header and its spacer
+        + 2 // the spacers around the block
+        + usize::from(footer_h)
+        + usize::from(app.debug.is_some())
+        + MIN_LOG_H;
+    let mut block = work_block(app, area.width as usize);
+    block.truncate(usize::from(area.height).saturating_sub(fixed));
+    let block_h = u16::try_from(block.len()).unwrap_or(u16::MAX);
     let mut vs = VStack::new();
     vs.fixed(1); // header
     vs.spacer(1);
     vs.fill(); // log viewport
+    vs.spacer(u16::from(block_h > 0));
+    vs.fixed(block_h);
     vs.spacer(1);
     vs.fixed(footer_h); // panel
     vs.fixed(u16::from(app.debug.is_some())); // full-width debug bar, no spacer
@@ -108,9 +125,13 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
         render_log(f, r, app);
     }
     if let Some(r) = rects[4] {
-        render_footer_block(f, r, app);
+        paint_work_block(f, r, &block);
     }
-    if let Some(r) = rects[5] {
+    if let Some(r) = rects[6] {
+        render_footer_block(f, r, app);
+        render_toast(f, area, r.y, app);
+    }
+    if let Some(r) = rects[7] {
         render_debug_bar(f, r, app);
     }
     if app.slash_complete.is_some() {
@@ -149,6 +170,30 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     if !app.pending_confirms.is_empty() {
         render_confirm_modal(f, area, app);
     }
+}
+
+/// The live rows above the input: the turn status, the prompts queued behind
+/// the turn, and the running work. Measured before the frame splits so the
+/// transcript yields exactly the rows it holds.
+fn work_block(app: &App, width: usize) -> Vec<Line<'static>> {
+    let cx = component::Cx {
+        app,
+        theme: app.theme,
+        width: width.saturating_sub(1),
+        active_turn: app.run_active(),
+    };
+    let jobs = app.running_jobs();
+    let subagents = app.running_subagents();
+    let timers = app.timers_snapshot();
+    blocks::render_work_block(&cx, &jobs, &subagents, &timers)
+        .into_iter()
+        .map(|rl| rl.line)
+        .collect()
+}
+
+fn paint_work_block(f: &mut Frame, area: Rect, block: &[Line<'static>]) {
+    let content = prim::scroll_area(area).content;
+    f.render_widget(Paragraph::new(block.to_vec()), content);
 }
 
 fn render_header(f: &mut Frame, area: Rect, app: &App) {
@@ -262,23 +307,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     };
     app.render_profile.live_height_us = phase_started.elapsed().as_micros();
 
-    let tail_lines = {
-        let jobs = app.running_jobs();
-        let subagents = app.running_subagents();
-        let cx = component::Cx {
-            app,
-            theme,
-            width: w,
-            active_turn: running,
-        };
-        blocks::render_transcript_tail(&cx, n_turns > 1 || last_h > 0, &jobs, &subagents)
-    };
-    let tail_h = tail_lines.len();
-    let turn_gaps = if n_turns == 0 {
-        usize::from(tail_h == 0)
-    } else {
-        n_turns - 1
-    };
+    let turn_gaps = if n_turns == 0 { 1 } else { n_turns - 1 };
 
     // Firm up estimated heights around the viewport before the total/base/off
     // math below: a bottom-pinned view computed from estimates would slice
@@ -287,7 +316,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     // rollback onto an estimate-seeded restore). The dedicated pass at the
     // end of the frame stays: it converges what this provisional prediction
     // missed.
-    let est_total = app.layout.frozen_heights.iter().sum::<usize>() + last_h + turn_gaps + tail_h;
+    let est_total = app.layout.frozen_heights.iter().sum::<usize>() + last_h + turn_gaps;
     let est_base = est_total.saturating_sub(height);
     let est_off = if app.pinned {
         est_base
@@ -298,7 +327,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
 
     let frozen_total: usize = app.layout.frozen_heights.iter().sum();
     app.last_turn_height = last_h;
-    let total: usize = frozen_total + last_h + turn_gaps + tail_h;
+    let total: usize = frozen_total + last_h + turn_gaps;
 
     let base = total.saturating_sub(height);
     app.log_rect = content;
@@ -390,29 +419,16 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     let mut pos = 0usize;
     let mut want = height;
     if n_turns == 0 {
-        if tail_lines.is_empty() {
-            feed_segment(
-                std::slice::from_ref(&blank),
-                &mut pos,
-                off,
-                &mut want,
-                &mut vis,
-                &mut visv,
-                &mut details,
-                &mut links,
-            );
-        } else {
-            feed_segment(
-                &tail_lines,
-                &mut pos,
-                off,
-                &mut want,
-                &mut vis,
-                &mut visv,
-                &mut details,
-                &mut links,
-            );
-        }
+        feed_segment(
+            std::slice::from_ref(&blank),
+            &mut pos,
+            off,
+            &mut want,
+            &mut vis,
+            &mut visv,
+            &mut details,
+            &mut links,
+        );
     } else {
         for i in 0..n_turns {
             if i > 0 {
@@ -507,18 +523,6 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
             if want == 0 {
                 break;
             }
-        }
-        if want > 0 && !tail_lines.is_empty() {
-            feed_segment(
-                &tail_lines,
-                &mut pos,
-                off,
-                &mut want,
-                &mut vis,
-                &mut visv,
-                &mut details,
-                &mut links,
-            );
         }
     }
     app.log_vis = visv;
@@ -773,45 +777,48 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
         w.saturating_sub(2),
         panel.height,
     );
-    let (prompt_h, notice_h) = footer_rows(inner.height);
+    let prompt_h = inner.height.saturating_sub(3);
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(prompt_h),
-        Constraint::Length(notice_h),
+        Constraint::Length(1),
         Constraint::Length(1),
     ])
     .split(inner);
     app.input_rect = prim::scroll_area(chunks[1]).content;
     render_input(f, chunks[1], app);
-    if notice_h == 1 {
-        render_notice(f, chunks[2], app);
-    }
     render_info(f, chunks[3], app);
 }
 
-/// Rows the footer block spends below its top gap: the prompt, and the
-/// notice row above the counter. The notice is the first row to go when the
-/// terminal is too short, because the counter row under it is the only view
-/// of running work the user cannot scroll back to.
-pub(crate) fn footer_rows(height: u16) -> (u16, u16) {
-    let notice_h = u16::from(height >= 4);
-    (height.saturating_sub(2 + notice_h), notice_h)
-}
-
-/// The transient notice row above the footer's counter. One row, aged out
-/// by the notice's own TTL, so it never covers the transcript the way the
-/// floating toast it replaced did.
-fn render_notice(f: &mut Frame, area: Rect, app: &App) {
-    let width = area.width as usize;
-    // A marker column keeps the notice aligned with the prompt gutter.
-    let Some((text, color)) = app.notice_line(width.saturating_sub(2)) else {
+fn render_toast(f: &mut Frame, area: Rect, footer_y: u16, app: &App) {
+    let max_toast_w = (area.width as usize).min(64);
+    let Some((lines, color)) = app.toast_lines(max_toast_w) else {
         return;
     };
-    let line = Line::from(vec![
-        Span::styled("! ", Style::new().fg(color)),
-        Span::styled(text, Style::new().fg(color)),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
+    let content_w = lines.iter().map(|l| prim::width(l)).max().unwrap_or(0);
+    let toast_w = u16::try_from(content_w.saturating_add(NOTIFY_CHROME))
+        .unwrap_or(area.width)
+        .min(area.width);
+    let toast_h = u16::try_from(lines.len().saturating_add(2)).unwrap_or(3);
+    if footer_y < toast_h || toast_w < 4 {
+        return;
+    }
+    let x = area.right().saturating_sub(toast_w);
+    let y = footer_y.saturating_sub(toast_h);
+    let rect = Rect::new(x, y, toast_w, toast_h);
+    f.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(color))
+        .padding(Padding::horizontal(1))
+        .style(app.theme.text_style());
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let text_lines: Vec<Line<'static>> = lines
+        .into_iter()
+        .map(|line| Line::from(Span::styled(line, app.theme.text_style())))
+        .collect();
+    f.render_widget(Paragraph::new(text_lines), inner);
 }
 
 fn render_debug_bar(f: &mut Frame, area: Rect, app: &App) {

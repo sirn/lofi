@@ -379,26 +379,19 @@ fn compact_keeps_file_backed_turn_content_visible() {
 }
 
 #[test]
-fn the_notice_row_is_empty_without_a_notification() {
+fn notify_lines_is_zero_without_notification() {
     let a = app();
-    assert!(a.notice_line(80).is_none());
+    assert_eq!(a.notify_lines(80), 0);
 }
 
 #[test]
-fn the_notice_row_stays_one_row_and_clips_a_long_message() {
+fn notify_lines_grows_with_a_long_message_and_caps_at_max() {
     let mut a = app();
     a.notify(
         NotifyKind::Error,
         "quite a long error message that absolutely refuses to fit on a single line of a reasonably wide terminal".to_string(),
     );
-    let (text, _) = a.notice_line(40).expect("notice row");
-    assert!(text.ends_with('…'), "the row must clip, got {text}");
-    assert!(
-        unicode_width::UnicodeWidthStr::width(text.as_str()) <= 40,
-        "{text}"
-    );
-    // A message with line breaks still takes one row.
-    a.notify(NotifyKind::Warn, "first\nsecond".to_string());
-    let (text, _) = a.notice_line(80).expect("notice row");
-    assert_eq!(text, "first second");
+    let lines_60 = a.notify_lines(60);
+    assert!(lines_60 >= 2, "expected wrapping, got {lines_60}");
+    assert_eq!(a.notify_lines(24), NOTIFY_MAX_LINES as u16);
 }

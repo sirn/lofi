@@ -21,8 +21,8 @@ pub(crate) use native::compact_native_previews;
 use exec::ExecBlock;
 use message::{AssistantText, NoticeMessage, Thinking, UserMessage};
 use status::{
-    CompactionLine, ErrorLine, QueuedPromptLine, RunningJobLine, RunningSubagentLine, ToolLine,
-    TurnCancelled, TurnEnd, TurnFailed, UserShellLine, WorkingLine,
+    running_rows, CompactionLine, ErrorLine, QueuedPromptLine, ToolLine, TurnCancelled, TurnEnd,
+    TurnFailed, UserShellLine, WorkingLine,
 };
 
 pub(super) struct RenderWindow {
@@ -84,43 +84,48 @@ pub fn render_turns(app: &App, width: u16) -> Text<'static> {
         }
         out.extend(render_turn_lines(&cx, turn).into_iter().map(|rl| rl.line));
     }
-    let tail_cx = Cx {
+    let block_cx = Cx {
         app,
         theme,
         width: w,
         active_turn: running,
     };
-    let has_prior = !out.is_empty();
+    // The frame puts one blank row above the block; the oracle repeats it so
+    // the reference render matches what the terminal shows.
+    if !out.is_empty() {
+        out.push(prim::blank());
+    }
     let jobs = app.running_jobs();
     let subagents = app.running_subagents();
+    let timers = app.timers_snapshot();
     out.extend(
-        render_transcript_tail(&tail_cx, has_prior, &jobs, &subagents)
+        render_work_block(&block_cx, &jobs, &subagents, &timers)
             .into_iter()
             .map(|rl| rl.line),
     );
     Text::from(out)
 }
 
-pub fn render_transcript_tail(
+/// The block above the input, in three sections: the turn status while a
+/// turn runs, the prompts queued behind it, and one row per running item. One
+/// blank row separates the sections; running rows pack, while a queued prompt
+/// keeps a blank row of its own so the queue still reads as a list.
+pub fn render_work_block(
     cx: &Cx,
-    has_prior: bool,
     jobs: &[lofi_core::JobInfo],
     subagents: &[lofi_core::SubagentRunning],
+    timers: &[lofi_core::TimerInfo],
 ) -> Vec<RenderLine> {
     let mut out = Vec::new();
-    let mut any = has_prior;
     if cx.active_turn {
-        if any {
-            out.push(prim::rblank());
-        }
         out.extend(WorkingLine.lines(cx));
-        any = true;
     }
-    // Queued prompts render above running jobs: a queued prompt moves up
-    // into the transcript when consumed, while a completed job's notice
-    // rises out of the running block below.
+    // A queued prompt moves up into the transcript when the agent takes it,
+    // while a job's notice rises out of the running rows below it. Every
+    // entry keeps a blank row of its own: a notice can span lines, and two
+    // notices with no gap read as one block.
     for queued in &cx.app.prompt_queue {
-        if any {
+        if !out.is_empty() {
             out.push(prim::rblank());
         }
         out.extend(
@@ -130,21 +135,13 @@ pub fn render_transcript_tail(
             }
             .lines(cx),
         );
-        any = true;
     }
-    for run in subagents {
-        if any {
+    let rows = running_rows(cx, jobs, subagents, timers);
+    if !rows.is_empty() {
+        if !out.is_empty() {
             out.push(prim::rblank());
         }
-        out.extend(RunningSubagentLine { run }.lines(cx));
-        any = true;
-    }
-    for job in jobs {
-        if any {
-            out.push(prim::rblank());
-        }
-        out.extend(RunningJobLine { job }.lines(cx));
-        any = true;
+        out.extend(rows);
     }
     out
 }

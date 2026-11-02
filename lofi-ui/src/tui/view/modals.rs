@@ -1143,7 +1143,7 @@ fn render_background_list(f: &mut Frame, area: Rect, app: &App, modal: &mut Back
             kill_label(modal, &jobs)
         )
     } else {
-        " tab or letters switch  up/down select  enter open  x stop  X stop all  r reload  esc close "
+        " tab or h/l switch  j/k select  enter open  x stop  X stop all  r reload  esc close "
             .to_string()
     };
     let content_w = rows
@@ -1265,28 +1265,39 @@ fn kill_label(modal: &BackgroundModalState, jobs: &[JobRow]) -> String {
     }
 }
 
+/// A subagent row states how the run stands, then what the registry knows
+/// about it -- model, spend, elapsed time -- and finally what it is doing.
+/// Every column keeps its width and a field the row lacks shows a dash, so
+/// the labels start on one column, as the commands of a job row do.
 fn subagent_row(row: &SubagentRow) -> String {
     let state = if row.running { "running" } else { "done" };
-    // Model, cost, and elapsed come from the live registry only; a settled
-    // row read from the store leaves those columns empty.
     let model = row
         .model
         .as_deref()
-        .map(|model| prim::truncate(model, 24))
-        .unwrap_or_default();
+        .map_or_else(|| "-".to_string(), |model| prim::truncate(model, 24));
     let cost = row
         .cost
-        .map(|cost| format!("${cost:.4}"))
-        .unwrap_or_default();
+        .map_or_else(|| "-".to_string(), |cost| format!("${cost:.4}"));
     let elapsed = if row.running {
         prim::fmt_duration(std::time::Duration::from_millis(row.elapsed_ms))
     } else {
-        String::new()
+        "-".to_string()
     };
     format!(
-        "{state:<8} {model:<24} {cost:<8} {elapsed:<8} {}",
-        one_line(&row.preview, 48)
+        "{state:<7} {model:<24} {cost:>7} {elapsed:>6}  {}",
+        run_label(&row.preview)
     )
+}
+
+/// A run's one-line label. A store preview carries the role a session picker
+/// shows -- `agent: …`, `user: …` -- because it lists turns. This list holds
+/// runs, so the role only takes width the label needs.
+fn run_label(preview: &str) -> String {
+    let text = preview
+        .strip_prefix("agent: ")
+        .or_else(|| preview.strip_prefix("user: "))
+        .unwrap_or(preview);
+    one_line(text, 48)
 }
 
 fn job_row(row: &JobRow) -> String {
@@ -1335,11 +1346,9 @@ fn timer_row(timer: &lofi_core::TimerInfo) -> String {
     format!("{due:<10} {kind:<14} {message}")
 }
 
-/// One row's worth of a command or a message: newlines collapse so a
-/// pasted body cannot turn one row into several.
+/// One row's worth of a command or a message, clipped to a column width.
 fn one_line(text: &str, max: usize) -> String {
-    let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    prim::truncate(&joined, max)
+    prim::truncate(&prim::one_line(text), max)
 }
 
 /// Subagent transcript drill-in: the same turn components as the main

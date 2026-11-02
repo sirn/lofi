@@ -162,6 +162,8 @@ struct Entry {
     // background runs; a foreground run already blocks the parent's exec
     // block, so listing it there would duplicate it.
     background: bool,
+    // What the child is doing now, for the live line its status row shows.
+    activity: Activity,
     // Resolved model of the run, so a status line names what runs instead
     // of the session's model. A resume cannot change it.
     model: Option<String>,
@@ -170,11 +172,93 @@ struct Entry {
     totals: Option<Arc<std::sync::Mutex<ChildUsage>>>,
 }
 
+/// What a running child is doing, for the one-line row its parent shows.
+/// The response is named by the start of its first line: the tail still
+/// streams, and a row that followed it would scroll as the child writes.
+#[derive(Debug, Default)]
+enum Activity {
+    /// Nothing to name: the child is thinking, or its answer is the tail of
+    /// the previous round.
+    #[default]
+    Idle,
+    /// The description the child gave the exec block it is running, with
+    /// whitespace collapsed onto one row.
+    Exec(String),
+    /// The first line of the response, kept whole once it is complete.
+    Text { line: String, done: bool },
+}
+
+impl Activity {
+    /// Longest first line kept. The row clips anyway; the bound only keeps a
+    /// single-paragraph answer from filling memory.
+    const LINE_CAP: usize = 160;
+
+    fn note(&mut self, event: &AgentEvent) {
+        match event {
+            AgentEvent::ToolStart { .. } => *self = Self::Idle,
+            AgentEvent::ToolInput { label, .. } => {
+                let label = label.as_deref().unwrap_or_default();
+                *self = Self::Exec(label.split_whitespace().collect::<Vec<_>>().join(" "));
+            }
+            AgentEvent::Text(text) => self.push_text(text),
+            _ => {}
+        }
+    }
+
+    fn push_text(&mut self, text: &str) {
+        if !matches!(self, Self::Text { .. }) {
+            *self = Self::Text {
+                line: String::new(),
+                done: false,
+            };
+        }
+        let Self::Text { line, done } = self else {
+            return;
+        };
+        if *done {
+            return;
+        }
+        for c in text.chars() {
+            if c == '\n' {
+                if !line.is_empty() {
+                    *done = true;
+                    return;
+                }
+                continue;
+            }
+            if c.is_whitespace() {
+                if !line.is_empty() && !line.ends_with(' ') {
+                    line.push(' ');
+                }
+                continue;
+            }
+            line.push(c);
+            if line.chars().count() >= Self::LINE_CAP {
+                *done = true;
+                return;
+            }
+        }
+    }
+
+    /// The row's text: an exec description, or the start of the response.
+    fn line(&self) -> String {
+        match self {
+            Self::Idle => String::new(),
+            Self::Exec(description) if description.is_empty() => "Exec".to_string(),
+            Self::Exec(description) => format!("Exec: {description}"),
+            Self::Text { line, .. } => line.trim_end().to_string(),
+        }
+    }
+}
+
 /// One running subagent, surfaced on the parent's status line.
 pub struct SubagentRunning {
     pub id: String,
     pub elapsed_ms: u64,
     pub task: String,
+    /// What the run is doing now: the description of its exec block, or the
+    /// start of the response it streams. Empty while it thinks.
+    pub activity: String,
     /// The run's resolved model; `None` before the entry is claimed.
     pub model: Option<String>,
     /// The run's spend so far; `None` until the provider reports usage.
@@ -192,6 +276,9 @@ pub struct SubagentLive {
     pub elapsed_ms: u64,
     /// The run's spend; after settle it is the terminal cost.
     pub cost: Option<f64>,
+    /// The one-line task the run was given. Empty once a resume restores the
+    /// entry: the prompt lives in the child transcript, not in this process.
+    pub task: String,
 }
 
 /// One-line task summary for status surfaces: the first line, bounded so a
@@ -629,6 +716,7 @@ impl SubagentRegistry {
                         0
                     },
                     cost: e.spend(),
+                    task: e.task.clone(),
                 }
             })
             .collect()
@@ -692,21 +780,25 @@ impl SubagentRegistry {
                     e.started,
                     id.clone(),
                     e.task.clone(),
+                    e.activity.line(),
                     e.spend(),
                     e.model.clone(),
                 )
             })
             .collect();
-        running.sort_by_key(|(started, _, _, _, _)| *started);
+        running.sort_by_key(|(started, ..)| *started);
         running
             .into_iter()
-            .map(|(started, id, task, cost, model)| SubagentRunning {
-                id,
-                elapsed_ms: started.elapsed().as_millis() as u64,
-                task,
-                model,
-                cost,
-            })
+            .map(
+                |(started, id, task, activity, cost, model)| SubagentRunning {
+                    id,
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                    task,
+                    activity,
+                    model,
+                    cost,
+                },
+            )
             .collect()
     }
 
@@ -1841,6 +1933,14 @@ fn record_settled(
     true
 }
 
+/// Terminal spend of a settled run, read from its own transcript. A dialog
+/// row restored from the store shows the columns a live one has, and the
+/// process that held the cost is gone by then.
+pub(crate) fn settled_cost(path: &Path) -> Option<f64> {
+    let run = read_settled_marker(path)?;
+    run.usage?.get("cost")?.as_f64()
+}
+
 /// A subagent run's terminal record as persisted by the `RunSettled` marker.
 struct SettledRun {
     status: Status,
@@ -1925,6 +2025,9 @@ fn spawn_event_drain(
                 if token_budget.is_some_and(|budget| spent > budget) {
                     cancel.store(true, Ordering::SeqCst);
                 }
+            }
+            if let Some(entry) = lock(&registry.entries).get_mut(&id) {
+                entry.activity.note(event);
             }
             let public = match event {
                 AgentEvent::Text(text) => Some(("text", json!({ "text": cap_event_text(text) }))),
@@ -2474,6 +2577,7 @@ async fn prepare(
                 notify_terminal: notify,
                 note: None,
                 started: std::time::Instant::now(),
+                activity: Activity::default(),
                 task: task_preview(str_arg(args, "prompt")?.unwrap_or("")),
                 // The notify argument marks the spawn path: only
                 // `subagentSpawn` starts a run with notices on.
@@ -2667,6 +2771,7 @@ fn restore_entry(
         notify_task: None,
         note,
         started: std::time::Instant::now(),
+        activity: Activity::default(),
         task: String::new(),
         // A rehydrated entry is settled; a resume re-claims it as
         // foreground and flips this flag itself.
@@ -2757,6 +2862,8 @@ fn prepare_resume(
         entry.status = Status::Running;
         entry.used = registry.stamp();
         entry.started = std::time::Instant::now();
+        // The previous run's last words are not this run's live line.
+        entry.activity = Activity::default();
         entry.task = task;
         // The previous run's spend belongs to it; this run installs its own
         // accumulator when it starts.
@@ -3004,5 +3111,86 @@ mod mailbox_capability {
 
         let received = mailbox.receive(PARENT_ADDRESS, &json!({})).await;
         assert_eq!(received["messages"][0]["body"], "hi", "{received}");
+    }
+}
+
+#[cfg(test)]
+mod activity_line {
+    use super::*;
+
+    fn exec(description: Option<&str>) -> AgentEvent {
+        AgentEvent::ToolInput {
+            id: "t1".to_string(),
+            code: "lofi.bash({ cmd: \"cargo test\" })".to_string(),
+            label: description.map(str::to_string),
+        }
+    }
+
+    fn tool_start() -> AgentEvent {
+        AgentEvent::ToolStart {
+            id: "t1".to_string(),
+            name: "exec".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_fresh_run_names_nothing() {
+        assert_eq!(Activity::default().line(), "");
+    }
+
+    #[test]
+    fn an_exec_shows_its_description() {
+        let mut activity = Activity::default();
+        activity.note(&exec(Some("Map the parser")));
+        assert_eq!(activity.line(), "Exec: Map the parser");
+    }
+
+    #[test]
+    fn the_description_collapses_onto_one_row() {
+        let mut activity = Activity::default();
+        activity.note(&exec(Some("Map  the\n parser")));
+        assert_eq!(activity.line(), "Exec: Map the parser");
+    }
+
+    #[test]
+    fn an_exec_without_a_description_shows_the_verb() {
+        let mut activity = Activity::default();
+        activity.note(&exec(None));
+        assert_eq!(activity.line(), "Exec");
+    }
+
+    #[test]
+    fn a_native_tool_leaves_the_description_alone() {
+        let mut activity = Activity::default();
+        activity.note(&exec(Some("Map the parser")));
+        activity.note(&AgentEvent::NativeToolStart {
+            parent: "t1".to_string(),
+            id: 1,
+            name: "read".to_string(),
+            args: "{\"path\":\"parser.rs\"}".to_string(),
+        });
+        assert_eq!(activity.line(), "Exec: Map the parser");
+    }
+
+    #[test]
+    fn the_response_is_named_by_its_first_line() {
+        let mut activity = Activity::default();
+        activity.note(&AgentEvent::Text(
+            "\n  Surveying the  parser,\n".to_string(),
+        ));
+        activity.note(&AgentEvent::Text("then the lexer".to_string()));
+        assert_eq!(activity.line(), "Surveying the parser,");
+    }
+
+    #[test]
+    fn a_new_round_replaces_the_previous_answer() {
+        let mut activity = Activity::default();
+        activity.note(&AgentEvent::Text("the first answer".to_string()));
+        activity.note(&tool_start());
+        assert_eq!(activity.line(), "");
+        activity.note(&exec(Some("Map the parser")));
+        assert_eq!(activity.line(), "Exec: Map the parser");
+        activity.note(&AgentEvent::Text("the second answer".to_string()));
+        assert_eq!(activity.line(), "the second answer");
     }
 }

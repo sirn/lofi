@@ -30,33 +30,9 @@ impl App {
             .build()
     }
 
-    /// Running work as one always-visible counter: `2 jobs · 1 subagent`,
-    /// shrinking to `2j · 1s` when the footer is narrow. A terminal with
-    /// nothing running gets no segment at all. A timer only waits, so it is
-    /// listed in the dialog and kept out of this count.
-    pub(crate) fn background_counter(&self, labels: bool) -> Option<String> {
-        let jobs = self
-            .jobs
-            .as_ref()
-            .map_or(0, lofi_core::JobRegistry::running_count);
-        let subagents = self.running_subagents().len();
-        counter_text(jobs, subagents, self.background_needs_you(), labels)
-    }
-
-    /// Work waiting on the user: a confirmation to answer, or a job whose
-    /// completion notice has not been handed to the agent yet.
-    pub(crate) fn background_needs_you(&self) -> bool {
-        !self.pending_confirms.is_empty()
-            || self
-                .jobs
-                .as_ref()
-                .is_some_and(|jobs| jobs.active_items().iter().any(|job| !job.running))
-    }
-
     /// Usage side of the footer, compacted in steps when it exceeds the
     /// width budget: first the `context` and `cached` labels, then the
-    /// token-io counts, then everything. The counter outranks the usage
-    /// detail: its counts survive the degradation that drops them.
+    /// token-io counts.
     pub(crate) fn render_footer_left(&self, width: usize) -> Line<'static> {
         let t = self.theme;
         let usage = [
@@ -64,40 +40,11 @@ impl App {
             self.footer_left_segments(false, true),
             self.footer_left_segments(false, false),
         ];
-        // Widest first: the usage detail drops, then the counter's words,
-        // and only then the counter itself.
-        let mut candidates: Vec<(Option<String>, Vec<String>)> = Vec::new();
-        if let Some(counter) = self.background_counter(true) {
-            for usage in &usage {
-                candidates.push((Some(counter.clone()), usage.clone()));
-            }
-        }
-        if let Some(counter) = self.background_counter(false) {
-            candidates.push((Some(counter.clone()), usage[2].clone()));
-            candidates.push((Some(counter), Vec::new()));
-        }
-        for usage in &usage {
-            candidates.push((None, usage.clone()));
-        }
-        candidates.push((None, Vec::new()));
-        let (counter, segments) = candidates
+        let segments = usage
             .into_iter()
-            .find(|(counter, segments)| counter_row_width(counter.as_deref(), segments) <= width)
+            .find(|segments| footer_segments_width(segments) <= width)
             .unwrap_or_default();
-        let mut spans = Vec::new();
-        if let Some(counter) = counter {
-            let style = if self.background_needs_you() {
-                Style::new().fg(t.warn)
-            } else {
-                t.muted_style()
-            };
-            spans.push(Span::styled(counter, style));
-            if !segments.is_empty() {
-                spans.push(Span::styled(" · ", t.muted_style()));
-            }
-        }
-        spans.push(Span::styled(segments.join(" · "), t.muted_style()));
-        Line::from(spans)
+        Line::from(Span::styled(segments.join(" · "), t.muted_style()))
     }
 
     /// `labels` keeps the `context` word and the `N% cached` suffix;
@@ -205,8 +152,7 @@ impl App {
         }
     }
 
-    /// The one notice the footer row shows, highest priority first.
-    pub(crate) fn active_notice(&self) -> Option<(String, Color)> {
+    pub(crate) fn active_toast(&self) -> Option<(String, Color)> {
         let t = self.theme;
         if let Some(badge) = self.quit_badge() {
             Some((badge.to_string(), t.warn))
@@ -226,21 +172,29 @@ impl App {
         }
     }
 
-    /// The newest transient notice as one row, clipped to `width`. The
-    /// notice area never grows the layout, so a long message loses its tail
-    /// rather than pushing the transcript up.
-    pub(crate) fn notice_line(&self, width: usize) -> Option<(String, Color)> {
-        let (msg, color) = self.active_notice()?;
-        if width == 0 {
+    pub(crate) fn toast_lines(&self, w: usize) -> Option<(Vec<String>, Color)> {
+        let (msg, color) = self.active_toast()?;
+        let avail = w.saturating_sub(NOTIFY_CHROME);
+        if avail == 0 {
             return None;
         }
-        let flat = msg.split_whitespace().collect::<Vec<_>>().join(" ");
-        if unicode_width::UnicodeWidthStr::width(flat.as_str()) <= width {
-            return Some((flat, color));
+        let mut lines = super::view::wrap(&msg, avail);
+        let overflow = lines.len() > NOTIFY_MAX_LINES;
+        lines.truncate(NOTIFY_MAX_LINES);
+        if overflow {
+            if let Some(last) = lines.last_mut() {
+                *last = super::view::truncate(last, avail.saturating_sub(1));
+                last.push('…');
+            }
         }
-        let mut clipped = super::view::truncate(&flat, width.saturating_sub(1));
-        clipped.push('…');
-        Some((clipped, color))
+        Some((lines, color))
+    }
+
+    /// Rows the toast body occupies inside its border at the given terminal width.
+    #[cfg(test)]
+    pub(crate) fn notify_lines(&self, w: usize) -> u16 {
+        self.toast_lines(w)
+            .map_or(0, |(lines, _)| lines.len() as u16)
     }
 
     /// Persistent chip while `/policy` set a non-default approval mode.
@@ -279,57 +233,6 @@ impl App {
         }
         Line::from(vec![Span::styled(label, self.theme.muted_style())])
     }
-}
-
-/// The counter body: `2 jobs · 1 subagent`, or `2j · 1s` when `labels` is
-/// false, with ` ●` appended while work waits on the user. Nothing running
-/// renders nothing.
-pub(crate) fn counter_text(
-    jobs: usize,
-    subagents: usize,
-    needs_you: bool,
-    labels: bool,
-) -> Option<String> {
-    let mut parts = Vec::new();
-    for (count, one, many, short) in [
-        (jobs, "job", "jobs", "j"),
-        (subagents, "subagent", "subagents", "s"),
-    ] {
-        if count == 0 {
-            continue;
-        }
-        parts.push(if labels {
-            if count == 1 {
-                format!("{count} {one}")
-            } else {
-                format!("{count} {many}")
-            }
-        } else {
-            format!("{count}{short}")
-        });
-    }
-    if parts.is_empty() {
-        return None;
-    }
-    let mut counter = parts.join(" · ");
-    if needs_you {
-        counter.push_str(" ●");
-    }
-    Some(counter)
-}
-
-/// Width of the footer's left side: the counter, then the usage segments
-/// joined by ` · `.
-fn counter_row_width(counter: Option<&str>, segments: &[String]) -> usize {
-    let usage = footer_segments_width(segments);
-    counter.map_or(usage, |counter| {
-        let counter = unicode_width::UnicodeWidthStr::width(counter);
-        if segments.is_empty() {
-            counter
-        } else {
-            counter + 3 + usage
-        }
-    })
 }
 
 /// Display width of footer segments joined by ` · `.

@@ -895,8 +895,7 @@ fn jobs_modal_lists_opens_output_and_stops_a_running_job() {
 
     tui.submit("start modal job");
     tui.wait_for("modal job answer marker", WAIT);
-    // The footer counts the running job without the dialog open.
-    tui.wait_for("1 job", WAIT);
+    tui.wait_for("┆ job ", WAIT);
     let mut job = ProcessGuard::new(spawned_pid(&fixture));
     assert!(process_is_alive(job.pid()));
 
@@ -919,8 +918,7 @@ fn jobs_modal_lists_opens_output_and_stops_a_running_job() {
     tui.send(b"y");
     wait_for_process_exit(job.pid());
     job.disarm();
-    // The count leaves with the job.
-    tui.wait_gone("1 job", WAIT);
+    tui.wait_gone("┆ job ", WAIT);
 }
 
 #[test]
@@ -938,10 +936,10 @@ fn model_switch_keeps_completed_jobs_out_of_the_running_block() {
 
     tui.submit("start a job");
     tui.wait_for("settled job spawn answer", WAIT);
-    // The completion notice starts its own turn; once it answers, the tail
-    // holds no job line.
+    // The completion notice starts its own turn; once it answers, the block
+    // above the input holds no job row.
     tui.wait_for("settled job notice answer", WAIT);
-    tui.wait_gone("running (", WAIT);
+    tui.wait_gone("┆ job ", WAIT);
 
     tui.submit("/model");
     tui.wait_for("Switch model", WAIT);
@@ -949,7 +947,7 @@ fn model_switch_keeps_completed_jobs_out_of_the_running_block() {
     tui.wait_for("switched to mock/alt", WAIT);
 
     assert!(
-        !tui.screen_text().contains("running ("),
+        !tui.screen_text().contains("┆ job "),
         "a completed job came back as running after the switch:
 {}",
         tui.screen_text()
@@ -970,9 +968,10 @@ fn finished_job_without_notify_leaves_the_running_block() {
 
     tui.submit("start a quiet job");
     tui.wait_for("quiet job answer", WAIT);
+    tui.wait_for("┆ job ", WAIT);
     // No notice will follow this job's end, so the tick must notice that
-    // the line it drew is gone.
-    tui.wait_gone("running (", WAIT);
+    // the row it drew is gone.
+    tui.wait_gone("┆ job ", WAIT);
 }
 
 #[test]

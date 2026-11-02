@@ -1,5 +1,4 @@
 use super::*;
-use crate::tui::app_render::counter_text;
 
 fn stale_job(id: u64, cmd: Option<&str>) -> lofi_core::session::replay::OutstandingJob {
     lofi_core::session::replay::OutstandingJob {
@@ -32,65 +31,35 @@ fn screen(a: &mut App) -> String {
 }
 
 #[test]
-fn the_counter_counts_both_kinds_of_running_work() {
-    let a = app();
-    assert_eq!(a.background_counter(true), None, "nothing runs yet");
-    assert_eq!(
-        counter_text(2, 1, false, true).as_deref(),
-        Some("2 jobs · 1 subagent")
-    );
-    assert_eq!(counter_text(1, 0, false, true).as_deref(), Some("1 job"));
-    assert_eq!(
-        counter_text(0, 3, false, true).as_deref(),
-        Some("3 subagents")
-    );
-    // A narrow footer keeps the counts and drops the words.
-    assert_eq!(counter_text(2, 1, false, false).as_deref(), Some("2j · 1s"));
-    // A timer only waits, so it never reaches this count.
-    assert_eq!(counter_text(0, 0, false, true), None);
-}
-
-#[test]
-fn a_question_or_an_unread_notice_adds_the_dot() {
-    assert_eq!(
-        counter_text(1, 0, true, true).as_deref(),
-        Some("1 job ●"),
-        "the dot marks work waiting on the user"
-    );
-}
-
-#[test]
-fn the_counter_keeps_one_row_on_a_narrow_footer() {
-    let a = app();
-    // Nothing running: the row is the usage detail alone, and a terminal
-    // too narrow for it stays empty instead of wrapping.
-    let wide: String = a
-        .render_footer_left(80)
-        .spans
+fn a_pending_timer_shows_a_row_above_the_input() {
+    let mut a = app_with_timers();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    a.timers
+        .as_ref()
+        .unwrap()
+        .restore(&[lofi_types::TimerRecord {
+            id: 3,
+            due_ms: now + 7 * 3_600_000,
+            every_ms: Some(12 * 3_600_000),
+            message: Some("stand up".to_string()),
+            owner: None,
+        }]);
+    let screen = screen(&mut a);
+    let rows: Vec<&str> = screen.lines().collect();
+    let row = rows
         .iter()
-        .map(|s| s.content.to_string())
-        .collect();
-    assert!(!wide.contains('●'), "{wide}");
-    let tiny: String = a
-        .render_footer_left(1)
-        .spans
+        .position(|r| r.contains("notify every 12h"))
+        .unwrap_or_else(|| panic!("timer row missing: {screen}"));
+    assert!(rows[row].contains("remaining"), "{}", rows[row]);
+    // The row sits above the input panel, whose gutter opens with the bar.
+    let panel = rows
         .iter()
-        .map(|s| s.content.to_string())
-        .collect();
-    assert!(tiny.is_empty(), "{tiny}");
-}
-
-#[test]
-fn a_short_footer_drops_the_notice_before_the_counter() {
-    use crate::tui::view::footer_rows;
-    assert_eq!(footer_rows(6), (3, 1));
-    assert_eq!(footer_rows(4), (1, 1), "the smallest footer with a notice");
-    assert_eq!(
-        footer_rows(3),
-        (1, 0),
-        "one row short: the notice goes, the counter and the prompt stay"
-    );
-    assert_eq!(footer_rows(2), (0, 0), "the counter row keeps its own row");
+        .position(|r| r.starts_with('▌'))
+        .unwrap_or_else(|| panic!("panel missing: {screen}"));
+    assert!(row < panel, "timer at {row}, panel at {panel}");
 }
 
 #[test]
@@ -134,10 +103,44 @@ fn tab_keys_cycle_and_numbers_jump() {
         a.background_modal.as_ref().map(|modal| modal.tab),
         Some(BackgroundTab::Subagents)
     );
-    handle_event(&plain_key(KeyCode::Char('t')), &mut a, None, &mut run);
+    handle_event(&plain_key(KeyCode::Char('3')), &mut a, None, &mut run);
     assert_eq!(
         a.background_modal.as_ref().map(|modal| modal.tab),
         Some(BackgroundTab::Timers)
+    );
+}
+
+#[test]
+fn j_and_k_move_the_row_and_leave_the_tab_alone() {
+    let mut a = app_with_timers();
+    let timers = a.timers.clone().unwrap();
+    for _ in 0..3 {
+        timers.schedule_every(None, std::time::Duration::from_mins(1), None);
+    }
+    a.open_background_modal(BackgroundTab::Timers);
+    a.refresh_background_modal();
+    let mut run = None;
+    handle_event(&plain_key(KeyCode::Char('j')), &mut a, None, &mut run);
+    handle_event(&plain_key(KeyCode::Char('j')), &mut a, None, &mut run);
+    assert_eq!(
+        a.background_modal
+            .as_ref()
+            .map(|modal| modal.timers.selected),
+        Some(2),
+        "j walks down the rows"
+    );
+    assert_eq!(
+        a.background_modal.as_ref().map(|modal| modal.tab),
+        Some(BackgroundTab::Timers),
+        "j must not jump to the jobs tab"
+    );
+    handle_event(&plain_key(KeyCode::Char('k')), &mut a, None, &mut run);
+    assert_eq!(
+        a.background_modal
+            .as_ref()
+            .map(|modal| modal.timers.selected),
+        Some(1),
+        "k walks back up"
     );
 }
 
@@ -159,9 +162,8 @@ fn switching_tabs_keeps_each_tabs_selection() {
             .map(|modal| modal.timers.selected),
         Some(2)
     );
-    // A letter jumps to its tab; the row list keeps only the arrows, so a
-    // job row below the first one stays reachable.
-    handle_event(&plain_key(KeyCode::Char('j')), &mut a, None, &mut run);
+    // A digit jumps to its tab, and the row list keeps its own selection.
+    handle_event(&plain_key(KeyCode::Char('2')), &mut a, None, &mut run);
     assert_eq!(
         a.background_modal.as_ref().map(|modal| modal.tab),
         Some(BackgroundTab::Jobs)
@@ -170,7 +172,7 @@ fn switching_tabs_keeps_each_tabs_selection() {
         a.background_modal.as_ref().map(|modal| modal.jobs.selected),
         Some(0)
     );
-    handle_event(&plain_key(KeyCode::Char('t')), &mut a, None, &mut run);
+    handle_event(&plain_key(KeyCode::Char('3')), &mut a, None, &mut run);
     assert_eq!(
         a.background_modal
             .as_ref()

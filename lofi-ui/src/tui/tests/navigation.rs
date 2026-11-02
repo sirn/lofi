@@ -991,10 +991,14 @@ fn expanding_in_flight_exec_at_viewport_bottom_keeps_body_visible() {
     assert!(a.log_view_h > 0);
 
     a.enter_nav();
-    a.nav_move(-2);
-    assert!(a.log_vis[a.nav_cursor - a.log_off]
-        .rendered
-        .contains("Exec"));
+    // The running work lives in the block above the input, not in the
+    // transcript, so seat the cursor on the Exec row itself.
+    let exec_row = a
+        .log_vis
+        .iter()
+        .position(|line| line.rendered.contains("Exec"))
+        .expect("the Exec row is in the viewport");
+    a.nav_cursor = a.log_off + exec_row;
     let mut run = None;
     handle_event(&plain_key(KeyCode::Char(' ')), &mut a, None, &mut run);
     term.draw(|frame| crate::tui::view::render(frame, &mut a))

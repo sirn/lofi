@@ -75,7 +75,7 @@ mod tool_executor;
 pub(crate) mod turn;
 pub(crate) mod turn_session;
 pub use lofi_code::SubagentOp;
-pub(crate) use subagent::backend_hook;
+pub(crate) use subagent::{backend_hook, settled_cost};
 pub use subagent::{
     SubagentLive, SubagentNotice, SubagentNoticeKind, SubagentRegistry, SubagentRunning,
     SubagentSupport,

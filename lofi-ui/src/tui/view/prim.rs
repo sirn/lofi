@@ -530,6 +530,12 @@ fn cells_to_line(cells: &[(char, Style)]) -> Line<'static> {
     Line::from(spans)
 }
 
+/// A command or a message as one row: newlines collapse so a pasted body
+/// cannot turn one row into several.
+pub fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn fmt_duration(d: std::time::Duration) -> String {
     let secs = d.as_secs_f64();
@@ -537,6 +543,25 @@ pub fn fmt_duration(d: std::time::Duration) -> String {
         format!("{}s", secs.round() as u64)
     } else {
         format!("{secs:.1}s")
+    }
+}
+
+/// A duration as one narrow cell for a status row: `30s`, `12m`, `3h5m`. The
+/// unit grows with the value so the column never claims more room than the
+/// number needs, unlike [`fmt_duration`], which keeps one unit.
+pub fn fmt_duration_short(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        let (hours, minutes) = (secs / 3600, (secs % 3600) / 60);
+        if minutes == 0 {
+            format!("{hours}h")
+        } else {
+            format!("{hours}h{minutes}m")
+        }
     }
 }
 

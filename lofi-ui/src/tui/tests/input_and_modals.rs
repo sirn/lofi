@@ -1124,6 +1124,79 @@ fn subagent_rows_name_the_model_the_live_cost_and_the_elapsed_time() {
 }
 
 #[test]
+fn a_settled_subagent_row_names_what_it_ran_without_the_turn_label() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let mut a = app();
+    a.background_modal = Some(background_modal(BackgroundTab::Subagents));
+    // A row read from the store: its preview carries the picker's role label,
+    // and the header and settle marker handed it the model and the spend.
+    a.background_modal.as_mut().unwrap().subagents.rows = vec![SubagentRow {
+        id: "abc12345".into(),
+        running: false,
+        preview: "agent: the parser is fixed".into(),
+        file: Some("100_a.jsonl".into()),
+        model: Some("p/m".into()),
+        cost: Some(0.0412),
+        elapsed_ms: 0,
+    }];
+    let mut term = Terminal::new(TestBackend::new(120, 20)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let screen = subagent_screen(&term);
+    let line = screen
+        .lines()
+        .find(|line| line.contains("the parser is fixed"))
+        .unwrap_or_default();
+    assert!(
+        line.contains("done") && line.contains("p/m") && line.contains("$0.0412"),
+        "the row keeps its model and spend: {screen}"
+    );
+    assert!(!screen.contains("agent:"), "a run is not a turn: {screen}");
+}
+
+#[test]
+fn a_row_that_knows_only_its_label_keeps_the_columns() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let mut a = app();
+    a.background_modal = Some(background_modal(BackgroundTab::Subagents));
+    a.background_modal.as_mut().unwrap().subagents.rows = vec![
+        SubagentRow {
+            id: "abc12345".into(),
+            running: false,
+            preview: "agent: the parser is fixed".into(),
+            file: None,
+            model: None,
+            cost: None,
+            elapsed_ms: 0,
+        },
+        SubagentRow {
+            id: "def67890".into(),
+            running: true,
+            preview: "fix the lexer".into(),
+            file: None,
+            model: Some("plexus/gpt-6.1-sol:high".into()),
+            cost: Some(0.0123),
+            elapsed_ms: 65_000,
+        },
+    ];
+    let mut term = Terminal::new(TestBackend::new(120, 20)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let screen = subagent_screen(&term);
+    let label = |text: &str| {
+        screen
+            .lines()
+            .find(|line| line.contains(text))
+            .and_then(|line| line.find(text))
+    };
+    let (bare, full) = (label("the parser is fixed"), label("fix the lexer"));
+    assert!(bare.is_some() && full.is_some(), "{screen}");
+    assert_eq!(bare, full, "the labels start on one column:\n{screen}");
+}
+
+#[test]
 fn the_open_subagent_list_takes_the_live_cost_from_the_registry() {
     let row = |id: &str, file: &str| SubagentRow {
         id: id.to_string(),
@@ -1145,6 +1218,7 @@ fn the_open_subagent_list_takes_the_live_cost_from_the_registry() {
         model: Some("p/m".to_string()),
         elapsed_ms: 1500,
         cost: Some(0.5),
+        task: "review the parser".to_string(),
     }];
     modal.overlay_live(&runs);
     let rows = &modal.rows;
@@ -1152,6 +1226,7 @@ fn the_open_subagent_list_takes_the_live_cost_from_the_registry() {
     assert_eq!(rows[0].model.as_deref(), Some("p/m"));
     assert_eq!(rows[0].cost, Some(0.5));
     assert_eq!(rows[0].elapsed_ms, 1500);
+    assert_eq!(rows[0].preview, "review the parser", "the task names it");
     // A row no live run covers keeps what the last listing gave it.
     assert!(!rows[1].running);
     assert!(rows[1].cost.is_none());

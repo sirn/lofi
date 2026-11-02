@@ -66,8 +66,11 @@ impl App {
                         .path()
                         .file_name()
                         .map(|name| name.to_string_lossy().into_owned()),
-                    model: None,
-                    cost: None,
+                    // The header names the model the run resolved to and the
+                    // settle marker its terminal spend: the two columns the
+                    // registry would have filled had this process run it.
+                    model: Some(file.meta().model.label()),
+                    cost: file.settled_cost(),
                     elapsed_ms: 0,
                 })
                 .collect(),

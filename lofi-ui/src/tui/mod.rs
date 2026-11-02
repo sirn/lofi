@@ -151,6 +151,11 @@ const YANK_NOTIFY: Duration = Duration::from_secs(2);
 const NOTIFY_TTL: Duration = Duration::from_secs(5);
 /// Cap on the notification area height: a long transient message wraps
 /// across up to this many rows instead of truncating to one.
+const NOTIFY_MAX_LINES: usize = 3;
+/// Columns the notification box spends on its border and one column of
+/// padding on each side. The body wraps to what is left, so the two must move
+/// together.
+const NOTIFY_CHROME: usize = 4;
 /// Byte budget for the plain-job output viewer. PTY jobs use their bounded
 /// terminal screen instead.
 const JOB_LOG_WINDOW_BYTES: usize = 128 * 1024;

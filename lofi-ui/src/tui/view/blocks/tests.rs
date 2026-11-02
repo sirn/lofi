@@ -5,53 +5,35 @@ use super::message::trim_reasoning_summary;
 use super::native::{native_body, native_preview_range, summarize_tool_args};
 use crate::tui::NativeTool;
 
-#[test]
-fn running_job_line_renders_with_dashed_bar() {
-    use super::{Component, Cx, RunningJobLine};
-    let a = crate::tui::App::new(
+fn app() -> crate::tui::App {
+    crate::tui::App::new(
         "m".to_string(),
         lofi_types::ThinkingLevel::Off,
         lofi_types::ServiceTier::Auto,
         200_000,
         lofi_types::CompactionConfig::default(),
         String::new(),
-    );
-    let cx = Cx {
-        app: &a,
+    )
+}
+
+/// The block above the input as one string per row.
+fn block_rows(
+    a: &crate::tui::App,
+    width: usize,
+    jobs: &[lofi_core::JobInfo],
+    subagents: &[lofi_core::SubagentRunning],
+    timers: &[lofi_core::TimerInfo],
+) -> Vec<String> {
+    let cx = super::Cx {
+        app: a,
         theme: a.theme,
-        width: 80,
+        width,
         active_turn: false,
     };
-    let job = lofi_core::JobInfo {
-        id: 42,
-        cmd: "cargo test --workspace".to_string(),
-        state: "running".to_string(),
-        running: true,
-        pid: Some(1234),
-        exit_code: None,
-        duration_ms: 12_000,
-        log_path: String::new(),
-        tty: false,
-        notify: true,
-    };
-    let lines = (RunningJobLine { job: &job }).lines(&cx);
-    assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0].line.spans[0].content, "┆ ");
-    assert_eq!(lines[0].line.spans[0].style.fg, Some(a.theme.info));
-    let rendered: String = lines[0]
-        .line
-        .spans
+    super::render_work_block(&cx, jobs, subagents, timers)
         .iter()
-        .map(|s| s.content.as_ref())
-        .collect();
-    // The line names the job by the handle its notices carry.
-    assert_eq!(
-        rendered,
-        format!(
-            "┆ job {} running (12s): cargo test --workspace",
-            lofi_types::short_id(42)
-        )
-    );
+        .map(|rl| rl.line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect()
 }
 
 fn running_job(id: u64, cmd: &str) -> lofi_core::JobInfo {
@@ -62,49 +44,110 @@ fn running_job(id: u64, cmd: &str) -> lofi_core::JobInfo {
         running: true,
         pid: None,
         exit_code: None,
-        duration_ms: 1_000,
+        duration_ms: 12_000,
         log_path: String::new(),
         tty: false,
         notify: true,
     }
 }
 
-fn tail_rows(
-    a: &crate::tui::App,
-    jobs: &[lofi_core::JobInfo],
-    subagents: &[lofi_core::SubagentRunning],
-) -> Vec<String> {
-    tail_rows_at(a, jobs, subagents, 80)
+fn running_subagent(activity: &str) -> lofi_core::SubagentRunning {
+    lofi_core::SubagentRunning {
+        id: "ab12".to_string(),
+        elapsed_ms: 65_000,
+        task: "survey the parser".to_string(),
+        activity: activity.to_string(),
+        model: Some("plexus/gpt-6.1-sol:high".to_string()),
+        cost: Some(0.0123),
+    }
 }
 
-fn tail_rows_at(
-    a: &crate::tui::App,
-    jobs: &[lofi_core::JobInfo],
-    subagents: &[lofi_core::SubagentRunning],
-    width: usize,
-) -> Vec<String> {
-    let cx = super::Cx {
-        app: a,
-        theme: a.theme,
-        width,
-        active_turn: false,
-    };
-    super::render_transcript_tail(&cx, false, jobs, subagents)
-        .iter()
-        .map(|rl| rl.line.spans.iter().map(|s| s.content.as_ref()).collect())
-        .collect()
+fn timer(id: u64, every: Option<u64>, due_in_ms: u64) -> lofi_core::TimerInfo {
+    lofi_core::TimerInfo {
+        id,
+        due: std::time::SystemTime::now() + std::time::Duration::from_millis(due_in_ms),
+        every: every.map(std::time::Duration::from_millis),
+        message: Some("check the deploy".to_string()),
+        owner: None,
+    }
 }
 
 #[test]
-fn transcript_tail_renders_queued_prompts_above_running_jobs() {
-    let mut a = crate::tui::App::new(
-        "m".to_string(),
-        lofi_types::ThinkingLevel::Off,
-        lofi_types::ServiceTier::Auto,
-        200_000,
-        lofi_types::CompactionConfig::default(),
-        String::new(),
+fn a_job_row_names_the_job_and_puts_its_clock_on_the_right_edge() {
+    let a = app();
+    let rows = block_rows(
+        &a,
+        80,
+        &[running_job(42, "cargo test --workspace")],
+        &[],
+        &[],
     );
+    assert_eq!(rows.len(), 1, "one row per job: {rows:#?}");
+    let row = &rows[0];
+    // The handle is the one its notices carry.
+    assert!(
+        row.starts_with(&format!(
+            "┆ job {}: cargo test --workspace",
+            lofi_types::short_id(42)
+        )),
+        "{row}"
+    );
+    assert!(row.trim_end().ends_with("12s"), "{row}");
+
+    assert_eq!(crate::tui::view::prim::width(row), 80);
+}
+
+#[test]
+fn a_subagent_row_shows_what_the_run_is_doing_and_drops_it_before_the_model() {
+    let a = app();
+    let run = running_subagent("Exec: Map the parser");
+    let wide = &block_rows(&a, 90, &[], std::slice::from_ref(&run), &[])[0];
+    assert!(
+        wide.contains("subagent ab12: Exec: Map the parser"),
+        "{wide}"
+    );
+    assert!(wide.contains("plexus/gpt-6.1-sol:high"), "{wide}");
+    assert!(wide.contains("$0.01"), "{wide}");
+    assert!(wide.trim_end().ends_with("1m"), "{wide}");
+    // A narrow row keeps the identity, the spend, and the clock, and cuts
+    // the message instead.
+    let narrow = &block_rows(&a, 44, &[], std::slice::from_ref(&run), &[])[0];
+    assert_eq!(crate::tui::view::prim::width(narrow), 44);
+    assert!(!narrow.contains("plexus"), "{narrow}");
+    assert!(narrow.starts_with("┆ subagent ab12: "), "{narrow}");
+    assert!(narrow.contains("$0.01"), "{narrow}");
+    assert!(narrow.trim_end().ends_with("1m"), "{narrow}");
+}
+
+#[test]
+fn a_timer_row_names_its_schedule_and_the_time_left() {
+    let a = app();
+    let rows = block_rows(
+        &a,
+        80,
+        &[],
+        &[],
+        &[timer(3, Some(12 * 3_600_000), 7 * 3_600_000 + 2_000)],
+    );
+    let row = &rows[0];
+    assert!(row.starts_with("┆ timer 3: notify every 12h"), "{row}");
+    assert!(row.trim_end().ends_with("7h remaining"), "{row}");
+    assert_eq!(crate::tui::view::prim::width(row), 80);
+}
+
+#[test]
+fn a_one_shot_timer_row_names_the_wall_clock_it_fires_at() {
+    let a = app();
+    let rows = block_rows(&a, 100, &[], &[], &[timer(4, None, 32 * 60_000 + 10_000)]);
+    let row = &rows[0];
+    assert!(row.starts_with("┆ timer 4: notify at 20"), "{row}");
+    assert!(row.trim_end().ends_with("32m remaining"), "{row}");
+    assert_eq!(crate::tui::view::prim::width(row), 100);
+}
+
+#[test]
+fn a_blank_row_separates_each_notice_and_each_section() {
+    let mut a = app();
     a.prompt_queue.push(crate::tui::QueuedPrompt {
         text: "queued follow-up".to_string(),
         kind: lofi_types::PromptKind::User,
@@ -113,118 +156,34 @@ fn transcript_tail_renders_queued_prompts_above_running_jobs() {
         text: "job 7 completed: sleep 1".to_string(),
         kind: lofi_types::PromptKind::Notice,
     });
-    let rows = tail_rows(&a, &[running_job(9, "sleep 9")], &[]);
-    let user_idx = rows
-        .iter()
-        .position(|r| r.contains("queued follow-up"))
-        .expect("queued user row");
-    let notice_idx = rows
-        .iter()
-        .position(|r| r.contains("job 7 completed"))
-        .expect("queued notice row");
-    let job_idx = rows
-        .iter()
-        .position(|r| r.contains("job 9 running"))
-        .expect("running job row");
-    assert!(
-        user_idx < notice_idx && notice_idx < job_idx,
-        "expected queued user ({user_idx}) < queued notice ({notice_idx}) < running job ({job_idx}): {rows:#?}"
-    );
-}
-
-#[test]
-fn job_completion_swaps_running_line_for_its_notice_without_height_change() {
-    let mut a = crate::tui::App::new(
-        "m".to_string(),
-        lofi_types::ThinkingLevel::Off,
-        lofi_types::ServiceTier::Auto,
-        200_000,
-        lofi_types::CompactionConfig::default(),
-        String::new(),
-    );
-    let before = tail_rows(
+    let rows = block_rows(
         &a,
-        &[running_job(1, "sleep 1"), running_job(2, "sleep 30")],
+        80,
+        &[running_job(9, "sleep 9"), running_job(8, "sleep 8")],
+        &[],
         &[],
     );
-    a.prompt_queue.push(crate::tui::QueuedPrompt {
-        text: "job 1 completed: sleep 1 (exit 0) — log: /tmp/lofi-job-1.log".to_string(),
-        kind: lofi_types::PromptKind::Notice,
-    });
-    let after = tail_rows(&a, &[running_job(2, "sleep 30")], &[]);
+    let idx = |needle: &str| {
+        rows.iter()
+            .position(|r| r.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} missing: {rows:#?}"))
+    };
+    assert!(idx("queued follow-up") < idx("job 7 completed"));
+    assert!(idx("job 7 completed") < idx("job 9:"));
+    // Each queue entry and each section boundary is blank; running rows are
+    // packed, so the two jobs stay adjacent.
     assert_eq!(
-        before.len(),
-        after.len(),
-        "before: {before:#?} after: {after:#?}"
+        rows.iter().filter(|r| r.trim().is_empty()).count(),
+        2,
+        "{rows:#?}"
     );
-    assert!(before.iter().any(|r| r.contains("job 1 running")));
-    assert!(!after.iter().any(|r| r.contains("job 1 running")));
-    assert!(after.iter().any(|r| r.contains("job 1 completed")));
-    assert!(after.iter().any(|r| r.contains("job 2 running")));
-}
-
-#[test]
-fn a_running_subagent_line_clips_its_task_before_it_wraps() {
-    let a = crate::tui::App::new(
-        "m".to_string(),
-        lofi_types::ThinkingLevel::Off,
-        lofi_types::ServiceTier::Auto,
-        200_000,
-        lofi_types::CompactionConfig::default(),
-        String::new(),
+    assert_eq!(
+        idx("job 7 completed") - idx("queued follow-up"),
+        2,
+        "{rows:#?}"
     );
-    let runs = [lofi_core::SubagentRunning {
-        id: "ab12cd34".to_string(),
-        elapsed_ms: 65_000,
-        task: "survey the parser and report every failure it finds".to_string(),
-        model: Some("plexus/gpt-6.1-sol:high".to_string()),
-        cost: Some(0.0123),
-    }];
-    let rows = tail_rows_at(&a, &[], &runs, 100);
-    assert_eq!(rows.len(), 1, "the line must stay one row: {rows:#?}");
-    let row = &rows[0];
-    assert!(row.ends_with('…'), "the preview is clipped: {row}");
-    assert!(
-        row.contains("subagent ab12cd34 running (65s) - plexus/gpt-6.1-sol:high - $0.0123: "),
-        "{row}"
-    );
-    assert!(crate::tui::view::prim::width(row) <= 100, "{row}");
-}
-
-#[test]
-fn transcript_tail_renders_running_subagents_above_running_jobs() {
-    let a = crate::tui::App::new(
-        "m".to_string(),
-        lofi_types::ThinkingLevel::Off,
-        lofi_types::ServiceTier::Auto,
-        200_000,
-        lofi_types::CompactionConfig::default(),
-        String::new(),
-    );
-    let runs = [lofi_core::SubagentRunning {
-        id: "ab12cd34".to_string(),
-        elapsed_ms: 65_000,
-        task: "survey the repo".to_string(),
-        model: Some("plexus/gpt-6.1-sol:high".to_string()),
-        cost: Some(0.0123),
-    }];
-    let rows = tail_rows(&a, &[running_job(9, "sleep 9")], &runs);
-    let subagent_idx = rows
-        .iter()
-        // At 80 columns the model and the cost leave no room for the
-        // preview, which is clipped rather than wrapped.
-        .position(|r| {
-            r.contains("subagent ab12cd34 running (65s) - plexus/gpt-6.1-sol:high - $0.0123")
-        })
-        .expect("running subagent row");
-    let job_idx = rows
-        .iter()
-        .position(|r| r.contains("job 9 running"))
-        .expect("running job row");
-    assert!(
-        subagent_idx < job_idx,
-        "expected subagent ({subagent_idx}) above job ({job_idx}): {rows:#?}"
-    );
+    assert_eq!(idx("job 9:") - idx("job 7 completed"), 2, "{rows:#?}");
+    assert_eq!(idx("job 8:") - idx("job 9:"), 1, "{rows:#?}");
 }
 
 #[test]

@@ -50,6 +50,14 @@ impl SessionFile {
         quick_entry_preview(&self.path)
     }
 
+    /// Terminal spend of the run this transcript records. The settle marker
+    /// is the physical last line, so one bounded tail read finds it; a run
+    /// still working has none.
+    #[must_use]
+    pub fn settled_cost(&self) -> Option<f64> {
+        crate::agent::settled_cost(&self.path)
+    }
+
     /// The session meta header, captured when the file was listed.
     #[must_use]
     pub fn meta(&self) -> &SessionMeta {
@@ -625,6 +633,51 @@ mod tests {
         assert!(!store.root().exists());
 
         std::env::remove_var("LOFI_STATE_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn settled_file(dir: &Path, settle: Option<&lofi_types::SessionEvent>) -> SessionFile {
+        let path = dir.join("100_ab.jsonl");
+        let mut lines = String::from("{\"type\":\"meta\",\"version\":1}\n");
+        if let Some(event) = settle {
+            lines.push_str(&serde_json::to_string(event).unwrap());
+            lines.push('\n');
+        }
+        std::fs::write(&path, lines).unwrap();
+        SessionFile {
+            path,
+            meta: serde_json::from_str(
+                r#"{"version":1,"created":0,"cwd":"/ws","model":{"provider":"p","id":"m"}}"#,
+            )
+            .unwrap(),
+            last_active: std::time::SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn a_settled_transcript_reports_its_terminal_spend() {
+        use lofi_types::{SessionEvent, SessionEventKind, Usage};
+
+        let tmp = std::env::temp_dir().join(format!("lofi_settled_cost_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let event = SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::RunSettled {
+                status: "completed".into(),
+                result: Some("ok".into()),
+                error: None,
+                usage: Some(Usage::default()),
+                cost: Some(0.0412),
+            },
+        };
+        let file = settled_file(&tmp, Some(&event));
+        assert_eq!(file.settled_cost(), Some(0.0412));
+
+        // A run that never settled has no cost to show.
+        let bare = settled_file(&tmp, None);
+        assert_eq!(bare.settled_cost(), None);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
