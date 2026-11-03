@@ -175,12 +175,6 @@ pub async fn run(
         if let Some(stem) = cursor.path().file_stem().and_then(|s| s.to_str()) {
             subagents.set_parent_session(stem);
         }
-        // A restarted process rebuilds the registry from this session's
-        // subagent transcripts so children stay resumable: once per parent
-        // session id, before any tool of the turn runs.
-        if let Some(support) = executor.subagent_support() {
-            subagents.rehydrate(backend, &support);
-        }
     }
     let cancel = CancelToken::new(cancel);
     let mut driver = backend.open_turn()?;
@@ -239,6 +233,16 @@ pub async fn run(
                 }
             }
             opened = true;
+            // A restarted process rebuilds the registry from this session's
+            // subagent transcripts so children stay resumable. It runs after
+            // the prompt is recorded, not before: it reads one header and a
+            // bounded tail per child, and on a cold shared filesystem that
+            // costs seconds the user's own row must not wait for. It still
+            // precedes the first tool of the turn, which the next statement
+            // starts.
+            if let Some(support) = executor.subagent_support() {
+                subagents.rehydrate(backend, &support);
+            }
         }
         if let Some(message) = recovery_round_exceeded(&mut recovery_rounds) {
             match record_notice(&mut driver_view, &io, messages, message).await {
