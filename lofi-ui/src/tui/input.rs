@@ -90,6 +90,7 @@ pub(super) fn handle_event(
         KeyCode::Enter
             if (current_run.is_some() || app.lifecycle_busy) && !app.input.is_empty() =>
         {
+            app.debug_mark_submit();
             let prompt = std::mem::take(&mut app.input);
             app.input_cursor = 0;
             app.history_idx = None;
@@ -114,6 +115,7 @@ pub(super) fn handle_event(
             return;
         }
         KeyCode::Enter if current_run.is_none() && !app.input.is_empty() => {
+            app.debug_mark_submit();
             let prompt = std::mem::take(&mut app.input);
             app.input_cursor = 0;
             app.history_idx = None;

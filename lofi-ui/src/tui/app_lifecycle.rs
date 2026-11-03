@@ -185,6 +185,11 @@ impl App {
             return;
         }
         if let AgentEvent::Prompt { prompt, kind } = ev {
+            // A live run dates its prompt publication; replay of a resumed
+            // file has no run and must not sample once per turn.
+            if self.run.is_some() {
+                self.debug_sample("core_prompt");
+            }
             // spawn_agent_run pre-pushes the prompt at submit time so it
             // shows before the working indicator's first frame. The
             // matching Prompt is then a confirmation, not a new turn.

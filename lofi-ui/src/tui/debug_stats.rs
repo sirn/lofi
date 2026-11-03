@@ -133,6 +133,18 @@ impl App {
         }
     }
 
+    /// Date both ends of a submit: a sample on the key itself and one on the
+    /// next drawn frame. Their timestamps are the key-to-row latency, and the
+    /// frame sample carries the poses that decide whether the drawn frame held
+    /// the prompt row at all.
+    pub(super) fn debug_mark_submit(&mut self) {
+        if self.debug.is_none() {
+            return;
+        }
+        self.debug_sample("submit_key");
+        self.debug_after_draw = Some("submit_drawn");
+    }
+
     pub(super) fn debug_sample(&mut self, event: &str) {
         let Some(mut debug) = self.debug.take() else {
             return;
@@ -562,6 +574,16 @@ impl DebugState {
                 "context_limit": app.ctx_limit,
                 "compacted": app.compacted,
                 "expanded_details": app.expanded_details.len(),
+                "pinned": app.pinned,
+                "top_line": app.top_line,
+                "log_off": app.log_off,
+                "log_total": app.log_total,
+                "log_view_h": app.log_view_h,
+                "last_turn_height": app.last_turn_height,
+                "pending_prompt_start": app.pending_prompt_start,
+                "height_remeasure_from": app.layout.height_remeasure_from,
+                "live_turn_blocks": app.transcript.turns.last().map_or(0, |turn| turn.blocks.len()),
+                "frozen_turns": app.layout.frozen_heights.len(),
             }
         });
         serde_json::to_writer(&mut *file, &record)?;
