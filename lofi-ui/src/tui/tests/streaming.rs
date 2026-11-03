@@ -378,6 +378,139 @@ fn compact_keeps_file_backed_turn_content_visible() {
     );
 }
 
+/// Regression: a file-backed turn whose live blocks are gone must render from
+/// the transcript. Freezing the newest turn clears its blocks, and while a run
+/// is active that turn stays the live one, so the view rendered the cleared
+/// shell and the turn collapsed to its prompt row.
+#[test]
+fn cleared_file_backed_turn_still_renders_its_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store::SessionStore::new(dir.path().join("s"));
+    let cursor = store
+        .create_cursor(std::path::Path::new("/x"), &"m".into())
+        .unwrap();
+    let path = cursor.path().to_path_buf();
+
+    let mut evs = vec![SessionEvent {
+        id: String::new(),
+        parent_id: None,
+        kind: SessionEventKind::Message(Message {
+            origin: None,
+            role: Role::User,
+            blocks: vec![ContentBlock::Text {
+                text: "prompt 1".to_string(),
+            }],
+            kind: PromptKind::default(),
+        }),
+    }];
+    for i in 0..6 {
+        evs.push(SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(Message {
+                origin: None,
+                role: Role::Assistant,
+                blocks: vec![ContentBlock::Text {
+                    text: format!("agent round {i}"),
+                }],
+                kind: PromptKind::default(),
+            }),
+        });
+    }
+    evs.push(SessionEvent {
+        id: String::new(),
+        parent_id: None,
+        kind: SessionEventKind::TurnEnd {
+            model: "m".into(),
+            elapsed_ms: 1,
+            cost: 0.0,
+            usage: Usage::default(),
+            stop_reason: None,
+        },
+    });
+    test_append_events(&path, &mut evs, None).unwrap();
+
+    let mut a = app();
+    attach_session_sink(
+        &mut a,
+        store.clone(),
+        std::path::Path::new("/x"),
+        store::SessionCursor::open(path).unwrap(),
+    );
+    let c0 = a.session.cursor.as_ref().unwrap().clone();
+    let snap = c0.snapshot().unwrap();
+    a.restore_indexed_session(
+        &c0,
+        &snap.index,
+        snap.file_size,
+        snap.history_start,
+        snap.contiguous,
+    )
+    .unwrap();
+    a.lifecycle
+        .restore_history(&c0, &snap.index, snap.history_start)
+        .unwrap();
+
+    assert!(
+        a.transcript.turns[0].blocks.is_empty(),
+        "a resumed turn starts as a file-backed shell"
+    );
+    assert!(
+        a.needs_durable_materialize(0),
+        "a committed turn without blocks must render from disk"
+    );
+    let rendered = a.materialize_turn(0);
+    assert!(
+        rendered
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::Text(t) if t.contains("agent round"))),
+        "the turn rendered as a prompt-only shell: {:?}",
+        rendered.blocks.len()
+    );
+}
+
+/// A frozen turn taller than the line cache must not re-render its window on
+/// every frame. Rendering one window walks the whole turn, so a tall turn in
+/// view cost a full walk per frame and made a submit appear to hang.
+#[test]
+fn tall_frozen_turn_reuses_its_rendered_window() {
+    use ratatui::Terminal;
+    let mut a = app();
+    a.transcript.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
+        prompt: "tall prompt".to_string(),
+        blocks: vec![Block::Text(
+            "tall line
+"
+            .repeat(5000),
+        )],
+    });
+    push_turn(&mut a); // turn[1] keeps turn[0] frozen.
+    a.transcript.turn_byte_ranges[0] = Some((0, 1));
+    a.mode = Mode::Input;
+
+    let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    assert!(
+        a.render_profile.frozen_window_us > 0,
+        "the first frame renders the window"
+    );
+    assert!(
+        a.layout.frozen_render.get(0).is_none(),
+        "a tall turn must not keep its full rendering"
+    );
+
+    // The draw guard owns the profile reset in the real loop; this test drives
+    // the render function directly.
+    *a.render_profile = crate::tui::run::RenderProfile::default();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    assert_eq!(
+        a.render_profile.frozen_window_us, 0,
+        "the drawn window is reused instead of walking the turn again"
+    );
+}
+
 #[test]
 fn notify_lines_is_zero_without_notification() {
     let a = app();

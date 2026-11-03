@@ -508,11 +508,18 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                         let start = off.saturating_sub(turn_start);
                         let stop = start.saturating_add(want).min(h);
                         let phase_started = std::time::Instant::now();
-                        let lines = app.frozen_turn_window(i, w, start..stop);
+                        if app.layout.frozen_render.window(i, start..stop).is_none() {
+                            let lines = app.frozen_turn_window(i, w, start..stop);
+                            app.layout
+                                .frozen_render
+                                .insert_window(i, start..stop, lines);
+                        }
+                        let cached = app.layout.frozen_render.window(i, start..stop);
+                        let lines = cached.map_or(&[][..], Vec::as_slice);
                         app.render_profile.frozen_window_us += phase_started.elapsed().as_micros();
                         pos = turn_start + start;
                         feed_segment(
-                            &lines,
+                            lines,
                             &mut pos,
                             off,
                             &mut want,
@@ -741,6 +748,8 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
         app.theme,
         active,
     );
+    // The frame drew the turns a submit just froze, so their blocks can go now.
+    app.transcript.release_pending_blocks();
 }
 
 fn draw_scrollbar(

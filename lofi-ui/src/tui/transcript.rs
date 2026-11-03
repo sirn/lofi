@@ -122,6 +122,10 @@ impl CollapsedTurnCache {
 pub(super) struct FrozenCache {
     pub(super) order: VecDeque<usize>,
     pub(super) map: HashMap<usize, Vec<view::RenderLine>>,
+    /// The visible slice of a turn too tall to keep in `map`. Rendering one
+    /// window walks the whole turn, and a tall turn stays on screen for many
+    /// frames, so the slice is worth keeping.
+    pub(super) windows: HashMap<usize, (std::ops::Range<usize>, Vec<view::RenderLine>)>,
 }
 
 impl FrozenCache {
@@ -129,6 +133,7 @@ impl FrozenCache {
         Self {
             order: VecDeque::new(),
             map: HashMap::new(),
+            windows: HashMap::new(),
         }
     }
 
@@ -143,6 +148,26 @@ impl FrozenCache {
     pub(super) fn clear(&mut self) {
         self.order.clear();
         self.map.clear();
+        self.windows.clear();
+    }
+
+    pub(super) fn window(
+        &self,
+        idx: usize,
+        range: std::ops::Range<usize>,
+    ) -> Option<&Vec<view::RenderLine>> {
+        self.windows
+            .get(&idx)
+            .and_then(|(cached, lines)| (*cached == range).then_some(lines))
+    }
+
+    pub(super) fn insert_window(
+        &mut self,
+        idx: usize,
+        range: std::ops::Range<usize>,
+        lines: Vec<view::RenderLine>,
+    ) {
+        self.windows.insert(idx, (range, lines));
     }
 
     pub(super) fn insert(&mut self, idx: usize, entry: Vec<view::RenderLine>) {
@@ -160,6 +185,7 @@ impl FrozenCache {
         let last = last.saturating_add(1).min(frozen_turns.saturating_sub(1));
         self.map.retain(|idx, _| (first..=last).contains(idx));
         self.order.retain(|idx| (first..=last).contains(idx));
+        self.windows.retain(|idx, _| (first..=last).contains(idx));
     }
 }
 
@@ -173,6 +199,10 @@ pub(super) struct Transcript {
     pub(super) turn_byte_ranges: Vec<Option<(u64, u64)>>,
     pub(super) turn_event_offsets: Vec<Option<Vec<u64>>>,
     pub(super) collapsed_turns: Box<RefCell<CollapsedTurnCache>>,
+    /// Frozen turns whose blocks wait for the frame that renders them from
+    /// memory. Dropping them at freeze time made that frame re-read the turn
+    /// from the transcript, which stalls a submit on a long previous turn.
+    pending_release: Vec<usize>,
     /// First durable-transcript read failure seen while rendering. Set from
     /// interior-mutability paths that only hold `&App`; surfaced as a
     /// notification after the frame so a turn silently rendering as an
@@ -217,6 +247,7 @@ impl Transcript {
             turn_byte_ranges: Vec::new(),
             turn_event_offsets: Vec::new(),
             collapsed_turns: Box::new(RefCell::new(CollapsedTurnCache::new())),
+            pending_release: Vec::new(),
             alert: RefCell::new(None),
         }
     }
@@ -264,19 +295,42 @@ impl Transcript {
                 .blocks
                 .iter()
                 .any(|block| matches!(block, Block::Compaction { .. }));
-            if !carries_marker {
-                self.turns[previous].blocks.clear();
+            if !carries_marker && !self.turns[previous].blocks.is_empty() {
+                self.pending_release.push(previous);
+            }
+        }
+    }
+
+    /// Release the blocks kept for the frame that froze a turn. The frame has
+    /// already rendered it, so it holds the cached lines and height it needs.
+    pub(super) fn release_pending_blocks(&mut self) {
+        if self.pending_release.is_empty() {
+            return;
+        }
+        for idx in std::mem::take(&mut self.pending_release) {
+            if let Some(turn) = self.turns.get_mut(idx) {
+                turn.blocks.clear();
             }
         }
     }
 
     pub(super) fn merge_last_turn_range(&mut self, byte_start: u64, byte_end: u64) {
-        if let Some(range) = self.turn_byte_ranges.last_mut() {
-            *range = Some(match *range {
-                Some((start, end)) => (start.min(byte_start), end.max(byte_end)),
-                None => (byte_start, byte_end),
-            });
+        let Some(range) = self.turn_byte_ranges.last_mut() else {
+            return;
+        };
+        let merged = match *range {
+            Some((start, end)) => (start.min(byte_start), end.max(byte_end)),
+            None => (byte_start, byte_end),
+        };
+        if *range == Some(merged) {
+            return;
         }
+        *range = Some(merged);
+        // The turn grew on disk. A materialization taken from the earlier,
+        // shorter range holds only the rows committed by then, so a live turn
+        // that had no blocks yet would keep rendering that stale shell.
+        let idx = self.turns.len().saturating_sub(1);
+        self.collapsed_turns.get_mut().remove(idx);
     }
 
     pub(super) fn push_turn(&mut self, turn: Turn) {
@@ -287,6 +341,7 @@ impl Transcript {
 
     pub(super) fn insert_turn(&mut self, idx: usize, turn: Turn) {
         self.collapsed_turns.get_mut().clear();
+        self.pending_release.clear();
         self.turns.insert(idx, turn);
         self.turn_byte_ranges.insert(idx, None);
         self.turn_event_offsets.insert(idx, None);
@@ -317,6 +372,7 @@ impl Transcript {
     pub(super) fn clear(&mut self) {
         self.turns.clear();
         self.collapsed_turns.get_mut().clear();
+        self.pending_release.clear();
         self.turn_byte_ranges.clear();
         self.turn_event_offsets.clear();
     }
@@ -365,12 +421,22 @@ impl App {
     /// but the committed transcript range can restore them. Expanded details
     /// need that durable content.
     pub(super) fn needs_durable_materialize(&self, idx: usize) -> bool {
-        self.turn_has_expanded_detail(idx)
-            && self
-                .transcript
-                .turn_byte_ranges
-                .get(idx)
-                .is_some_and(Option::is_some)
+        // A committed turn with no live blocks renders from the transcript, not
+        // from the empty shell. Freezing the turn ahead of the next, or a turn
+        // whose blocks were released, leaves exactly this state; rendering the
+        // shell collapsed the turn to its prompt row.
+        let committed = self
+            .transcript
+            .turn_byte_ranges
+            .get(idx)
+            .is_some_and(Option::is_some);
+        committed
+            && (self.turn_has_expanded_detail(idx)
+                || self
+                    .transcript
+                    .turns
+                    .get(idx)
+                    .is_none_or(|turn| turn.blocks.is_empty()))
     }
 
     /// Reconstruct a frozen turn's blocks. If the turn still holds its blocks

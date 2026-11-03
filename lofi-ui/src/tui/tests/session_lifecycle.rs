@@ -95,6 +95,7 @@ fn standalone_user_shell_keeps_turn_backing_metadata_aligned() {
     assert_eq!(a.transcript.turns.len(), 2);
     assert_eq!(a.transcript.turn_byte_ranges.len(), 2);
     assert_eq!(a.transcript.turn_event_offsets.len(), 2);
+    a.transcript.release_pending_blocks();
     assert!(a.transcript.turns[0].blocks.is_empty());
 
     a.transcript.turn_byte_ranges[1] = Some((20, 30));
@@ -102,6 +103,7 @@ fn standalone_user_shell_keeps_turn_backing_metadata_aligned() {
         kind: lofi_types::PromptKind::User,
         prompt: "second".into(),
     });
+    a.transcript.release_pending_blocks();
     assert!(a.transcript.turns[1].blocks.is_empty());
     assert_eq!(
         a.transcript.turns.len(),
@@ -599,6 +601,11 @@ fn next_turn_freezes_previous_response_atomically_with_new_prompt() {
         prompt: "new prompt".into(),
     });
     assert_eq!(a.transcript.turns.len(), 2);
+    assert!(
+        !a.transcript.turns[0].blocks.is_empty(),
+        "the frozen turn keeps its blocks for the frame that draws it"
+    );
+    a.transcript.release_pending_blocks();
     assert!(a.transcript.turns[0].blocks.is_empty());
     assert_eq!(a.transcript.turns[1].prompt, "new prompt");
 }
