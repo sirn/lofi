@@ -691,6 +691,30 @@ fn bracket_jumps_between_turns() {
 }
 
 #[test]
+fn bracket_back_from_inside_a_turn_lands_on_its_first_line() {
+    let mut a = app();
+    a.mode = Mode::Navigate;
+    a.layout.frozen_heights = vec![3, 2];
+    a.last_turn_height = 4;
+    a.log_total = 3 + 1 + 2 + 1 + 4;
+    a.log_view_h = 10;
+    a.transcript.turns.clear();
+    for _ in 0..3 {
+        push_turn(&mut a);
+    }
+    let mut run = None;
+    // The live turn is unsettled: the cursor reached it through its answer,
+    // not through its first line.
+    a.nav_cursor = 7;
+    handle_event(&plain_key(KeyCode::Char('j')), &mut a, None, &mut run);
+    assert_eq!(a.nav_cursor, 8);
+    handle_event(&plain_key(KeyCode::Char('[')), &mut a, None, &mut run);
+    assert_eq!(a.nav_cursor, 7);
+    handle_event(&plain_key(KeyCode::Char('[')), &mut a, None, &mut run);
+    assert_eq!(a.nav_cursor, 4);
+}
+
+#[test]
 fn page_keys_move_cursor_in_nav() {
     let mut a = app();
     a.mode = Mode::Navigate;

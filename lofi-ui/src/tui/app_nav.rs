@@ -708,7 +708,9 @@ impl App {
     }
 
     /// Jump the cursor to the start of the next (`dir > 0`) or previous turn.
-    /// In Select the selection extends; otherwise it is cleared.
+    /// A back jump from inside a turn stops on that turn's first line, so the
+    /// turn the cursor is in is always a stop. In Select the selection extends;
+    /// otherwise it is cleared.
     pub(super) fn nav_jump_turn(&mut self, dir: i32) {
         let n = self.transcript.turns.len();
         if n == 0 {
@@ -728,6 +730,11 @@ impl App {
         }
         let target_turn = if dir > 0 {
             (cur + 1).min(n - 1)
+        } else if self.nav_cursor > self.turn_start_line(cur) {
+            // Inside a turn, the first press goes to the top of that turn.
+            // A live turn has no settled end, so it must be a stop of its
+            // own: skipping it drops the answer as it is written.
+            cur
         } else {
             cur.saturating_sub(1)
         };
