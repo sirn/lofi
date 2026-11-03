@@ -89,12 +89,18 @@ pub(super) fn running_rows(
         columns.push(prim::fmt_duration_short(Duration::from_millis(
             run.elapsed_ms,
         )));
-        // A run that has not started talking yet shows its handle alone
-        // rather than a dangling colon.
-        let label = if run.activity.is_empty() {
+        // A run that has not named anything yet shows the task it was given,
+        // so the row keeps a message while the child thinks. An empty label
+        // would leave a dangling colon.
+        let doing = if run.activity.is_empty() {
+            run.task.trim()
+        } else {
+            run.activity.as_str()
+        };
+        let label = if doing.is_empty() {
             format!("subagent {}", run.id)
         } else {
-            format!("subagent {}: {}", run.id, run.activity)
+            format!("subagent {}: {doing}", run.id)
         };
         rows.push((label, columns));
     }

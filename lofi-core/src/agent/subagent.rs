@@ -175,8 +175,19 @@ struct Entry {
 /// What a running child is doing, for the one-line row its parent shows.
 /// The response is named by the start of its first line: the tail still
 /// streams, and a row that followed it would scroll as the child writes.
+/// A run that names nothing keeps the line it named last: a child that
+/// thinks, or a tool whose input has not arrived, must not blank the row.
 #[derive(Debug, Default)]
-enum Activity {
+struct Activity {
+    /// What the run is doing now.
+    now: Current,
+    /// The last line the run named, shown while `now` names nothing.
+    last: String,
+}
+
+/// What a run does at one moment. `Idle` names nothing.
+#[derive(Debug, Default)]
+enum Current {
     /// Nothing to name: the child is thinking, or its answer is the tail of
     /// the previous round.
     #[default]
@@ -189,12 +200,34 @@ enum Activity {
 }
 
 impl Activity {
+    fn note(&mut self, event: &AgentEvent) {
+        self.now.note(event);
+        let line = self.now.line();
+        if !line.is_empty() {
+            self.last = line;
+        }
+    }
+
+    /// The row's text: what the run names now, or the last line it named.
+    fn line(&self) -> String {
+        let line = self.now.line();
+        if line.is_empty() {
+            self.last.clone()
+        } else {
+            line
+        }
+    }
+}
+
+impl Current {
     /// Longest first line kept. The row clips anyway; the bound only keeps a
     /// single-paragraph answer from filling memory.
     const LINE_CAP: usize = 160;
 
     fn note(&mut self, event: &AgentEvent) {
         match event {
+            // A tool names itself once its input arrives. Until then, and
+            // while the child thinks, the row keeps the last line.
             AgentEvent::ToolStart { .. } => *self = Self::Idle,
             AgentEvent::ToolInput { label, .. } => {
                 let label = label.as_deref().unwrap_or_default();
@@ -240,7 +273,8 @@ impl Activity {
         }
     }
 
-    /// The row's text: an exec description, or the start of the response.
+    /// The line this state names: an exec description, or the start of the
+    /// response.
     fn line(&self) -> String {
         match self {
             Self::Idle => String::new(),
@@ -3183,14 +3217,24 @@ mod activity_line {
     }
 
     #[test]
-    fn a_new_round_replaces_the_previous_answer() {
+    fn a_thinking_round_keeps_the_last_line() {
         let mut activity = Activity::default();
         activity.note(&AgentEvent::Text("the first answer".to_string()));
         activity.note(&tool_start());
-        assert_eq!(activity.line(), "");
+        assert_eq!(activity.line(), "the first answer");
         activity.note(&exec(Some("Map the parser")));
+        assert_eq!(activity.line(), "Exec: Map the parser");
+        activity.note(&AgentEvent::Thinking("weighing the lexer".to_string()));
         assert_eq!(activity.line(), "Exec: Map the parser");
         activity.note(&AgentEvent::Text("the second answer".to_string()));
         assert_eq!(activity.line(), "the second answer");
+    }
+
+    #[test]
+    fn a_blank_first_chunk_keeps_the_last_line() {
+        let mut activity = Activity::default();
+        activity.note(&exec(Some("Map the parser")));
+        activity.note(&AgentEvent::Text("\n  ".to_string()));
+        assert_eq!(activity.line(), "Exec: Map the parser");
     }
 }

@@ -120,6 +120,14 @@ fn a_subagent_row_shows_what_the_run_is_doing_and_drops_it_before_the_model() {
 }
 
 #[test]
+fn a_subagent_row_shows_the_task_until_the_run_names_something() {
+    let a = app();
+    let run = running_subagent("");
+    let row = &block_rows(&a, 90, &[], std::slice::from_ref(&run), &[])[0];
+    assert!(row.contains("subagent ab12: survey the parser"), "{row}");
+}
+
+#[test]
 fn a_timer_row_names_its_schedule_and_the_time_left() {
     let a = app();
     let rows = block_rows(
