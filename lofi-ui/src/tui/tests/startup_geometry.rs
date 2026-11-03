@@ -458,3 +458,28 @@ fn turn_of(a: &App, line: usize) -> usize {
     }
     cur
 }
+
+/// The ticket: a submit from a scrolled-up view left the new content below the
+/// viewport, so the user did not see what they had just submitted.
+#[test]
+fn a_submitted_prompt_is_on_screen_right_away() {
+    let mut a = resumed_with_estimates(40);
+    let _ = draw(&mut a);
+    a.pinned = false;
+    a.top_line = 0;
+    let _ = draw(&mut a);
+    assert!(
+        a.log_off + a.log_view_h < a.log_total,
+        "the fixture must start scrolled up"
+    );
+
+    a.set_input("submitted right now".to_string());
+    let mut run = None;
+    handle_event(&plain_key(KeyCode::Enter), &mut a, None, &mut run);
+
+    let (rows, _) = draw(&mut a);
+    assert!(
+        rows.contains("submitted right now"),
+        "the submitted prompt must be on screen:\n{rows}"
+    );
+}

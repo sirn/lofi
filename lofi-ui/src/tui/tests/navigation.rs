@@ -1181,3 +1181,52 @@ fn mouse_wheel_scrolls_the_inline_detail_under_the_pointer() {
 
     assert_eq!(a.expanded_details[&key].scroll, Some(1));
 }
+
+/// A submit while a run is active queues the prompt into the transcript tail.
+/// From a scrolled-up view the prompt would land below the viewport, so the
+/// submit pins the view to the newest line like the idle submit path does.
+#[tokio::test(flavor = "current_thread")]
+async fn submit_during_a_run_pins_a_scrolled_up_view() {
+    let mut a = app();
+    push_turn(&mut a);
+    a.pinned = false;
+    a.top_line = 0;
+    a.log_off = 0;
+    a.log_total = 50;
+    a.log_view_h = 10;
+    a.set_input("queued while running".to_string());
+    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+    let mut run = Some(RunHandle {
+        handle: tokio::spawn(std::future::pending()),
+        rx,
+        cancel: Arc::new(AtomicBool::new(false)),
+        preempt: Arc::new(AtomicBool::new(false)),
+        session_cursor: Arc::new(std::sync::Mutex::new(None)),
+        user_shell: None,
+    });
+
+    handle_event(&plain_key(KeyCode::Enter), &mut a, None, &mut run);
+
+    assert_eq!(a.prompt_queue.len(), 1);
+    assert!(a.pinned, "a queued submit must land on the newest line");
+    run.take().unwrap().handle.abort();
+}
+
+/// The no-model submit pushes its turn directly, with no run to pin the view.
+#[test]
+fn submit_without_a_model_pins_a_scrolled_up_view() {
+    let mut a = app();
+    push_turn(&mut a);
+    a.pinned = false;
+    a.top_line = 0;
+    a.log_off = 0;
+    a.log_total = 50;
+    a.log_view_h = 10;
+    a.set_input("no model here".to_string());
+    let mut run = None;
+
+    handle_event(&plain_key(KeyCode::Enter), &mut a, None, &mut run);
+
+    assert_eq!(a.transcript.turns.len(), 2);
+    assert!(a.pinned, "a pushed turn must land on the newest line");
+}

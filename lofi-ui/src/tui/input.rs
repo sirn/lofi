@@ -108,6 +108,9 @@ pub(super) fn handle_event(
             if let Some(r) = current_run {
                 r.preempt.store(true, std::sync::atomic::Ordering::Relaxed);
             }
+            // The queued prompt renders in the transcript tail; a scrolled-up
+            // view would leave it below the viewport.
+            app.pin_to_latest();
             return;
         }
         KeyCode::Enter if current_run.is_none() && !app.input.is_empty() => {
@@ -134,6 +137,7 @@ pub(super) fn handle_event(
                         turn.blocks.push(Block::Error(hint.clone()));
                     }
                 }
+                app.pin_to_latest();
                 return;
             };
             spawn_agent_run(
@@ -342,7 +346,8 @@ fn install_run(app: &mut App, current_run: &mut Option<RunHandle>, run: RunHandl
             .unwrap_or(&app.model_label)
             .clone(),
     );
-    app.pinned = true;
+    // A scrolled-up view must follow the turn this submit starts.
+    app.pin_to_latest();
 }
 
 fn spawn_agent_run(
@@ -567,6 +572,7 @@ pub(super) fn spawn_prompt(
                 .clone()
                 .map_or_else(Vec::new, |hint| vec![Block::Error(hint)]),
         });
+        app.pin_to_latest();
         return;
     };
     spawn_agent_run(app, current_run, agent, Some(prompt), kind);
