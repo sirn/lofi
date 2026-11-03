@@ -2750,3 +2750,51 @@ fn resumed_notice_turn_keeps_its_notice_marker() {
     tui.wait_for("notice acknowledged", WAIT);
     tui.wait_for("\u{258E} job", WAIT);
 }
+
+/// A compaction that lands after a queued prompt popped belongs to the turn it
+/// summarized. The marker must show there, and it must survive the freeze of
+/// the turns around it.
+#[test]
+fn auto_compaction_after_a_queue_pop_marks_the_summarized_turn() {
+    let server = MockServer::start(vec![
+        text_response_with_usage("PRIOR ONE", 10),
+        text_response_with_usage("PRIOR TWO", 10),
+        text_response_with_usage("PRIOR THREE", 10),
+        text_response_with_usage("LONG TURN ANSWER", 500),
+        text_response("STEER ANSWER"),
+    ]);
+    let fixture = Fixture::new(&server);
+    fixture.enable_auto_compaction(40);
+    let mut tui = fixture.spawn(&[]);
+    for (prompt, answer) in [
+        ("prior one", "PRIOR ONE"),
+        ("prior two", "PRIOR TWO"),
+        ("prior three", "PRIOR THREE"),
+    ] {
+        tui.submit(prompt);
+        tui.wait_for(answer, WAIT);
+    }
+    tui.submit("long turn prompt");
+    tui.wait_for("Working for", WAIT);
+    tui.submit("steer prompt");
+    tui.wait_for("LONG TURN ANSWER", WAIT);
+    tui.wait_for("STEER ANSWER", WAIT);
+    tui.wait_for("Compacted", WAIT);
+
+    let screen = tui.screen_text();
+    let marker = screen.find("Compacted").unwrap();
+    assert!(
+        screen.find("LONG TURN ANSWER").unwrap() < marker,
+        "the marker left the compacted turn:\n{screen}"
+    );
+    assert!(
+        screen.find("steer prompt").unwrap() > marker,
+        "the marker drifted onto the popped turn:\n{screen}"
+    );
+
+    // The marker is durable: a resumed transcript shows it too.
+    tui.submit("/quit");
+    tui.wait_exit();
+    let mut tui = fixture.spawn(&["--continue"]);
+    tui.wait_for("Compacted", WAIT);
+}

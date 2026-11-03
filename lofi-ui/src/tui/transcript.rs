@@ -257,7 +257,16 @@ impl Transcript {
             .get(previous)
             .is_some_and(Option::is_some)
         {
-            self.turns[previous].blocks.clear();
+            // A compaction marker lands after the turn's committed byte range,
+            // so re-materializing this turn from disk would drop it. Keep the
+            // live blocks that carry it; the turn then renders from memory.
+            let carries_marker = self.turns[previous]
+                .blocks
+                .iter()
+                .any(|block| matches!(block, Block::Compaction { .. }));
+            if !carries_marker {
+                self.turns[previous].blocks.clear();
+            }
         }
     }
 

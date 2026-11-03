@@ -374,14 +374,7 @@ impl App {
                 self.context_pressure = true;
                 return;
             }
-            AgentEvent::Compaction { .. } => {
-                // A compaction marker (live or replayed). The context
-                // gauge's last reading reflects the pre-compaction fill;
-                // drop it so the gauge shows "c" and waits for the next
-                // round's real (smaller) usage.
-                self.reset_compaction_gauges();
-                self.compacted = true;
-            }
+            AgentEvent::Compaction { .. } => self.mark_compacted(),
             _ => {}
         }
         // `UserShellStart` (live) opens the standalone turn; a finished
@@ -582,11 +575,6 @@ impl App {
 
 impl App {
     fn render_compaction(&mut self, compaction: &lofi_core::Compaction) {
-        let event = AgentEvent::Compaction {
-            summarized: compaction.summarized_count,
-            kept: compaction.kept_count,
-            summary: compaction.summary.clone(),
-        };
         if self.transcript.turns.is_empty() {
             self.transcript.push_turn(Turn {
                 prompt: String::new(),
@@ -594,20 +582,42 @@ impl App {
                 blocks: Vec::new(),
             });
         }
+        // The marker belongs to the turn the compaction ended: the last
+        // file-backed one. A queued prompt may already have popped and pushed an
+        // empty live shell in front of it; a marker appended there describes a
+        // turn the compaction never summarized, and the shell's freeze drops it.
+        let target = self
+            .transcript
+            .turn_byte_ranges
+            .iter()
+            .rposition(Option::is_some)
+            .unwrap_or(self.transcript.turns.len().saturating_sub(1));
         // A file-backed turn renders from disk on demand; appending the
         // compaction marker to its empty live shell would make that lone block
         // the turn's entire live content, so the renderer stops re-reading the
         // real response from disk and the transcript collapses to just the
         // marker. Hydrate the turn first so the marker appends to, rather than
         // replaces, the visible content.
-        let last = self.transcript.turns.len().saturating_sub(1);
-        let hydrated = (*self.materialize_turn(last)).clone();
-        if let Some(turn) = self.transcript.turns.get_mut(last) {
+        let hydrated = (*self.materialize_turn(target)).clone();
+        if let Some(turn) = self.transcript.turns.get_mut(target) {
             turn.blocks = hydrated.blocks;
+            turn.blocks.push(Block::Compaction {
+                summarized: compaction.summarized_count,
+                kept: compaction.kept_count,
+                summary: compaction.summary.clone(),
+            });
         }
-        self.apply_event(event);
+        self.mark_compacted();
         self.bump_render_epoch();
         self.debug_sample("compaction");
+    }
+
+    /// A compaction marker is in the transcript. The context gauge's last
+    /// reading reflects the pre-compaction fill; drop it so the gauge shows "c"
+    /// and waits for the next round's real (smaller) usage.
+    fn mark_compacted(&mut self) {
+        self.reset_compaction_gauges();
+        self.compacted = true;
     }
 
     fn start_lifecycle_operation(&mut self, operation: LifecycleOperation) -> bool {
