@@ -233,7 +233,14 @@ impl App {
                 byte_start,
                 byte_end,
             } => {
-                self.transcript.merge_last_turn_range(byte_start, byte_end);
+                // A round reaches the transcript before the prompt event that
+                // opens the next turn: core commits the previous round, then
+                // records the prompt. While the prompt event is outstanding,
+                // those bytes belong to the turn before the pushed shell, and
+                // attaching them to the shell would lose its prompt row.
+                let pending = usize::from(self.pending_prompt_start);
+                let idx = self.transcript.turns.len().saturating_sub(1 + pending);
+                self.transcript.merge_turn_range(idx, byte_start, byte_end);
                 if let Some(turn) = self.transcript.turns.last_mut() {
                     for block in &mut turn.blocks {
                         if let Block::Tool(tool) = block {
@@ -260,7 +267,8 @@ impl App {
                 // The just-finished turn is now durably in the transcript
                 // file over this byte range. Record it so the turn becomes
                 // file-backed when the next prompt freezes it.
-                self.transcript.merge_last_turn_range(byte_start, byte_end);
+                let idx = self.transcript.turns.len().saturating_sub(1);
+                self.transcript.merge_turn_range(idx, byte_start, byte_end);
                 return;
             }
             AgentEvent::ModelReported { id, display } => {

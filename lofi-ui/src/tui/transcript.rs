@@ -314,8 +314,8 @@ impl Transcript {
         }
     }
 
-    pub(super) fn merge_last_turn_range(&mut self, byte_start: u64, byte_end: u64) {
-        let Some(range) = self.turn_byte_ranges.last_mut() else {
+    pub(super) fn merge_turn_range(&mut self, idx: usize, byte_start: u64, byte_end: u64) {
+        let Some(range) = self.turn_byte_ranges.get_mut(idx) else {
             return;
         };
         let merged = match *range {
@@ -329,7 +329,6 @@ impl Transcript {
         // The turn grew on disk. A materialization taken from the earlier,
         // shorter range holds only the rows committed by then, so a live turn
         // that had no blocks yet would keep rendering that stale shell.
-        let idx = self.turns.len().saturating_sub(1);
         self.collapsed_turns.get_mut().remove(idx);
     }
 

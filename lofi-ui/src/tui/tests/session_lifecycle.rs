@@ -115,6 +115,47 @@ fn standalone_user_shell_keeps_turn_backing_metadata_aligned() {
     );
 }
 
+/// Core commits the finished round, then records the new prompt and
+/// announces it. The commit therefore reaches the UI while the submitted
+/// shell is already pushed, and it belongs to the turn before it: attaching
+/// it to the shell made the shell render from a range that starts inside the
+/// previous answer, which dropped the user's own row until the first delta.
+#[test]
+fn a_round_published_before_the_prompt_event_belongs_to_the_previous_turn() {
+    let mut a = app();
+    a.apply_event(AgentEvent::Prompt {
+        kind: lofi_types::PromptKind::User,
+        prompt: "first".into(),
+    });
+    a.apply_event(AgentEvent::Text("answer".into()));
+    a.apply_event(AgentEvent::TurnCommitted {
+        byte_start: 10,
+        byte_end: 20,
+    });
+
+    a.begin_prompt_turn("second".into(), lofi_types::PromptKind::User);
+    a.apply_event(AgentEvent::RoundCommitted {
+        byte_start: 20,
+        byte_end: 30,
+    });
+    assert_eq!(a.transcript.turn_byte_ranges[0], Some((10, 30)));
+    assert_eq!(a.transcript.turn_byte_ranges[1], None);
+    assert!(
+        !a.needs_durable_materialize(1),
+        "the submitted shell keeps rendering its prompt row"
+    );
+
+    a.apply_event(AgentEvent::Prompt {
+        kind: lofi_types::PromptKind::User,
+        prompt: "second".into(),
+    });
+    a.apply_event(AgentEvent::RoundCommitted {
+        byte_start: 30,
+        byte_end: 40,
+    });
+    assert_eq!(a.transcript.turn_byte_ranges[1], Some((30, 40)));
+}
+
 #[test]
 fn user_shell_streams_into_one_turn_and_finalizes_in_place() {
     let mut a = app();

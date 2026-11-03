@@ -470,6 +470,86 @@ fn cleared_file_backed_turn_still_renders_its_content() {
     );
 }
 
+/// Regression: a submit pushes its shell turn at once, and core then commits
+/// the previous round before it records the prompt. While that commit is
+/// merged into the shell, the shell renders from a range that starts inside
+/// the previous answer, whose first parsed turn carries no prompt — so the
+/// user's own row vanished until the first delta landed in memory.
+#[test]
+fn a_submitted_shell_keeps_its_prompt_row_when_the_prior_round_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store::SessionStore::new(dir.path().join("s"));
+    let cursor = store
+        .create_cursor(std::path::Path::new("/x"), &"m".into())
+        .unwrap();
+    let path = cursor.path().to_path_buf();
+
+    let put = |events: &mut Vec<SessionEvent>| {
+        test_append_events(&path, events, None).unwrap();
+    };
+    put(&mut vec![SessionEvent {
+        id: String::new(),
+        parent_id: None,
+        kind: SessionEventKind::Message(Message {
+            origin: None,
+            role: Role::User,
+            blocks: vec![ContentBlock::Text {
+                text: "prompt 1".to_string(),
+            }],
+            kind: PromptKind::default(),
+        }),
+    }]);
+    for i in 0..3 {
+        put(&mut vec![SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(Message {
+                origin: None,
+                role: Role::Assistant,
+                blocks: vec![ContentBlock::Text {
+                    text: format!("agent round {i}"),
+                }],
+                kind: PromptKind::default(),
+            }),
+        }]);
+    }
+
+    let mut a = app();
+    attach_session_sink(
+        &mut a,
+        store.clone(),
+        std::path::Path::new("/x"),
+        store::SessionCursor::open(path).unwrap(),
+    );
+    let c0 = a.session.cursor.as_ref().unwrap().clone();
+    let snap = c0.snapshot().unwrap();
+    a.restore_indexed_session(
+        &c0,
+        &snap.index,
+        snap.file_size,
+        snap.history_start,
+        snap.contiguous,
+    )
+    .unwrap();
+    a.lifecycle
+        .restore_history(&c0, &snap.index, snap.history_start)
+        .unwrap();
+    let (start, end) = a.transcript.turn_byte_ranges[0].unwrap();
+
+    a.begin_prompt_turn("prompt 2".into(), PromptKind::User);
+    a.apply_event(AgentEvent::RoundCommitted {
+        byte_start: start + 1,
+        byte_end: end,
+    });
+
+    assert_eq!(
+        a.transcript.turn_byte_ranges[1], None,
+        "the prior round must not back the submitted shell"
+    );
+    assert!(!a.needs_durable_materialize(1));
+    assert_eq!(a.materialize_turn(1).prompt, "prompt 2");
+}
+
 /// A frozen turn taller than the line cache must not re-render its window on
 /// every frame. Rendering one window walks the whole turn, so a tall turn in
 /// view cost a full walk per frame and made a submit appear to hang.
