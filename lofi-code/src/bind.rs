@@ -80,6 +80,7 @@ fn bind_subagent_tool<'js>(
         ("subagentSpawn", SubagentOp::Spawn, false),
         ("subagentStatus", SubagentOp::Status, false),
         ("subagentList", SubagentOp::List, false),
+        ("subagentUsage", SubagentOp::Usage, false),
         ("subagentWait", SubagentOp::Wait, true),
         ("subagentRead", SubagentOp::Read, false),
         ("subagentKill", SubagentOp::Kill, false),

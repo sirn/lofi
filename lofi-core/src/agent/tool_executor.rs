@@ -546,6 +546,76 @@ impl ToolExecutor {
                         >
                 }) as lofi_code::ApproveDirFn
             });
+            // Children this call starts report their spend in the call's own
+            // result, so a fan-out reads its cost from the value it already
+            // gets back. The hook stays the session's; this wrapper records
+            // what the call started, and asks that same hook to fold the runs
+            // it spawned.
+            let child_spend = Arc::new(Mutex::new(ChildSpend::default()));
+            let subagent: Option<lofi_code::SubagentFn> = self.subagent.clone().map(|hook| {
+                let spend = child_spend.clone();
+                Arc::new(move |op: lofi_code::SubagentOp, args: serde_json::Value| {
+                    let hook = hook.clone();
+                    let spend = spend.clone();
+                    Box::pin(async move {
+                        // A resume installs the new run's totals over the
+                        // entry's, so the spend of the background run this
+                        // call started is read before the hook replaces it.
+                        let replaced = match op {
+                            lofi_code::SubagentOp::Run => {
+                                let id = args.get("id").and_then(serde_json::Value::as_str);
+                                let ours = id.filter(|id| {
+                                    lock(&spend).spawned.iter().any(|kept| kept == id)
+                                });
+                                match ours {
+                                    Some(id) => Some(
+                                        hook(
+                                            lofi_code::SubagentOp::Status,
+                                            serde_json::json!({ "id": id }),
+                                        )
+                                        .await,
+                                    ),
+                                    None => None,
+                                }
+                            }
+                            _ => None,
+                        };
+                        let out = hook(op, args).await;
+                        let mut spend = lock(&spend);
+                        match op {
+                            // Only an admitted spawn returns an id.
+                            lofi_code::SubagentOp::Spawn => {
+                                if let Some(id) = out.get("id").and_then(serde_json::Value::as_str)
+                                {
+                                    spend.spawned.push(id.to_string());
+                                    spend.claimed.push(id.to_string());
+                                }
+                            }
+                            // A run body names its model and a rejection body
+                            // does not. Every run body that reports usage was
+                            // billed, completed or not.
+                            lofi_code::SubagentOp::Run if out.get("model").is_some() => {
+                                // The resume left the entry holding only this
+                                // run, so the run it replaced is priced from
+                                // the snapshot and stops being a child to fold.
+                                if let Some(replaced) = &replaced {
+                                    spend.add_run(replaced);
+                                }
+                                if let Some(id) = out.get("id").and_then(serde_json::Value::as_str)
+                                {
+                                    spend.forget(id);
+                                }
+                                spend.add_run(&out);
+                            }
+                            _ => {}
+                        }
+                        out
+                    })
+                        as std::pin::Pin<
+                            Box<dyn std::future::Future<Output = serde_json::Value> + Send>,
+                        >
+                }) as lofi_code::SubagentFn
+            });
             let exec_ctx = ExecCtx {
                 root: self.root.clone(),
                 tmp_dir: self.tmp_dir.clone(),
@@ -576,7 +646,7 @@ impl ToolExecutor {
                 timers: self.timers.clone(),
                 job_owner: self.job_owner.clone(),
                 on_job_acquired: on_job_acquired.clone(),
-                subagent: self.subagent.clone(),
+                subagent: subagent.clone(),
                 models: self.models.clone(),
             };
             let outcome = self
@@ -591,6 +661,39 @@ impl ToolExecutor {
                     },
                 )
                 .await;
+            // Fold the runs this call spawned through the session hook; a
+            // background child that is still running reports what it spent so
+            // far. The runs it awaited carried their own spend already.
+            let spend = lock(&child_spend).clone();
+            let subagent_usage = match &self.subagent {
+                Some(hook) if !spend.is_empty() => {
+                    let folded = if spend.spawned.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            hook(
+                                lofi_code::SubagentOp::Usage,
+                                serde_json::json!({ "ids": spend.spawned.clone() }),
+                            )
+                            .await,
+                        )
+                    };
+                    Some(spend.record(folded.as_ref()))
+                }
+                _ => None,
+            };
+            // The registry drops the records this call priced, so a long
+            // session does not keep spend nobody folds again. It runs even
+            // when the fold above had nothing to add: the claim outlives it.
+            if let Some(hook) = &self.subagent {
+                if !spend.claimed.is_empty() {
+                    hook(
+                        lofi_code::SubagentOp::Release,
+                        serde_json::json!({ "ids": spend.claimed.clone() }),
+                    )
+                    .await;
+                }
+            }
             // A tool may return a tagged image (`read` on an image file).
             // Upgrade it to a `ToolResultImage` carried on this result block,
             // so the model sees the image in the same round as the result on
@@ -611,6 +714,9 @@ impl ToolExecutor {
                             if has_value {
                                 output.insert("value".into(), value);
                             }
+                            if let Some(usage) = &subagent_usage {
+                                output.insert("subagents".into(), usage.clone());
+                            }
                             if !r.logs.is_empty() {
                                 output.insert("logs".into(), serde_json::Value::String(r.logs));
                             }
@@ -621,10 +727,21 @@ impl ToolExecutor {
                                 .unwrap_or_else(|_| "{\"ok\":true}".to_string());
                             (cap_exec_result(&content), is_error, img)
                         }
-                        Err(error) => (cap_exec_result(&error.to_string()), true, None),
+                        Err(error) => (
+                            cap_exec_result(&failed_result(
+                                &error.to_string(),
+                                subagent_usage.as_ref(),
+                            )),
+                            true,
+                            None,
+                        ),
                     }
                 }
-                Err(e) => (cap_exec_result(&e.to_string()), true, None),
+                Err(e) => (
+                    cap_exec_result(&failed_result(&e.to_string(), subagent_usage.as_ref())),
+                    true,
+                    None,
+                ),
             };
             if is_error {
                 // A rejected guest promise can short-circuit concurrent native
@@ -813,6 +930,61 @@ async fn approve_outside_dir(
         dir: approval.dir,
         access,
     })
+}
+
+/// Child spend of one exec call: the runs it spawned, which the session
+/// hook folds at the end, and the spend of the foreground runs it awaited,
+/// which their own results carried.
+#[derive(Clone, Default)]
+struct ChildSpend {
+    spawned: Vec<String>,
+    /// Every id this call started, including the ones a resume priced from
+    /// their own body: the call releases all of them when it ends.
+    claimed: Vec<String>,
+    awaited: super::subagent::Rollup,
+}
+
+impl ChildSpend {
+    /// Take one run body's usage. A resume replaces its entry's totals, so the
+    /// body is the only place that run's spend survives.
+    fn add_run(&mut self, body: &serde_json::Value) {
+        if let Some(usage) = body.get("usage") {
+            self.awaited.add_usage(usage);
+        }
+    }
+
+    /// Drop a spawned run from the fold: its spend is priced here instead.
+    fn forget(&mut self, id: &str) {
+        self.spawned.retain(|kept| kept != id);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.spawned.is_empty() && self.awaited.is_empty()
+    }
+
+    /// The result's `subagents` record: the session's fold of the spawned
+    /// runs plus the runs this call awaited itself.
+    fn record(&self, folded: Option<&serde_json::Value>) -> serde_json::Value {
+        let mut total = self.awaited.clone();
+        if let Some(folded) = folded {
+            total.merge(folded);
+        }
+        total.json()
+    }
+}
+
+/// The failed body of an exec result. A program that threw after its
+/// children spent money still reports that spend.
+fn failed_result(message: &str, subagents: Option<&serde_json::Value>) -> String {
+    match subagents {
+        Some(usage) => serde_json::json!({
+            "ok": false,
+            "errors": [message],
+            "subagents": usage,
+        })
+        .to_string(),
+        None => message.to_string(),
+    }
 }
 
 #[cfg(test)]

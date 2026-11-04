@@ -737,6 +737,71 @@ async fn settled_run_spend_folds_into_session_totals() {
 }
 
 #[tokio::test]
+async fn usage_rollup_folds_each_retained_entry() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let child = |input_tokens: u64, output_tokens: u64| {
+        vec![
+            StreamingEvent::TextDelta("sub result".to_string()),
+            StreamingEvent::Done {
+                usage: Usage {
+                    input_tokens,
+                    output_tokens,
+                    ..Usage::default()
+                },
+                stop_reason: None,
+            },
+        ]
+    };
+    let provider = Arc::new(MockProvider::recording(vec![
+        child(11, 7),
+        child(5, 3),
+        child(9, 4),
+    ]));
+    let mut agent = agent_with(vec![], dir.path()).with_subagent_support(support(dir.path()));
+    agent.provider = provider;
+    let hook = agent.subagent_hook().unwrap();
+
+    let first = hook(SubagentOp::Run, json!({ "prompt": "a" })).await;
+    let first_id = first["id"].as_str().unwrap().to_string();
+    let _ = hook(SubagentOp::Run, json!({ "prompt": "b" })).await;
+
+    let all = hook(SubagentOp::Usage, json!({})).await;
+    assert_eq!(all["ok"], json!(true), "{all}");
+    assert_eq!(all["runs"], json!(2), "{all}");
+    assert_eq!(all["input_tokens"], json!(16), "{all}");
+    assert_eq!(all["output_tokens"], json!(10), "{all}");
+    assert_eq!(all["cache_read_tokens"], json!(0), "{all}");
+    assert!(all["cost"].as_f64().is_some(), "{all}");
+
+    // A named id narrows the fold; one that no entry holds is reported, not
+    // failed: entries are evicted at capacity.
+    let one = hook(
+        SubagentOp::Usage,
+        json!({ "ids": [first_id, first_id, "no-such-run"] }),
+    )
+    .await;
+    assert_eq!(one["runs"], json!(1), "a repeated id counts once: {one}");
+    assert_eq!(one["input_tokens"], json!(11), "{one}");
+    assert_eq!(one["missing"], json!(["no-such-run"]), "{one}");
+
+    // A resume replaces the entry's totals, so the entry reports the run it
+    // holds now.
+    let again = hook(SubagentOp::Run, json!({ "id": first_id, "prompt": "more" })).await;
+    assert_eq!(again["ok"], json!(true), "{again}");
+    let resumed = hook(SubagentOp::Usage, json!({ "ids": [first_id] })).await;
+    assert_eq!(resumed["runs"], json!(1), "{resumed}");
+    assert_eq!(resumed["input_tokens"], json!(9), "{resumed}");
+    let all = hook(SubagentOp::Usage, json!({})).await;
+    assert_eq!(all["input_tokens"], json!(14), "{all}");
+
+    let bad = hook(SubagentOp::Usage, json!({ "ids": "x" })).await;
+    assert_eq!(bad["ok"], json!(false), "{bad}");
+    assert_eq!(bad["status"], json!("failed"), "{bad}");
+}
+
+#[tokio::test]
 async fn background_run_survives_a_per_turn_runtime() {
     let _env = env_lock();
     let _state = StateEnv::new();

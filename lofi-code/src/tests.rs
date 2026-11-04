@@ -1008,6 +1008,43 @@ async fn exec_mailbox_ops_reach_the_hook() {
 }
 
 #[tokio::test]
+async fn exec_usage_op_reaches_the_hook() {
+    let dir = tempdir().unwrap();
+    let mut c = ctx(dir.path());
+    c.subagent = Some(Arc::new(|op, args| {
+        Box::pin(async move {
+            let name = match op {
+                SubagentOp::Usage => "usage",
+                _ => "other",
+            };
+            json!({ "ok": true, "op": name, "ids": args.get("ids") })
+        })
+    }));
+    let res = exec(
+        "const u = await lofi.subagentUsage({ ids: ['a', 'b'] });\n         return [u.op, u.ids];",
+        &c,
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.value, json!(["usage", ["a", "b"]]), "{res:?}");
+}
+
+#[tokio::test]
+async fn exec_usage_without_hook_reports_unavailable() {
+    let dir = tempdir().unwrap();
+    let res = exec(
+        "return await lofi.subagentUsage({});",
+        &ctx(dir.path()),
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.value["ok"], json!(false), "{res:?}");
+    assert_eq!(res.value["status"], json!("unavailable"), "{res:?}");
+}
+
+#[tokio::test]
 async fn exec_models_lists_choices() {
     let dir = tempdir().unwrap();
     let mut c = ctx(dir.path());

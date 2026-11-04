@@ -517,6 +517,37 @@ List this session's subagent runs, oldest first.
 **Returns:** `{ ok, entries: [{ id, status, session_id? }], cursor? }`.
 `cursor` is present while more entries remain.
 
+## lofi.subagentUsage({ ids? })
+
+Fold the spend of this session's subagent runs into one record, so a
+fan-out reports a total instead of summing child usage by hand.
+
+**Parameters:**
+- `ids` (array of string, optional) — fold only these runs. Omit it to
+  fold every run of the session. An id no entry holds is listed in
+  `missing` rather than failing the call: a rehydrated session restores
+  only some of its runs, and an id from another session is unknown here.
+  An evicted run stays priced by id until the exec that spawned it ends;
+  after that, and for a run started with `lofi.subagent`, a fold with
+  `ids` lists it in `missing`. A fold without `ids` always counts it, and
+  a fold never removes a record.
+
+**Returns:** `{ ok, runs, input_tokens, output_tokens, cache_read_tokens,
+cache_write_tokens, cost, missing? }`. `runs` counts the entries that
+reported usage; a run whose provider never reported it contributes
+nothing. An entry keeps the spend of its latest run: a resume replaces the
+previous run's totals, so the entry reports only what that run spent. A
+run still in flight reports what it has spent so far. Each run's own
+`usage` in its result stays available for debugging.
+
+The same fold arrives without a call: an exec result carries `subagents`
+with these fields when the program it ran started any child, describing
+the children that exec call started. A rejected resume started nothing, so
+it adds nothing; a program that threw after its children spent money keeps
+the fold in its failed result. A foreground child that was billed and then
+failed, timed out, or stopped at its budget is in the fold too. A child the
+cancel of the exec interrupts is not: read it with `lofi.subagentUsage`.
+
 ## lofi.subagentWait({ id, timeout_ms? })
 
 Wait for a background subagent to reach a terminal state. A wait timeout

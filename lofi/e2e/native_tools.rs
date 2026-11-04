@@ -1,6 +1,6 @@
 use crate::support::{
-    process_is_alive, text_response, tool_response, transcript_text, wait_for_process_exit,
-    Fixture, MockServer, ProcessGuard, WAIT,
+    process_is_alive, text_response, text_response_with_usage, tool_response, transcript_text,
+    wait_for_process_exit, Fixture, MockServer, ProcessGuard, WAIT,
 };
 
 #[test]
@@ -98,6 +98,308 @@ return {
     ] {
         assert!(transcript.contains(&format!(r#""name":"{tool}""#)));
     }
+}
+
+#[test]
+fn the_exec_result_carries_the_spend_of_its_children() {
+    // The parent asks for one child; the child's round reports usage, so the
+    // parent's tool result folds it without a second call from the guest.
+    let server = MockServer::start(vec![
+        tool_response(
+            "child-spend-call",
+            r#"const out = await lofi.subagent({ prompt: "child task" });
+return out.result;"#,
+        ),
+        text_response_with_usage("child answer", 40),
+        text_response("parent answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let output = fixture.output(&["--print", "spawn a child"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3, "parent call, child call, parent close");
+    let second: serde_json::Value = serde_json::from_str(&requests[2].body).unwrap();
+    let messages = second["messages"].as_array().unwrap();
+    let result = messages
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .expect("tool result message");
+    let result: serde_json::Value =
+        serde_json::from_str(result["content"].as_str().unwrap()).unwrap();
+    assert_eq!(result["value"], "child answer", "{result}");
+    let spend = &result["subagents"];
+    assert_eq!(spend["runs"].as_u64(), Some(1), "{result}");
+    assert_eq!(spend["input_tokens"].as_u64(), Some(40), "{result}");
+    assert_eq!(spend["output_tokens"].as_u64(), Some(3), "{result}");
+}
+
+/// The last tool result the request carries, parsed back into JSON.
+fn last_tool_result(request: &serde_json::Value) -> serde_json::Value {
+    let messages = request["messages"].as_array().expect("messages");
+    let content = messages
+        .iter()
+        .rfind(|message| message["role"] == "tool")
+        .expect("tool result message")["content"]
+        .as_str()
+        .expect("tool result text");
+    serde_json::from_str(content).expect("tool result json")
+}
+
+#[test]
+fn a_failed_program_keeps_the_spend_of_its_children() {
+    // The guest throws after its child was billed. The failed result still
+    // carries that spend, so a caller is not blind to what it cost.
+    let server = MockServer::start(vec![
+        tool_response(
+            "child-throw-call",
+            r#"await lofi.subagent({ prompt: "child task" });
+throw new Error("guest failure");"#,
+        ),
+        text_response_with_usage("child answer", 40),
+        text_response("parent answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let output = fixture.output(&["--print", "throw after a child"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3, "parent call, child call, parent close");
+    let close: serde_json::Value = serde_json::from_str(&requests[2].body).unwrap();
+    let result = last_tool_result(&close);
+    assert_eq!(result["ok"], serde_json::json!(false), "{result}");
+    assert_eq!(
+        result["subagents"]["input_tokens"].as_u64(),
+        Some(40),
+        "{result}"
+    );
+}
+
+#[test]
+fn a_rejected_resume_adds_no_spend_to_the_next_exec() {
+    // The first call prices a child. The second tries to resume it with an
+    // argument a resume rejects: no run started, so it reports no spend.
+    let server = MockServer::start(vec![
+        tool_response(
+            "child-first-call",
+            r#"const out = await lofi.subagent({ prompt: "child task" });
+await lofi.write({ path: "child-id.txt", text: out.id });
+return out.result;"#,
+        ),
+        text_response_with_usage("child answer", 40),
+        tool_response(
+            "child-reject-call",
+            r#"const id = (await lofi.read("child-id.txt")).content.trim();
+const bad = await lofi.subagent({ id, prompt: "again", model: "no/such" });
+return bad.error;"#,
+        ),
+        text_response("parent answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let output = fixture.output(&["--print", "spawn then resume"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 4, "two parent turns around one child");
+    let first: serde_json::Value = serde_json::from_str(&requests[2].body).unwrap();
+    let first = last_tool_result(&first);
+    assert_eq!(first["subagents"]["runs"].as_u64(), Some(1), "{first}");
+    assert_eq!(
+        first["subagents"]["input_tokens"].as_u64(),
+        Some(40),
+        "{first}"
+    );
+    let second: serde_json::Value = serde_json::from_str(&requests[3].body).unwrap();
+    let second = last_tool_result(&second);
+    assert!(
+        second.get("subagents").is_none(),
+        "the rejected resume started nothing: {second}"
+    );
+}
+
+#[test]
+fn a_child_that_stopped_at_its_budget_is_still_priced() {
+    // The budget cuts the child off mid-run, so its body is a failure that
+    // carries the tokens it already spent. The exec that awaited it reports
+    // that spend, because a fan-out pays for a failed run too.
+    let server = MockServer::start(vec![
+        tool_response(
+            "child-budget-call",
+            r#"const out = await lofi.subagent({ prompt: "child task", token_budget: 10 });
+return "done";"#,
+        ),
+        text_response_with_usage("child answer", 40),
+        text_response("parent answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let output = fixture.output(&["--print", "spend a child budget"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3, "parent call, child call, parent close");
+    let close: serde_json::Value = serde_json::from_str(&requests[2].body).unwrap();
+    let result = last_tool_result(&close);
+    assert_eq!(
+        result["subagents"]["runs"].as_u64(),
+        Some(1),
+        "the failed child still costs a run: {result}"
+    );
+    assert_eq!(
+        result["subagents"]["input_tokens"].as_u64(),
+        Some(40),
+        "{result}"
+    );
+}
+
+#[test]
+fn a_resumed_background_child_prices_both_of_its_runs() {
+    // The background run's spend lives in its registry entry, and the resume
+    // replaces it. The exec result must still report both runs.
+    let server = MockServer::start(vec![
+        tool_response(
+            "child-resume-call",
+            r#"const spawned = await lofi.subagentSpawn({ prompt: "child task" });
+await lofi.subagentWait({ id: spawned.id });
+await lofi.subagent({ id: spawned.id, prompt: "more" });
+return "done";"#,
+        ),
+        text_response_with_usage("child answer", 40),
+        text_response_with_usage("child answer again", 7),
+        text_response("parent answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let output = fixture.output(&["--print", "resume a background child"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = server.requests();
+    assert_eq!(
+        requests.len(),
+        4,
+        "parent call, two child runs, parent close"
+    );
+    let close: serde_json::Value = serde_json::from_str(&requests[3].body).unwrap();
+    let result = last_tool_result(&close);
+    assert_eq!(result["subagents"]["runs"].as_u64(), Some(2), "{result}");
+    assert_eq!(
+        result["subagents"]["input_tokens"].as_u64(),
+        Some(47),
+        "{result}"
+    );
+}
+
+#[test]
+fn more_children_than_the_registry_holds_are_all_priced() {
+    // The registry keeps 64 entries and evicts the oldest settled one to make
+    // room. The exec still prices every child it started, because the spend of
+    // an evicted run is kept for the fold.
+    let script = r#"const first = (await lofi.subagentSpawn({ prompt: "child task" })).id;
+await lofi.subagentWait({ id: first });
+for (let i = 1; i < 65; i++) {
+  const spawned = await lofi.subagentSpawn({ prompt: "child task" });
+  await lofi.subagentWait({ id: spawned.id });
+}
+await lofi.write({ path: "first.txt", text: first });
+const gone = await lofi.subagentStatus({ id: first });
+const peek = await lofi.subagentUsage({ ids: [first] });
+return JSON.stringify({ gone: gone.ok, peek: peek.runs, usage: await lofi.subagentUsage() });"#;
+    // A later exec folds the same session: the claim is gone with the first
+    // exec, so only a fold without ids still counts the evicted runs.
+    let later = r#"const first = (await lofi.read("first.txt")).content.trim();
+const all = await lofi.subagentUsage();
+const byId = await lofi.subagentUsage({ ids: [first] });
+return JSON.stringify({ all, byId });"#;
+    let mut scripted = vec![tool_response("child-many-call", script)];
+    scripted.extend((0..65).map(|_| text_response_with_usage("child answer", 40)));
+    scripted.push(tool_response("child-usage-call", later));
+    scripted.push(text_response("parent answer"));
+    let server = MockServer::start(scripted);
+    let fixture = Fixture::new(&server);
+    let output = fixture.output(&["--print", "spawn more children than the registry holds"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = server.requests();
+    assert_eq!(
+        requests.len(),
+        68,
+        "parent call, 65 child runs, a second exec, parent close"
+    );
+    let close: serde_json::Value = serde_json::from_str(&requests[66].body).unwrap();
+    let result = last_tool_result(&close);
+    assert_eq!(
+        result["subagents"]["runs"].as_u64(),
+        Some(65),
+        "an evicted child still costs a run: {result}"
+    );
+    assert_eq!(
+        result["subagents"]["input_tokens"].as_u64(),
+        Some(65 * 40),
+        "{result}"
+    );
+    // The run itself is gone: the 65th spawn evicted it.
+    let returned: serde_json::Value =
+        serde_json::from_str(result["value"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        returned["gone"], false,
+        "the oldest child is evicted: {returned}"
+    );
+    // A fold by the program reads the evicted run without taking it.
+    assert_eq!(
+        returned["peek"].as_u64(),
+        Some(1),
+        "the program can still price the evicted child: {returned}"
+    );
+    // Without ids the fold counts it too.
+    assert_eq!(returned["usage"]["runs"].as_u64(), Some(65), "{returned}");
+    assert_eq!(
+        returned["usage"]["input_tokens"].as_u64(),
+        Some(65 * 40),
+        "{returned}"
+    );
+
+    // Past its exec, the evicted run keeps only its place in the session
+    // total: the session has it, a by-id fold does not.
+    let second: serde_json::Value = serde_json::from_str(&requests[67].body).unwrap();
+    let second = last_tool_result(&second);
+    let after: serde_json::Value = serde_json::from_str(second["value"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        after["all"]["runs"].as_u64(),
+        Some(65),
+        "the session total keeps the evicted run: {after}"
+    );
+    assert_eq!(
+        after["all"]["input_tokens"].as_u64(),
+        Some(65 * 40),
+        "{after}"
+    );
+    assert_eq!(
+        after["byId"]["missing"].as_array().map(Vec::len),
+        Some(1),
+        "a later by-id fold reports the evicted run as missing: {after}"
+    );
 }
 
 #[test]

@@ -434,6 +434,9 @@ pub struct SubagentRegistry {
     /// Parent session id whose transcripts were already rehydrated into
     /// entries. Restart restore runs once per parent; `clear()` resets it.
     rehydrated_for: Arc<Mutex<Option<String>>>,
+    /// Spend of entries evicted to make room, held until the fold of the
+    /// exec that spawned them reads it.
+    retired: Arc<Mutex<Retired>>,
     /// Parent/child messaging. Shared by every child exec, which reaches it
     /// through a scoped capability rather than this registry.
     pub(crate) mailbox: Mailbox,
@@ -463,6 +466,7 @@ impl Default for SubagentRegistry {
             host_handle,
             notices,
             rehydrated_for: Arc::default(),
+            retired: Arc::default(),
             mailbox,
         }
     }
@@ -705,6 +709,7 @@ impl SubagentRegistry {
             }
             entries.clear();
         }
+        lock(&self.retired).clear();
         self.mailbox.close_children("session cleared");
         let mut unreported = lock(&self.unreported);
         let usage = std::mem::take(&mut *unreported);
@@ -1234,6 +1239,8 @@ async fn dispatch(
         SubagentOp::Spawn => spawn(&template, &support, &registry, &args).await,
         SubagentOp::Status => status_op(&registry, &args),
         SubagentOp::List => list_op(&registry, &args),
+        SubagentOp::Usage => usage_op(&registry, &args),
+        SubagentOp::Release => release_op(&registry, &args),
         SubagentOp::Wait => wait_op(&registry, args).await,
         SubagentOp::Read => read_op(&registry, &args),
         SubagentOp::Kill => kill_op(&registry, &args),
@@ -1438,6 +1445,160 @@ fn list_op(registry: &SubagentRegistry, args: &Value) -> Value {
         out["cursor"] = json!(cursor.to_string());
     }
     out
+}
+
+/// `subagentUsage`: fold the spend of this session's runs into one record.
+/// `ids` narrows the fold to the named runs; without it every entry and
+/// every evicted run counts.
+/// An entry holds its latest run's spend, so a resumed run reports only its
+/// own tokens.
+/// A run the provider never billed contributes nothing. An evicted entry's
+/// spend is folded from `retired`. An id in neither place is reported as
+/// `missing` instead of failing the call: a rehydrated session restores only
+/// some of its runs, and an id from another session is unknown here.
+fn usage_op(registry: &SubagentRegistry, args: &Value) -> Value {
+    let ids = match id_list(args) {
+        Ok(ids) => ids,
+        Err(out) => return out,
+    };
+    let entries = lock(&registry.entries);
+    let mut rollup = Rollup::default();
+    let mut missing = Vec::new();
+    match ids {
+        None => {
+            entries.values().for_each(|entry| rollup.add(entry));
+            let total = lock(&registry.retired).total.json();
+            rollup.merge(&total);
+        }
+        Some(ids) => {
+            let retired = lock(&registry.retired);
+            let mut seen = std::collections::HashSet::new();
+            for id in ids {
+                // A caller that builds the list by concatenation repeats ids.
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+                if let Some(entry) = entries.get(&id) {
+                    rollup.add(entry);
+                } else if let Some(spend) = retired.spend.get(&id) {
+                    rollup.merge(spend);
+                } else {
+                    missing.push(id);
+                }
+            }
+        }
+    }
+    let mut out = rollup.json();
+    out["ok"] = json!(true);
+    if !missing.is_empty() {
+        out["missing"] = json!(missing);
+    }
+    out
+}
+
+/// `ids` as the caller gave it: absent or null means "every run".
+fn id_list(args: &Value) -> std::result::Result<Option<Vec<String>>, Value> {
+    match args.get("ids") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(items)) => {
+            let mut ids = Vec::with_capacity(items.len());
+            for item in items {
+                let Some(id) = item.as_str() else {
+                    return Err(ids_error());
+                };
+                ids.push(id.to_string());
+            }
+            Ok(Some(ids))
+        }
+        Some(_) => Err(ids_error()),
+    }
+}
+
+fn ids_error() -> Value {
+    json!({
+        "ok": false,
+        "status": "failed",
+        "error": "ids must be an array of strings",
+    })
+}
+
+/// Internal counterpart of the fold: drop the spend records of the runs an
+/// exec just priced. No guest binding produces this op, so a fold by the
+/// model cannot take a record the spawning exec still needs.
+fn release_op(registry: &SubagentRegistry, args: &Value) -> Value {
+    let ids = match id_list(args) {
+        Ok(Some(ids)) => ids,
+        Ok(None) => Vec::new(),
+        Err(out) => return out,
+    };
+    lock(&registry.retired).release(&ids);
+    json!({ "ok": true })
+}
+
+/// Spend of one run: its terminal record once it settled, else the live
+/// totals of a run still in flight. A rehydrated entry has only the record.
+fn entry_usage(entry: &Entry) -> Option<Value> {
+    entry
+        .outcome
+        .as_ref()
+        .and_then(|outcome| outcome.get("usage").cloned())
+        .or_else(|| entry.totals.as_ref().and_then(|totals| lock(totals).json()))
+}
+
+/// Sum of the runs `subagentUsage` folds, and of the child spend an exec
+/// result reports.
+#[derive(Clone, Default)]
+pub(super) struct Rollup {
+    runs: u64,
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+    cost: f64,
+}
+
+impl Rollup {
+    fn add(&mut self, entry: &Entry) {
+        if let Some(usage) = entry_usage(entry) {
+            self.add_usage(&usage);
+        }
+    }
+
+    /// Add one run's usage record as one run.
+    pub(super) fn add_usage(&mut self, usage: &Value) {
+        self.add_counts(usage, 1);
+    }
+
+    /// Add a record of this shape, keeping the run count it names.
+    pub(super) fn merge(&mut self, record: &Value) {
+        let runs = record.get("runs").and_then(Value::as_u64).unwrap_or(0);
+        self.add_counts(record, runs);
+    }
+
+    fn add_counts(&mut self, usage: &Value, runs: u64) {
+        let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+        self.runs += runs;
+        self.input += count("input_tokens");
+        self.output += count("output_tokens");
+        self.cache_read += count("cache_read_tokens");
+        self.cache_write += count("cache_write_tokens");
+        self.cost += usage.get("cost").and_then(Value::as_f64).unwrap_or(0.0);
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.runs == 0
+    }
+
+    pub(super) fn json(&self) -> Value {
+        json!({
+            "runs": self.runs,
+            "input_tokens": self.input,
+            "output_tokens": self.output,
+            "cache_read_tokens": self.cache_read,
+            "cache_write_tokens": self.cache_write,
+            "cost": self.cost,
+        })
+    }
 }
 
 async fn wait_op(registry: &SubagentRegistry, args: Value) -> Value {
@@ -2576,7 +2737,7 @@ async fn prepare(
             ))
             .into());
         }
-        evict_for_spawn(&mut entries)?;
+        evict_for_spawn(registry, &mut entries)?;
         let id = loop {
             let id = lofi_types::short_id(registry.ids.next());
             // A killed owner's job bar outlives its entry (its old worker
@@ -2587,6 +2748,12 @@ async fn prepare(
             }
         };
         registry.mailbox.open(&id);
+        // A spawned run is folded by its exec at the end, so its spend must
+        // survive eviction until then. A foreground run's body carries the
+        // spend to that exec already.
+        if notify {
+            lock(&registry.retired).claim(&id);
+        }
         let (state_tx, _) = watch::channel(Status::Running);
         entries.insert(
             id.clone(),
@@ -2816,9 +2983,53 @@ fn restore_entry(
     (id, entry)
 }
 
+/// Spend of evicted entries. `total` keeps every evicted run for a fold
+/// without ids; that sum never shrinks, so it answers the same after any
+/// fold. `spend` keeps a record only for a run in `claims`: a spawned run
+/// whose exec has not folded it yet. Any other run is priced already, by its
+/// own result or by its exec's fold, so only `total` counts it.
+#[derive(Default)]
+struct Retired {
+    claims: std::collections::HashSet<String>,
+    spend: HashMap<String, Value>,
+    total: Rollup,
+}
+
+impl Retired {
+    /// Register a run an exec started and will fold at its end.
+    fn claim(&mut self, id: &str) {
+        self.claims.insert(id.to_string());
+    }
+
+    fn keep(&mut self, id: String, spend: Value) {
+        self.total.merge(&spend);
+        if self.claims.contains(&id) {
+            self.spend.insert(id, spend);
+        }
+    }
+
+    /// Drop the records of runs an exec has folded.
+    fn release(&mut self, ids: &[String]) {
+        for id in ids {
+            self.claims.remove(id);
+            self.spend.remove(id);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.claims.clear();
+        self.spend.clear();
+        self.total = Rollup::default();
+    }
+}
+
 /// Make room for one more entry by evicting the terminal entry with the
-/// oldest stamp. Caller must hold the entries lock.
-fn evict_for_spawn(entries: &mut HashMap<String, Entry>) -> std::result::Result<(), RunRejection> {
+/// oldest stamp. Caller must hold the entries lock. The evicted run's spend
+/// stays in `retired`, because a caller that spawned it can still name it.
+fn evict_for_spawn(
+    registry: &SubagentRegistry,
+    entries: &mut HashMap<String, Entry>,
+) -> std::result::Result<(), RunRejection> {
     if entries.len() < MAX_ENTRIES {
         return Ok(());
     }
@@ -2829,7 +3040,11 @@ fn evict_for_spawn(entries: &mut HashMap<String, Entry>) -> std::result::Result<
         .map(|(key, _)| key.clone());
     match victim {
         Some(key) => {
-            entries.remove(&key);
+            if let Some(entry) = entries.remove(&key) {
+                let mut spend = Rollup::default();
+                spend.add(&entry);
+                lock(&registry.retired).keep(key, spend.json());
+            }
             Ok(())
         }
         None => Err(Error::Tool(format!(
@@ -3145,6 +3360,71 @@ mod mailbox_capability {
 
         let received = mailbox.receive(PARENT_ADDRESS, &json!({})).await;
         assert_eq!(received["messages"][0]["body"], "hi", "{received}");
+    }
+}
+
+#[cfg(test)]
+mod retired_spend {
+    use super::*;
+
+    // Eviction keeps a run's spend for a by-id fold and adds it to the
+    // session total, so a fan-out larger than the retention cap still prices
+    // every child and no fold changes what another one sees.
+    #[test]
+    fn an_evicted_run_is_priced_until_its_exec_releases_it() {
+        let registry = SubagentRegistry::default();
+        let ids: Vec<String> = (0..2000).map(|i| format!("child-{i}")).collect();
+        {
+            let mut retired = lock(&registry.retired);
+            for id in &ids {
+                retired.claim(id);
+                retired.keep(
+                    id.clone(),
+                    json!({ "runs": 1, "input_tokens": 40, "output_tokens": 3 }),
+                );
+            }
+        }
+
+        let by_id = usage_op(&registry, &json!({ "ids": ids.clone() }));
+        assert_eq!(by_id["runs"].as_u64(), Some(2000), "{by_id}");
+        assert_eq!(by_id["input_tokens"].as_u64(), Some(80_000), "{by_id}");
+        assert_eq!(by_id["output_tokens"].as_u64(), Some(6_000), "{by_id}");
+        assert!(by_id.get("missing").is_none(), "{by_id}");
+
+        // A fold is a read: the next one sees the same spend.
+        let again = usage_op(&registry, &json!({ "ids": ids.clone() }));
+        assert_eq!(again, by_id);
+
+        let all = usage_op(&registry, &json!({ "ids": Value::Null }));
+        assert_eq!(all["runs"].as_u64(), Some(2000), "{all}");
+        assert_eq!(all["input_tokens"].as_u64(), Some(80_000), "{all}");
+
+        // The exec that started them releases their records at its end.
+        release_op(&registry, &json!({ "ids": ids.clone() }));
+        assert!(lock(&registry.retired).spend.is_empty());
+        let after = usage_op(&registry, &json!({ "ids": ids }));
+        assert_eq!(after["runs"].as_u64(), Some(0), "{after}");
+        let session = usage_op(&registry, &json!({ "ids": Value::Null }));
+        assert_eq!(
+            session["runs"].as_u64(),
+            Some(2000),
+            "the session total keeps every evicted run: {session}"
+        );
+
+        // A run no exec claims needs no record: its spend is already in that
+        // exec's result, and only the session total still counts it.
+        {
+            let mut retired = lock(&registry.retired);
+            retired.keep(
+                "foreground".to_string(),
+                json!({ "runs": 1, "input_tokens": 5 }),
+            );
+            assert!(!retired.spend.contains_key("foreground"));
+        }
+        let session = usage_op(&registry, &json!({ "ids": Value::Null }));
+        assert_eq!(session["runs"].as_u64(), Some(2001), "{session}");
+        let by_id = usage_op(&registry, &json!({ "ids": ["foreground"] }));
+        assert_eq!(by_id["missing"], json!(["foreground"]), "{by_id}");
     }
 }
 

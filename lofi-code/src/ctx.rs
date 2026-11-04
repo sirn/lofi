@@ -34,6 +34,11 @@ pub enum SubagentOp {
     Status,
     /// `lofi.subagentList`.
     List,
+    /// `lofi.subagentUsage`: fold the spend of this session's runs.
+    Usage,
+    /// Internal: drop the spend records of runs the exec wrapper just
+    /// folded. No guest binding produces it.
+    Release,
     /// `lofi.subagentWait`: dropping the future aborts the wait, never the
     /// run.
     Wait,
