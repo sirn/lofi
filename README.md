@@ -37,6 +37,33 @@ See [End-to-end testing](docs/e2e.md) for the current coverage map, architecture
 | `-c`, `--continue` | Resume the most recent session for this workspace. |
 | `--resume <ID>` | Resume a specific session by id prefix. |
 | `--no-session` | Do not persist a transcript. |
+| `--summary <FILE>` | With `--print`, write one JSON record of the run to FILE. See [Run summary](#run-summary). |
+
+### Run summary
+
+`--print --summary <FILE>` writes one JSON object when the run ends.
+The text stream on stdout is unchanged.
+
+```sh
+lofi --print "Fix the failing test" --summary /tmp/run.json
+```
+
+The record holds `ok`, `status` (`completed`, `failed`, or
+`incomplete`), `model` (`provider`, `id`, `selected`, `thinking`,
+`service_tier`), `rounds`, `tool_calls`, `retries`, `usage` (`input_tokens`,
+`output_tokens`, `cache_read_tokens`, `cache_write_tokens`), `cost`,
+`subagents` (the same token fields plus `cost`), `stop_reason`,
+`duration_ms`, and `error`.
+`usage` adds up every round of the turn.
+`cost` is the turn's accumulated USD cost. It leaves out `subagents.cost`;
+add the two for the run's total spend.
+A run that fails writes its record too, even when setup fails before the
+first round, so a driver can budget a fleet of runs.
+`duration_ms` is the whole run, from process start to exit.
+A run that SIGINT or SIGTERM kills dies by that signal and writes no
+record. Do not read FILE after a signal kills the run: it can be empty,
+hold part of a record, or still hold what it held before the run.
+`--summary` without `--print` is rejected before the run starts.
 
 ### Subcommands
 

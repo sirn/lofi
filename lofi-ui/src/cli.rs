@@ -34,6 +34,9 @@ struct Cli {
     /// Do not persist a transcript
     #[arg(long)]
     no_session: bool,
+    /// Write one JSON record of the print-mode run to this file
+    #[arg(long, value_name = "FILE", requires = "print")]
+    summary: Option<std::path::PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -185,9 +188,17 @@ pub async fn run_cli() -> anyhow::Result<()> {
         .env
         .iter()
         .map(|spec| lofi_core::config_loader::parse_env_spec(spec))
-        .collect::<Result<Vec<_>, lofi_error::Error>>()
-        .map_err(anyhow::Error::new)?;
-    let _env_guard = lofi_core::config_loader::apply_env_specs(&env_pairs);
+        .collect::<Result<Vec<_>, lofi_error::Error>>();
+    // A print run records its own failure, so its spec error travels to the
+    // driver that writes the record instead of returning here.
+    let env_pairs = match (env_pairs, cli.print.is_some() && cli.command.is_none()) {
+        (Ok(pairs), _) => Some(pairs),
+        (Err(error), false) => return Err(error.into()),
+        (Err(_), true) => None,
+    };
+    let _env_guard = env_pairs
+        .as_ref()
+        .map(|pairs| lofi_core::config_loader::apply_env_specs(pairs));
 
     if let Some(command) = cli.command {
         run_command(command, &root).await?;
@@ -297,6 +308,9 @@ fn build_print_opts(cli: &Cli, prompt: String, root: std::path::PathBuf) -> Prin
     }
     if !cli.env.is_empty() {
         opts = opts.with_envs(cli.env.iter().map(String::as_str));
+    }
+    if let Some(path) = &cli.summary {
+        opts = opts.with_summary(path.clone());
     }
     opts
 }

@@ -6,8 +6,8 @@ use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 
 use crate::support::{
-    delayed_text_response, text_response, thinking_response, thinking_tool_response, tool_response,
-    Fixture, MockServer, WAIT,
+    delayed_text_response, stop_text_response, text_response, thinking_response,
+    thinking_tool_response, tool_response, Fixture, MockResponse, MockServer, WAIT,
 };
 
 #[test]
@@ -100,7 +100,16 @@ fn signal_during_print_mode_returns_the_signal_status() {
         Duration::from_secs(5),
     )]);
     let fixture = Fixture::new(&server);
-    let mut command = fixture.command(&["--print", "wait for signal"]);
+    // A kill after the run starts leaves the emptied file, not the stale
+    // record.
+    let path = fixture.workspace.join("signal-summary.json");
+    std::fs::write(&path, r#"{"ok":true,"stale":true}"#).unwrap();
+    let mut command = fixture.command(&[
+        "--print",
+        "wait for signal",
+        "--summary",
+        path.to_str().unwrap(),
+    ]);
     command.stdout(Stdio::null()).stderr(Stdio::null());
     let mut child = command.spawn().unwrap();
     let start = std::time::Instant::now();
@@ -111,6 +120,11 @@ fn signal_during_print_mode_returns_the_signal_status() {
     kill(Pid::from_raw(pid), Signal::SIGTERM).unwrap();
     let status = child.wait().unwrap();
     assert_eq!(status.signal(), Some(Signal::SIGTERM as i32));
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "",
+        "a killed run writes no record"
+    );
 }
 
 #[test]
@@ -183,6 +197,161 @@ fn print_mode_streams_text_and_reports_tool_calls_on_stderr() {
     assert!(requests[1].body.contains("answer"));
     assert!(requests[1].body.contains("42"));
     assert!(fixture.session_files().is_empty());
+}
+
+#[test]
+fn print_mode_writes_one_json_record_of_the_run() {
+    let server = MockServer::start(vec![stop_text_response("summary answer")]);
+    let fixture = Fixture::new(&server);
+    let path = fixture.workspace.join("run-summary.json");
+
+    let output = fixture.output(&[
+        "--print",
+        "summary prompt",
+        "--summary",
+        path.to_str().unwrap(),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("summary answer"), "{stdout:?}");
+    assert!(
+        !stdout.contains("stop_reason"),
+        "the record stays out of the text stream: {stdout:?}"
+    );
+
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(record["ok"], true, "{record}");
+    assert_eq!(record["status"], "completed", "{record}");
+    assert_eq!(record["model"]["provider"], "mock", "{record}");
+    assert_eq!(record["model"]["id"], "chat", "{record}");
+    assert_eq!(record["rounds"], 1, "{record}");
+    assert_eq!(record["tool_calls"], 0, "{record}");
+    assert_eq!(record["usage"]["input_tokens"], 5, "{record}");
+    assert_eq!(record["usage"]["output_tokens"], 3, "{record}");
+    assert_eq!(record["cost"], 0.0, "{record}");
+    assert_eq!(record["stop_reason"], "end_turn", "{record}");
+    assert!(record["duration_ms"].as_u64().is_some(), "{record}");
+}
+
+#[test]
+fn a_failed_print_run_still_writes_its_record() {
+    let server = MockServer::start(vec![MockResponse::error(400, "bad request marker")]);
+    let fixture = Fixture::new(&server);
+    let path = fixture.workspace.join("failed-summary.json");
+
+    let output = fixture.output(&[
+        "--print",
+        "failing prompt",
+        "--summary",
+        path.to_str().unwrap(),
+    ]);
+    assert!(!output.status.success(), "a provider error fails the run");
+
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(record["ok"], false, "{record}");
+    assert_eq!(record["status"], "failed", "{record}");
+    assert!(
+        record["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("bad request marker")),
+        "{record}"
+    );
+}
+
+#[test]
+fn a_setup_failure_still_writes_its_record() {
+    // The model never resolves, so the run has no events at all; the record
+    // still says what failed instead of leaving the last run's file in place.
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+    let path = fixture.workspace.join("setup-summary.json");
+    // A driver reuses one path, so the failed run must replace the record the
+    // last run left instead of letting it be read as this run's result.
+    std::fs::write(&path, r#"{"ok":true,"stale":true}"#).unwrap();
+
+    let output = fixture.output(&[
+        "--print",
+        "setup prompt",
+        "--model",
+        "no-such-provider/no-such-model",
+        "--summary",
+        path.to_str().unwrap(),
+    ]);
+    assert!(!output.status.success(), "an unknown model fails the run");
+
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(record["ok"], false, "{record}");
+    assert_eq!(record["status"], "failed", "{record}");
+    assert!(record["error"].as_str().is_some(), "{record}");
+    assert_eq!(record["model"], serde_json::Value::Null, "{record}");
+    assert!(record.get("stale").is_none(), "{record}");
+}
+
+#[test]
+fn a_failed_env_spec_still_writes_its_record() {
+    // The environment is parsed before the run opens the model; its error
+    // must reach the record, or a driver reads the last run's result.
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+    let path = fixture.workspace.join("env-summary.json");
+    std::fs::write(&path, r#"{"ok":true,"stale":true}"#).unwrap();
+
+    let output = fixture.output(&[
+        "--print",
+        "env prompt",
+        "--env",
+        "LOFI_E2E_UNSET_ENV_NAME",
+        "--summary",
+        path.to_str().unwrap(),
+    ]);
+    assert!(!output.status.success(), "an unset env name fails the run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("LOFI_E2E_UNSET_ENV_NAME"), "{stderr}");
+
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(record["ok"], false, "{record}");
+    assert_eq!(record["status"], "failed", "{record}");
+    assert!(record.get("stale").is_none(), "{record}");
+    assert!(
+        record["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("LOFI_E2E_UNSET_ENV_NAME")),
+        "{record}"
+    );
+}
+
+#[test]
+fn summary_without_print_is_rejected() {
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+    let path = fixture.workspace.join("unused-summary.json");
+
+    let output = fixture.output(&["--summary", path.to_str().unwrap()]);
+    assert!(
+        !output.status.success(),
+        "an interactive run rejects --summary"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("required arguments were not provided"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--print"), "{stderr}");
+    assert!(!path.exists(), "the rejected run wrote no record");
+
+    // A subcommand returns before any turn runs, so the flag is rejected at
+    // the parser instead of leaving an empty file behind.
+    let output = fixture.output(&["--summary", path.to_str().unwrap(), "models"]);
+    assert!(!output.status.success(), "a subcommand rejects --summary");
+    assert!(!path.exists(), "the rejected run wrote no record");
 }
 
 #[test]
@@ -538,6 +707,12 @@ context_window = 100000
     // A bare NAME that is unset in the parent is a config error before any
     // provider request.
     let missing = fixture.output(&["-e", "LOFI_E2E_DEFINITELY_UNSET", "models"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("LOFI_E2E_DEFINITELY_UNSET"));
+
+    // A subcommand runs instead of the print run, so it reports the error
+    // itself rather than leaving it to the record.
+    let missing = fixture.output(&["-p", "hi", "-e", "LOFI_E2E_DEFINITELY_UNSET", "models"]);
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("LOFI_E2E_DEFINITELY_UNSET"));
 }

@@ -6,6 +6,7 @@ use lofi_error::{Error, Result};
 use lofi_types::{ServiceTier, ThinkingLevel};
 
 mod cli;
+mod print_summary;
 pub mod tui;
 
 pub use cli::run_cli;
@@ -82,6 +83,8 @@ pub struct PrintOptions {
     pub model: Option<String>,
     pub backend: Option<String>,
     pub env: Vec<String>,
+    /// Where to write one JSON record of the run; `None` writes nothing.
+    pub summary: Option<PathBuf>,
 }
 
 impl PrintOptions {
@@ -94,6 +97,7 @@ impl PrintOptions {
             model: None,
             backend: None,
             env: Vec::new(),
+            summary: None,
         }
     }
 
@@ -112,6 +116,13 @@ impl PrintOptions {
     #[must_use]
     pub fn with_envs<'a>(mut self, envs: impl IntoIterator<Item = &'a str>) -> Self {
         self.env = envs.into_iter().map(str::to_string).collect();
+        self
+    }
+
+    /// Write one JSON record of the run to `path` when it ends.
+    #[must_use]
+    pub fn with_summary(mut self, path: impl Into<PathBuf>) -> Self {
+        self.summary = Some(path.into());
         self
     }
 }
@@ -355,9 +366,48 @@ fn resolve_session(opts: &InteractiveOptions) -> Result<tui::SessionConfig> {
 /// - `AgentEvent::Text` deltas go to stdout;
 /// - errors and tool markers go to stderr, so stdout stays pipeable.
 /// # Errors
-/// Propagates config, model resolution and turn errors.
-#[allow(clippy::too_many_lines)]
+/// Propagates config, model resolution and turn errors. A run that fails
+/// still writes its summary record.
 pub async fn run_print(opts: PrintOptions) -> Result<()> {
+    let started = std::time::Instant::now();
+    // Open the record before the run: a path that cannot be written must
+    // fail before the run costs anything.
+    let mut file = match &opts.summary {
+        Some(path) => Some(std::fs::File::create(path).map_err(|error| {
+            Error::State(format!("open the run summary {}: {error}", path.display()))
+        })?),
+        None => None,
+    };
+    // The consumer owns the only view of the run's events, and a setup
+    // failure has no events at all, so the record lives outside the turn.
+    // Both run on this task, so a plain cell suffices.
+    let summary = std::cell::RefCell::new(print_summary::PrintSummary::default());
+    let result = run_print_turn(&opts, &summary).await;
+    if let Some(file) = &mut file {
+        let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let mut record = summary.into_inner();
+        // The record is written for a failed run too: its spend and stop
+        // reason are what the caller most needs.
+        if let Err(error) = &result {
+            record.note_error(&error.to_string());
+        }
+        if let Err(error) = record.write(file, wall_ms) {
+            // A write failure must not hide the run's own error.
+            if result.is_ok() {
+                return Err(error);
+            }
+            eprintln!("error: {error}");
+        }
+    }
+    result
+}
+
+/// Runs one non-interactive turn and folds its events into `summary`.
+#[allow(clippy::too_many_lines)]
+async fn run_print_turn(
+    opts: &PrintOptions,
+    summary: &std::cell::RefCell<print_summary::PrintSummary>,
+) -> Result<()> {
     let env = env_pairs(&opts.env)?;
     let path = opts
         .config_path
@@ -379,6 +429,9 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
             .map(|name| format!("{name}/default"))
     });
     let agent = factory.open(query.as_deref(), executor).await?;
+    // The record names the model the agent settled on even when the run
+    // fails before its first round reports one.
+    summary.borrow_mut().set_model(agent.run_model());
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
 
@@ -414,6 +467,7 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
             let Some(ev) = rx.recv().await else {
                 break;
             };
+            summary.borrow_mut().note(&ev);
             let write_res: std::io::Result<()> = match ev {
                 AgentEvent::Text(delta) => stdout.write_all(delta.as_bytes()),
                 AgentEvent::Thinking(_)
@@ -492,26 +546,24 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
     // left to the `spawn_blocking` cap. On normal agent completion, drain
     // the consumer so buffered events flush before returning.
     tokio::pin!(agent_run, consumer);
-    tokio::select! {
+    // Neither branch returns early: a failed run still writes its record.
+    let result = tokio::select! {
         biased;
-        consumer_res = &mut consumer => {
-            match consumer_res {
-                Ok(()) => {
-                    (&mut agent_run).await?;
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            }
-        }
+        consumer_res = &mut consumer => match consumer_res {
+            Ok(()) => (&mut agent_run).await.map(|_| ()),
+            Err(e) => Err(e),
+        },
         agent_res = &mut agent_run => {
             // Agent finished and dropped tx; drain remaining events + flush.
             // Propagate the consumer result so a failed terminal write or
             // flush is not silently swallowed.
-            (&mut consumer).await?;
-            agent_res?;
-            Ok(())
+            match (&mut consumer).await {
+                Ok(()) => agent_res.map(|_| ()),
+                Err(e) => Err(e),
+            }
         }
-    }
+    };
+    result
 }
 
 #[cfg(test)]
