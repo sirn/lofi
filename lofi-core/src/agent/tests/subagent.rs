@@ -368,11 +368,13 @@ async fn timeout_rolls_back_the_unfinished_turn() {
             crate::session::store::IndexKind::SystemMessage,
             // The timed-out run's settle marker, at the rollback point.
             crate::session::store::IndexKind::RunSettled,
-            // The checkpoint keeps what that killed turn spent: no marker
-            // will ever report it.
+            // The resumed turn opens at its own boundary, before its prompt.
+            crate::session::store::IndexKind::TurnStarted,
+            // The checkpoint at admission keeps what a killed turn spent: no
+            // marker will ever report it.
             crate::session::store::IndexKind::TurnUsage,
             crate::session::store::IndexKind::UserPrompt,
-            // The resumed turn checkpoints at admission, then after its round.
+            // The round that follows checkpoints again.
             crate::session::store::IndexKind::TurnUsage,
             // The round reports its context fill before the answer lands.
             crate::session::store::IndexKind::ContextReported,

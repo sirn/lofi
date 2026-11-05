@@ -63,7 +63,7 @@ impl ConfirmResponse {
 mod agent_run;
 #[cfg(test)]
 use agent_run::assistant_announces_tool_intent;
-pub(crate) use agent_run::messages::MAX_REQUEST_IMAGE_BYTES;
+pub(crate) use agent_run::messages::{close_orphaned_tool_uses, MAX_REQUEST_IMAGE_BYTES};
 mod auto_mode;
 mod event;
 mod exec;

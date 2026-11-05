@@ -99,7 +99,7 @@ pub(in crate::agent) fn assistant_announces_tool_intent(message: &Message) -> bo
 /// cancel, closed channel). The fully-failed turn is truncated by the caller
 /// afterwards, so the synthesized results are dropped there; on a cancelled
 /// turn they are what keep the retained partial provider-valid.
-pub(in crate::agent) fn close_orphaned_tool_uses(messages: &mut Vec<Message>) {
+pub(crate) fn close_orphaned_tool_uses(messages: &mut Vec<Message>) {
     let Some(assistant_index) = messages.iter().rposition(|m| m.role == Role::Assistant) else {
         return;
     };

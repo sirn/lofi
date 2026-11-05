@@ -77,6 +77,8 @@ pub enum SessionRecord<'a> {
     NativeTools {
         records: Vec<NativeToolRecord>,
     },
+    /// The turn's start, written before its first prompt.
+    TurnStarted,
     /// Incremental turn suffix. Built only by [`SessionRecorder`].
     Turn(TurnBatch<'a>),
 }
@@ -86,7 +88,9 @@ pub struct TurnBatch<'a> {
     messages: &'a [Message],
     tool_elapsed: Vec<(&'a String, &'a u64)>,
     thinking_elapsed: &'a [u64],
-    terminal: Option<SessionEventKind>,
+    /// A settled turn's marker, boxed: the enum around it carries every record
+    /// kind, and an inline marker alone is most of a batch's size.
+    terminal: Option<Box<SessionEventKind>>,
     /// Spend so far, written with a mid-turn checkpoint and dropped for a
     /// terminal one: the marker carries the same numbers.
     usage: Option<UsageSnapshot>,
@@ -173,12 +177,29 @@ impl store::SessionCursor {
         Ok(())
     }
 
+    /// Mark the start of a turn before its first prompt, so a replay can
+    /// settle the spend of a turn that ended without a marker.
+    ///
+    /// # Errors
+    /// Propagates transcript serialization and I/O failures.
+    pub fn record_turn_started(&self) -> Result<()> {
+        self.record(SessionRecord::TurnStarted).map(|_| ())
+    }
+
     /// Persist one ordinary session record.
     ///
     /// # Errors
     /// Propagates transcript serialization and I/O failures.
     pub fn record(&self, record: SessionRecord<'_>) -> Result<(u64, u64)> {
         match record {
+            SessionRecord::TurnStarted => {
+                let mut events = [SessionEvent {
+                    id: String::new(),
+                    parent_id: None,
+                    kind: SessionEventKind::TurnStarted,
+                }];
+                self.append_events(&mut events)
+            }
             SessionRecord::ContextReported { context } => {
                 let mut events = [SessionEvent {
                     id: String::new(),
@@ -292,7 +313,7 @@ fn record_turn(cursor: &store::SessionCursor, batch: TurnBatch<'_>) -> Result<(u
         events.push(SessionEvent {
             id: String::new(),
             parent_id: None,
-            kind,
+            kind: *kind,
         });
     } else if let Some(snapshot) = batch.usage {
         events.push(SessionEvent {
@@ -434,14 +455,14 @@ impl SessionRecorder {
             return Ok(None);
         }
         let terminal = match outcome {
-            TurnOutcome::Finished => Some(SessionEventKind::TurnEnd {
+            TurnOutcome::Finished => Some(Box::new(SessionEventKind::TurnEnd {
                 model: self.model.clone(),
                 elapsed_ms: summary.elapsed_ms,
                 cost: summary.cost,
                 usage: summary.usage,
                 stop_reason: summary.stop_reason,
-            }),
-            TurnOutcome::Failed(error) => Some(SessionEventKind::TurnFailed {
+            })),
+            TurnOutcome::Failed(error) => Some(Box::new(SessionEventKind::TurnFailed {
                 model: self.model.clone(),
                 elapsed_ms: summary.elapsed_ms,
                 error: error.clone(),
@@ -450,13 +471,13 @@ impl SessionRecorder {
                 // The turn removed only the round that failed, and recorded
                 // that removal; everything it completed stays in the context.
                 keep_context: true,
-            }),
-            TurnOutcome::Cancelled => Some(SessionEventKind::TurnCancelled {
+            })),
+            TurnOutcome::Cancelled => Some(Box::new(SessionEventKind::TurnCancelled {
                 model: self.model.clone(),
                 elapsed_ms: summary.elapsed_ms,
                 cost: summary.cost,
                 usage: summary.usage,
-            }),
+            })),
             TurnOutcome::ContextPressure | TurnOutcome::Detached => None,
         };
         let discarded = self.flush_pending_discard()?;
@@ -481,7 +502,7 @@ impl SessionRecorder {
         &mut self,
         messages: &[Message],
         summary: &TurnSummary,
-        terminal: Option<SessionEventKind>,
+        terminal: Option<Box<SessionEventKind>>,
         usage: Option<UsageSnapshot>,
     ) -> Result<Option<(u64, u64)>> {
         let slice_from = self

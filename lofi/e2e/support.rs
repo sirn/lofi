@@ -1191,6 +1191,25 @@ impl Fixture {
         panic!("timed out waiting for the {text:?} prompt");
     }
 
+    /// Wait until the transcript holds this text anywhere. A test that kills
+    /// the process while a tool runs waits for the tool call this way: it is
+    /// durable before the tool starts.
+    pub fn wait_for_session_text(&self, text: &str) {
+        let start = Instant::now();
+        while start.elapsed() < WAIT {
+            let found = self
+                .session_files()
+                .iter()
+                .filter_map(|path| std::fs::read_to_string(path).ok())
+                .any(|body| body.contains(text));
+            if found {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!("timed out waiting for {text:?} in the transcript");
+    }
+
     pub fn session_files(&self) -> Vec<PathBuf> {
         let mut files = Vec::new();
         collect_files(&self.state.join("lofi").join("sessions"), &mut files);

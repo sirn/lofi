@@ -208,6 +208,10 @@ pub async fn run(
             break Ok(TurnOutcome::Detached);
         }
         if !opened {
+            // The turn's boundary is durable before anything it spends: a
+            // continuation has no prompt, so this marker is what a replay
+            // settles the previous turn's spend at.
+            io.record_turn_started()?;
             // One turn, one opening: the driver announces it at the first
             // prompt and publishes every boundary after that.
             for notice in &notices {

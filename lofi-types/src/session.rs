@@ -103,6 +103,12 @@ pub enum SessionEventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         leaf_id: Option<String>,
     },
+    /// A turn began, written before its first prompt. A replay settles there
+    /// the spend of a turn that ended without a marker — killed, or stopped at
+    /// the context cap — because a new turn with no prompt of its own (a
+    /// continuation, a notice that wakes the app) has no other boundary.
+    /// Invisible to the model and the transcript.
+    TurnStarted,
     Compaction {
         summary: String,
         first_kept_entry_id: String,

@@ -22,38 +22,70 @@ fn is_accounting(kind: store::IndexKind) -> bool {
     )
 }
 
-/// The offsets the gauges apply, in file order: every accounting record,
-/// except that a turn reports its spend once.
+/// The offsets the gauges apply, sorted: every accounting record, except that
+/// a turn reports its spend once.
 ///
 /// A terminal marker carries the whole turn and supersedes the snapshots its
 /// own checkpoints wrote, so it replaces them. A turn no marker settled — a
 /// process killed mid-turn wrote none — reports its last snapshot, which is
-/// all a resume has of what that turn cost.
+/// all a resume has of what that turn cost. The turn clock tells the two turns
+/// apart when no prompt separates them.
+///
+/// `records` holds the events of every accounting entry of `visible`, in that
+/// order; the sweep already read them.
 fn accounting_offsets(
     index: &[store::SessionIndexEntry],
     visible: &[usize],
     notices: &HashSet<usize>,
+    records: &[SessionEvent],
 ) -> Vec<u64> {
     let mut kept: Vec<u64> = Vec::new();
-    let mut snapshot: Option<u64> = None;
+    // The checkpoint held back so far: its turn clock and its offset.
+    let mut snapshot: Option<(u64, u64)> = None;
+    let mut record = 0usize;
     for (pos, &i) in visible.iter().enumerate() {
         let entry = &index[i];
+        if !is_accounting(entry.kind) {
+            // A turn start settles the snapshot of the turn before it, which
+            // never got its marker. A transcript written before that marker
+            // existed still has the prompt, but only a non-notice one: a
+            // notice is a display row of the turn it belongs to.
+            let opens_turn = match entry.kind {
+                store::IndexKind::TurnStarted => true,
+                store::IndexKind::UserPrompt => !notices.contains(&pos),
+                _ => false,
+            };
+            if opens_turn {
+                kept.extend(snapshot.take().map(|(_, offset)| offset));
+            }
+            continue;
+        }
+        let event = &records[record];
+        record += 1;
         match entry.kind {
-            store::IndexKind::TurnUsage => snapshot = Some(entry.offset),
+            store::IndexKind::TurnUsage => {
+                let SessionEventKind::TurnUsage { elapsed_ms, .. } = event.kind else {
+                    // The index writes this kind only for that event.
+                    continue;
+                };
+                if let Some((held_elapsed, held_offset)) = snapshot {
+                    if !lofi_core::session::replay::continues_turn(held_elapsed, elapsed_ms) {
+                        kept.push(held_offset);
+                    }
+                }
+                snapshot = Some((elapsed_ms, entry.offset));
+            }
             store::IndexKind::TurnEnd
             | store::IndexKind::TurnFailed
             | store::IndexKind::TurnCancelled => {
                 snapshot = None;
                 kept.push(entry.offset);
             }
-            // A prompt that is not a notice opens the next turn, which settles
-            // the snapshot of a turn that never got its marker.
-            store::IndexKind::UserPrompt if !notices.contains(&pos) => kept.extend(snapshot.take()),
-            kind if is_accounting(kind) => kept.push(entry.offset),
-            _ => {}
+            _ => kept.push(entry.offset),
         }
     }
-    kept.extend(snapshot);
+    kept.extend(snapshot.map(|(_, offset)| offset));
+    kept.sort_unstable();
     kept
 }
 
@@ -111,8 +143,19 @@ pub(super) fn replay_indexed_session(
         .collect();
     // Read every turn-outcome event in one sweep of the file: per-turn
     // `event_at` would open and seek the transcript once per turn — over a
-    // thousand opens on a long resume.
-    let applied_offsets = accounting_offsets(index, &visible, &notices);
+    // thousand opens on a long resume. Which of them the gauges apply is a
+    // question for the turn clock, so the read comes before the decision.
+    let candidates: Vec<u64> = visible
+        .iter()
+        .filter(|&&i| is_accounting(index[i].kind))
+        .map(|&i| index[i].offset)
+        .collect();
+    let mut records: Vec<SessionEvent> = Vec::with_capacity(candidates.len());
+    cursor.visit_events(&candidates, |ev| {
+        records.push(ev);
+        Ok(())
+    })?;
+    let applied_offsets = accounting_offsets(index, &visible, &notices, &records);
     let mut outcomes: Vec<SessionEvent> = Vec::with_capacity(applied_offsets.len());
     cursor.visit_events(&applied_offsets, |ev| {
         outcomes.push(ev);

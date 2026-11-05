@@ -555,6 +555,19 @@ impl TurnIo {
         Ok(range)
     }
 
+    /// Mark the turn's start before its first prompt. A replay settles there
+    /// the spend of a turn that ended without a marker, because the turn that
+    /// follows may have no prompt of its own.
+    pub fn record_turn_started(&self) -> Result<()> {
+        if !self.alive() {
+            return Ok(());
+        }
+        let Some(cursor) = self.cursor() else {
+            return Ok(());
+        };
+        cursor.record_turn_started()
+    }
+
     /// Hold a written range for the next publish.
     pub(crate) fn unpublish(&self, range: Option<(u64, u64)>) {
         let Some(range) = range else {

@@ -106,12 +106,25 @@ pub fn replay_selected_session_events(events: &[SessionEvent], emit: impl FnMut(
     replay_visible_events(&visible, emit);
 }
 
+/// Whether a checkpoint reporting `next_elapsed_ms` belongs to the turn whose
+/// previous checkpoint reported `held_elapsed_ms`.
+///
+/// The turn clock starts at zero with every turn, so a checkpoint that reports
+/// less elapsed time than the one before it opens a new turn. A turn that ends
+/// without a marker — killed, or stopped at the context cap — has no prompt to
+/// announce the next one, and this is all that separates them.
+#[must_use]
+pub fn continues_turn(held_elapsed_ms: u64, next_elapsed_ms: u64) -> bool {
+    next_elapsed_ms >= held_elapsed_ms
+}
+
 #[allow(clippy::too_many_lines)]
 fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEvent)) {
     // A checkpoint's spend stands for a turn no marker ended. The next turn
     // on the lineage is not the same turn, so it flushes this spend instead
-    // of overwriting it: a resumed run starts by checkpointing zero.
-    let mut unterminated: Option<(f64, Usage)> = None;
+    // of overwriting it: a resumed run starts by checkpointing zero. The
+    // elapsed time is what tells the two apart when no prompt separates them.
+    let mut unterminated: Option<(u64, f64, Usage)> = None;
     let mut tool_elapsed: Map<&str, u64> = Map::new();
     let mut native_by_parent: Map<&str, Vec<&NativeToolRecord>> = Map::new();
     let mut thinking_timing: Vec<u64> = Vec::new();
@@ -175,7 +188,7 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                     // settled here, before the new turn's own snapshots can
                     // replace what it spent.
                     if msg.kind != PromptKind::Notice {
-                        if let Some((cost, usage)) = unterminated.take() {
+                        if let Some((_, cost, usage)) = unterminated.take() {
                             emit(AgentEvent::TurnUsage { cost, usage });
                         }
                     }
@@ -293,6 +306,13 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                     usage: *usage,
                 });
             }
+            // A turn start settles the spend of a turn that ended without a
+            // marker: the new turn may have no prompt of its own.
+            SessionEventKind::TurnStarted => {
+                if let Some((_, cost, usage)) = unterminated.take() {
+                    emit(AgentEvent::TurnUsage { cost, usage });
+                }
+            }
             SessionEventKind::RoundDiscarded { .. }
             | SessionEventKind::NativeTool(_)
             | SessionEventKind::ToolTiming { .. }
@@ -315,7 +335,24 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                     summary: summary.clone(),
                 });
             }
-            SessionEventKind::TurnUsage { cost, usage, .. } => unterminated = Some((*cost, *usage)),
+            SessionEventKind::TurnUsage {
+                elapsed_ms,
+                cost,
+                usage,
+            } => {
+                // A turn that starts with no prompt — a continuation after the
+                // context cap, a notice that opens its own turn — restarts the
+                // turn clock. Settle the turn before it, or its spend is lost.
+                if let Some((held_elapsed, held_cost, held_usage)) = unterminated {
+                    if !continues_turn(held_elapsed, *elapsed_ms) {
+                        emit(AgentEvent::TurnUsage {
+                            cost: held_cost,
+                            usage: held_usage,
+                        });
+                    }
+                }
+                unterminated = Some((*elapsed_ms, *cost, *usage));
+            }
             SessionEventKind::TurnEnd {
                 model,
                 elapsed_ms,
@@ -367,7 +404,7 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
         }
     }
     // The last turn left no marker: report the spend its checkpoints kept.
-    if let Some((cost, usage)) = unterminated {
+    if let Some((_, cost, usage)) = unterminated {
         emit(AgentEvent::TurnUsage { cost, usage });
     }
 }
@@ -594,7 +631,13 @@ pub fn history_from_index(
         .rev()
         .map(|entry| entry.offset)
         .collect();
-    crate::lifecycle::history_from_cursor(cursor, &offsets)
+    let mut history = crate::lifecycle::history_from_cursor(cursor, &offsets)?;
+    // A run killed while a tool was busy left its tool call without a result,
+    // and a provider rejects that pairing. Close it before the resumed run
+    // sends the history. The repair stays in memory: a restore reads, and the
+    // next one repairs the same way.
+    crate::agent::close_orphaned_tool_uses(&mut history);
+    Ok(history)
 }
 
 #[must_use]
@@ -970,12 +1013,24 @@ mod tests {
         }
     }
 
+    fn turn_started() -> SessionEvent {
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::TurnStarted,
+        }
+    }
+
     fn turn_usage(cost: f64, input_tokens: u64) -> SessionEvent {
+        turn_usage_at(5, cost, input_tokens)
+    }
+
+    fn turn_usage_at(elapsed_ms: u64, cost: f64, input_tokens: u64) -> SessionEvent {
         SessionEvent {
             id: String::new(),
             parent_id: None,
             kind: SessionEventKind::TurnUsage {
-                elapsed_ms: 5,
+                elapsed_ms,
                 cost,
                 usage: Usage {
                     input_tokens,
@@ -1101,6 +1156,125 @@ mod tests {
             .collect();
         assert_eq!(killed.len(), 2, "{replayed:?}");
         assert!((killed[0] - 0.5).abs() < 1e-9 && (killed[1] - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_resumed_history_closes_the_tool_call_a_kill_left_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(
+            &path,
+            b"{\"type\":\"meta\",\"version\":1,\"created\":0,\"cwd\":\"\",\"model\":\"m\"}\n",
+        )
+        .unwrap();
+        let cursor = crate::session::store::SessionCursor::new(path, None);
+        let mut events = vec![
+            user_msg("go"),
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::Message(Message {
+                    origin: None,
+                    role: Role::Assistant,
+                    blocks: vec![ContentBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "bash".into(),
+                        input: serde_json::json!({ "cmd": "sleep 30" }),
+                    }],
+                    kind: PromptKind::default(),
+                }),
+            },
+        ];
+        cursor.append_events(&mut events).unwrap();
+        let snapshot = cursor.snapshot().unwrap();
+
+        let history = history_from_index(&cursor, &snapshot.index, snapshot.history_start).unwrap();
+
+        // No provider accepts a tool call with no result, so the restore pairs
+        // the call the killed process left open.
+        let last = history.last().unwrap();
+        assert_eq!(last.role, Role::Tool);
+        assert!(
+            matches!(
+                &last.blocks[0],
+                ContentBlock::ToolResult { tool_use_id, is_error: true, .. } if tool_use_id == "t1"
+            ),
+            "{:?}",
+            last.blocks
+        );
+    }
+
+    #[test]
+    fn a_turn_start_settles_the_spend_of_a_turn_with_no_marker() {
+        // A capped turn stops with no marker. The turn that follows has no
+        // prompt of its own, so the durable turn start is its only boundary.
+        let mut events = vec![
+            user_msg("go"),
+            assistant_msg("round one"),
+            turn_usage_at(9_000, 0.5, 40),
+            turn_started(),
+            assistant_msg("round two"),
+            turn_usage_at(300, 0.1, 10),
+            turn_end(),
+        ];
+        chain(&mut events);
+        let mut replayed = Vec::new();
+        replay_session_events(&events, |event| replayed.push(event));
+
+        let costs: Vec<f64> = replayed
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::TurnUsage { cost, .. } => Some(*cost),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(costs.len(), 1, "{replayed:?}");
+        assert!((costs[0] - 0.5).abs() < 1e-9, "{}", costs[0]);
+    }
+
+    #[test]
+    fn a_continuation_after_the_context_cap_keeps_the_capped_spend() {
+        // The capped turn stopped with no marker and wrote $0.50. The UI then
+        // compacts and continues: that turn has no prompt of its own, so only
+        // the turn clock shows it is a new one.
+        let mut events = vec![
+            user_msg("go"),
+            assistant_msg("round one"),
+            turn_usage_at(9_000, 0.5, 40),
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::Compaction {
+                    summary: "so far".into(),
+                    first_kept_entry_id: String::new(),
+                    summarized_range: [String::new(), String::new()],
+                    checkpointed_tail: false,
+                    summarized: 2,
+                    kept: 0,
+                    represented: 0,
+                },
+            },
+            assistant_msg("round two"),
+            turn_usage_at(400, 0.1, 10),
+            turn_end(),
+        ];
+        chain(&mut events);
+        let mut replayed = Vec::new();
+        replay_session_events(&events, |event| replayed.push(event));
+
+        let costs: Vec<f64> = replayed
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::TurnUsage { cost, .. } => Some(*cost),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            costs.len(),
+            1,
+            "the capped turn reports its spend: {replayed:?}"
+        );
+        assert!((costs[0] - 0.5).abs() < 1e-9, "{}", costs[0]);
     }
 
     #[test]

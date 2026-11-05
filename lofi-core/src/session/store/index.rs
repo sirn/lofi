@@ -135,6 +135,8 @@ pub enum IndexKind {
     TurnCancelled,
     /// Spend of a turn still in progress; a terminal marker replaces it.
     TurnUsage,
+    /// A turn began: the boundary a replay settles an unterminated turn at.
+    TurnStarted,
     Compaction,
     Cursor,
     /// `JobStarted` / `JobFinished` markers; lets reconciliation skip the
@@ -170,6 +172,7 @@ pub(super) fn index_kind(kind_type: &str, role: Option<&str>) -> IndexKind {
         "turn_failed" => IndexKind::TurnFailed,
         "turn_cancelled" => IndexKind::TurnCancelled,
         "turn_usage" => IndexKind::TurnUsage,
+        "turn_started" => IndexKind::TurnStarted,
         "compaction" => IndexKind::Compaction,
         "native_tool" => IndexKind::NativeTool,
         "cursor" => IndexKind::Cursor,
@@ -201,6 +204,7 @@ pub(super) fn index_kind_for_event(kind: &SessionEventKind) -> IndexKind {
         SessionEventKind::TurnFailed { .. } => IndexKind::TurnFailed,
         SessionEventKind::TurnCancelled { .. } => IndexKind::TurnCancelled,
         SessionEventKind::TurnUsage { .. } => IndexKind::TurnUsage,
+        SessionEventKind::TurnStarted => IndexKind::TurnStarted,
         SessionEventKind::Compaction { .. } => IndexKind::Compaction,
         SessionEventKind::NativeTool(_) => IndexKind::NativeTool,
         SessionEventKind::ContextReported { .. } => IndexKind::ContextReported,

@@ -442,6 +442,58 @@ fn print_mode_resumes_the_session_it_named() {
 }
 
 #[test]
+fn print_mode_resumes_a_run_killed_inside_a_tool() {
+    let server = MockServer::start(vec![
+        tool_response("killed-tool", "await lofi.sleep(10); return 'slept';"),
+        text_response("answer after the interrupted tool"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut child = fixture
+        .command(&["--print", "tool kill prompt", "--session"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // The tool call is durable before the tool runs, so this kill leaves a
+    // call with no result: no provider accepts that pairing.
+    fixture.wait_for_session_text("await lofi.sleep(10)");
+    kill(
+        Pid::from_raw(i32::try_from(child.id()).unwrap()),
+        Signal::SIGKILL,
+    )
+    .unwrap();
+    child.wait().unwrap();
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
+    let reported = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("session: "))
+        .expect("the killed run named its session")
+        .to_string();
+
+    let output = fixture.output(&["--print", "resumed after the tool", "--resume", &reported]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("answer after the interrupted tool"),
+        "{:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let resumed = &requests[1].body;
+    assert!(
+        resumed.contains("cancelled: tool run interrupted"),
+        "the restore pairs the call the kill left open: {resumed}"
+    );
+}
+
+#[test]
 fn print_mode_refuses_no_session_with_a_session_flag() {
     let server = MockServer::start(Vec::new());
     let fixture = Fixture::new(&server);
