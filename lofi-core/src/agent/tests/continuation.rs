@@ -264,6 +264,7 @@ async fn tool_stop_recovery_can_be_disabled() {
     .with_auto_continue(lofi_types::AutoContinuePolicy {
         lost_tool_call: false,
         intent: false,
+        byte_cap: true,
     });
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
@@ -306,6 +307,7 @@ async fn clean_stop_intent_continues_only_when_enabled() {
         lofi_types::AutoContinuePolicy {
             lost_tool_call: true,
             intent: true,
+            byte_cap: true,
         },
     );
     let (tx, _rx) = tokio::sync::mpsc::channel(64);

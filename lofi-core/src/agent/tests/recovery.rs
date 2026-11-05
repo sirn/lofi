@@ -559,3 +559,58 @@ async fn a_second_round_at_the_reply_budget_stops_the_turn() {
         "a second round at the budget ends the turn: {notices:?}"
     );
 }
+
+#[tokio::test]
+async fn a_disabled_byte_cap_ends_the_turn_at_the_first_cut() {
+    let dir = tempdir().unwrap();
+    let oversized = vec![StreamingEvent::ThinkingDelta(noisy_reasoning(
+        MAX_ROUND_BYTES + 1,
+        5,
+    ))];
+    let never_asked = vec![
+        StreamingEvent::TextDelta("should not run".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::EndTurn),
+        },
+    ];
+    let agent = agent_with(vec![oversized, never_asked], dir.path()).with_auto_continue(
+        lofi_types::AutoContinuePolicy {
+            byte_cap: false,
+            ..lofi_types::AutoContinuePolicy::default()
+        },
+    );
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), PromptKind::User),
+            tx,
+            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(messages
+        .iter()
+        .all(|message| message.role != Role::Assistant));
+    let notices: Vec<String> = messages
+        .iter()
+        .filter(|message| message.kind == PromptKind::Notice)
+        .filter_map(|message| match &message.blocks[0] {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].contains("byte budget"), "{notices:?}");
+    assert!(
+        !notices[0].contains("reply size limit"),
+        "a disabled cap asks for nothing: {notices:?}"
+    );
+}

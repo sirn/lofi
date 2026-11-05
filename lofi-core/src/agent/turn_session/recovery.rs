@@ -5,7 +5,7 @@
 //! not mean. Every transport reports the fact; only this file decides what to
 //! do about it.
 
-use lofi_types::{ContentBlock, Message, PromptKind, Role, StopReason};
+use lofi_types::{AutoContinuePolicy, ContentBlock, Message, PromptKind, Role, StopReason};
 
 pub(super) use super::super::THINKING_ONLY_CONTINUATION_PROMPT as THINKING_ONLY_PROMPT;
 use super::super::{
@@ -101,11 +101,23 @@ pub(super) fn handle_loop_detection(
 /// call. The round kept what the model wrote, so the turn asks once for a
 /// briefer answer. A second round at the budget stops the turn: asking again
 /// spends the run on a model that cannot say less.
-pub(super) fn handle_byte_budget(capped: bool, recovered: &mut bool) -> Option<RecoveryPlan> {
+pub(super) fn handle_byte_budget(
+    capped: bool,
+    policy: AutoContinuePolicy,
+    recovered: &mut bool,
+) -> Option<RecoveryPlan> {
     if !capped {
         return None;
     }
-    let (action, notice) = if *recovered {
+    let (action, notice) = if !policy.byte_cap {
+        (
+            RecoveryAction::Stop,
+            notice_message(format!(
+                "agent stopped: the reply exceeded the {} byte budget",
+                super::super::MAX_ROUND_BYTES
+            )),
+        )
+    } else if *recovered {
         (
             RecoveryAction::Stop,
             notice_message(format!(

@@ -344,6 +344,14 @@ immediate tool-related action, such as “I’ll run the tests next.” Its buil
 default is `false`. Enable it only for providers or models whose templates are
 known to lose tool calls.
 
+`byte_cap` recovers a round that the transport cut at its reply byte budget.
+It keeps the answer and the tool calls the round had already produced, drops
+the reasoning, and asks the model once for a brief answer.
+A round cut a second time ends the turn.
+Its built-in default is `true`; `false` ends the turn at the first cut.
+Signatures and redacted reasoning do not count toward the budget, because the
+model never reads them back.
+
 All automatic recovery paths share a budget of one continuation per user turn.
 The recovery prompt is stored as a notice-kind message, not as user-authored
 input.
@@ -395,7 +403,7 @@ Each `[providers.<name>]` table defines authentication, protocol routing, and it
 | `pricing_field_mappings` | table | standard `pricing.*` paths | Dot paths for discovered input, output, cache, and per-request prices. |
 | `api_types` | table | empty | Per-protocol endpoint paths and optional pricing mappings for a shared host. |
 | `auto_models` | table | none | Remote model discovery configuration. |
-| `auto_continue` | table | inherited | Provider-level `lost_tool_call` and `intent` overrides. |
+| `auto_continue` | table | inherited | Provider-level `lost_tool_call`, `intent`, and `byte_cap` overrides. |
 
 Supported protocols are:
 
@@ -489,7 +497,7 @@ output_price = 10.00
 | `cache_read_price` | number | USD per million cache-read tokens. |
 | `cache_write_price` | number | USD per million cache-write tokens. |
 | `per_request_price` | number | Flat USD cost per request. |
-| `auto_continue` | table | Model-level `lost_tool_call` and `intent` overrides. |
+| `auto_continue` | table | Model-level `lost_tool_call`, `intent`, and `byte_cap` overrides. |
 
 ### OpenAI Chat Completions example
 

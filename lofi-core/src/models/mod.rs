@@ -535,6 +535,7 @@ mod tests {
     fn auto_continue_policy_resolves_global_provider_and_model_fields() {
         let mut provider = pcfg(Api::OpenAiCompletions, models(&["m"]));
         provider.auto_continue.intent = Some(true);
+        provider.auto_continue.byte_cap = Some(false);
         provider
             .models
             .get_mut("m")
@@ -546,6 +547,7 @@ mod tests {
                 auto_continue: lofi_types::AutoContinueConfig {
                     lost_tool_call: Some(true),
                     intent: Some(false),
+                    byte_cap: None,
                 },
                 ..lofi_types::AgentConfig::default()
             },
@@ -559,6 +561,7 @@ mod tests {
             lofi_types::AutoContinuePolicy {
                 lost_tool_call: false,
                 intent: true,
+                byte_cap: false,
             }
         );
     }

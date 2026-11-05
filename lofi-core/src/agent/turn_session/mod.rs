@@ -329,7 +329,11 @@ pub async fn run(
                     );
                 }
                 if plan.is_none() {
-                    plan = handle_byte_budget(exchange.capped, &mut budget_recovered);
+                    plan = handle_byte_budget(
+                        exchange.capped,
+                        policy.auto_continue,
+                        &mut budget_recovered,
+                    );
                 }
                 if let Some(plan) = plan {
                     match repair_round(&mut driver_view, &io, messages, plan, &policy).await {

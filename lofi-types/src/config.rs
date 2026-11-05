@@ -89,12 +89,17 @@ pub struct AutoContinueConfig {
     /// Recover a clean stop whose final sentence announces an immediate tool action.
     #[serde(default)]
     pub intent: Option<bool>,
+    /// Recover a round cut at its reply byte budget by asking for a brief
+    /// answer. Off ends the turn at the cut.
+    #[serde(default)]
+    pub byte_cap: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AutoContinuePolicy {
     pub lost_tool_call: bool,
     pub intent: bool,
+    pub byte_cap: bool,
 }
 
 impl Default for AutoContinuePolicy {
@@ -102,6 +107,7 @@ impl Default for AutoContinuePolicy {
         Self {
             lost_tool_call: true,
             intent: false,
+            byte_cap: true,
         }
     }
 }
@@ -116,6 +122,9 @@ impl AutoContinuePolicy {
             }
             if let Some(enabled) = config.intent {
                 policy.intent = enabled;
+            }
+            if let Some(enabled) = config.byte_cap {
+                policy.byte_cap = enabled;
             }
         }
         policy

@@ -355,38 +355,23 @@ impl Agent {
                     _ => {}
                 }
                 // Bound retained round bytes so a stream of many small valid
-                // events cannot exhaust memory.
+                // events cannot exhaust memory. The cap bounds the history
+                // the model re-reads, so a signature and a redacted trace it
+                // never sees again cost nothing: a GPT reasoning blob can pass
+                // the cap on its own while the answer stays small.
                 round_bytes = round_bytes.saturating_add(super::PER_EVENT_OVERHEAD);
                 round_bytes = round_bytes.saturating_add(match &e {
                     StreamingEvent::TextDelta(s)
                     | StreamingEvent::ThinkingDelta(s)
                     | StreamingEvent::ThinkingSignature(s)
                     | StreamingEvent::Error(s) => s.len(),
-                    StreamingEvent::ThinkingRedacted { data } => data.len(),
-                    StreamingEvent::PartSignature {
-                        provider,
-                        model,
-                        format,
-                        target,
-                        signature,
-                    } => {
-                        provider.len()
-                            + model.len()
-                            + match format {
-                                lofi_types::PartSignatureFormat::OpenAiExtraContent {
-                                    namespace,
-                                } => namespace.len(),
-                                lofi_types::PartSignatureFormat::Google
-                                | lofi_types::PartSignatureFormat::OpenAiReasoningDetail => 0,
-                            }
-                            + target.as_ref().map_or(0, String::len)
-                            + signature.len()
-                    }
+                    StreamingEvent::ThinkingRedacted { .. }
+                    | StreamingEvent::PartSignature { .. }
+                    | StreamingEvent::Done { .. } => 0,
                     StreamingEvent::ToolUseStart { id, name } => id.len() + name.len(),
                     StreamingEvent::ToolUseInputDelta { id, delta } => id.len() + delta.len(),
                     StreamingEvent::ToolUseInputComplete { id, .. }
                     | StreamingEvent::ToolUseEnd { id } => id.len(),
-                    StreamingEvent::Done { .. } => 0,
                 });
                 if round_bytes > super::MAX_ROUND_BYTES {
                     // Keep what the model wrote before the budget ran out and
