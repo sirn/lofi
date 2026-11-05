@@ -528,7 +528,8 @@ async fn run_print_turn(
         .clone()
         .map_or_else(lofi_core::config_loader::user_config_path, Ok)?;
     let config = lofi_core::config_loader::load_backend_config(&path)?;
-    // Print mode writes no transcript of its own; subagents match it.
+    // A subagent started by this run keeps no transcript of its own: the
+    // parent's record carries its spend, and no one resumes a child.
     let factory = lofi_core::backend::BackendFactory::new(config.clone(), &opts.root, env.clone())?
         .with_skills_dir(path.parent().map(|dir| dir.join("skills")))
         .with_subagent_persistence(false);

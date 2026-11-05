@@ -108,8 +108,9 @@ pub fn replay_selected_session_events(events: &[SessionEvent], emit: impl FnMut(
 
 #[allow(clippy::too_many_lines)]
 fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEvent)) {
-    // A checkpoint's spend stands for a turn no marker ended. A later
-    // terminal marker on the same lineage supersedes it.
+    // A checkpoint's spend stands for a turn no marker ended. The next turn
+    // on the lineage is not the same turn, so it flushes this spend instead
+    // of overwriting it: a resumed run starts by checkpointing zero.
     let mut unterminated: Option<(f64, Usage)> = None;
     let mut tool_elapsed: Map<&str, u64> = Map::new();
     let mut native_by_parent: Map<&str, Vec<&NativeToolRecord>> = Map::new();
@@ -168,6 +169,15 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                             }
                         }
                         continue;
+                    }
+                    // A prompt opens a turn; a repair or auto-continue
+                    // notice keeps it. A turn that died without a marker is
+                    // settled here, before the new turn's own snapshots can
+                    // replace what it spent.
+                    if msg.kind != PromptKind::Notice {
+                        if let Some((cost, usage)) = unterminated.take() {
+                            emit(AgentEvent::TurnUsage { cost, usage });
+                        }
                     }
                     if let Some(event) = AgentEvent::from_prompt(msg) {
                         emit(event);
@@ -584,12 +594,7 @@ pub fn history_from_index(
         .rev()
         .map(|entry| entry.offset)
         .collect();
-    let mut projection = AgentHistoryProjection::default();
-    cursor.visit_events(&offsets, |event| {
-        projection.push(&event);
-        Ok(())
-    })?;
-    Ok(projection.finish())
+    crate::lifecycle::history_from_cursor(cursor, &offsets)
 }
 
 #[must_use]
@@ -1025,6 +1030,101 @@ mod tests {
                 .filter(|event| matches!(event, AgentEvent::TurnEnd { .. }))
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn the_next_turn_does_not_erase_the_spend_of_a_killed_one() {
+        // Run A checkpointed $0.50 and was killed. Run B resumed the session:
+        // its first checkpoint reports the new turn's own spend, not A's.
+        let mut events = vec![
+            user_msg("go"),
+            assistant_msg("round one"),
+            turn_usage(0.5, 40),
+            user_msg("resumed"),
+            assistant_msg("round two"),
+            turn_usage(0.2, 10),
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::TurnEnd {
+                    model: "m".into(),
+                    elapsed_ms: 0,
+                    cost: 0.2,
+                    usage: Usage::default(),
+                    stop_reason: None,
+                },
+            },
+        ];
+        chain(&mut events);
+        let mut replayed = Vec::new();
+        replay_session_events(&events, |event| replayed.push(event));
+
+        let killed: Vec<f64> = replayed
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::TurnUsage { cost, .. } => Some(*cost),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(killed.len(), 1, "only the killed turn reports a snapshot");
+        assert!((killed[0] - 0.5).abs() < 1e-9, "{}", killed[0]);
+        assert!(
+            replayed.iter().any(|event| matches!(
+                event,
+                AgentEvent::TurnEnd { cost, .. } if (*cost - 0.2).abs() < 1e-9
+            )),
+            "the settled turn reports itself: {replayed:?}"
+        );
+    }
+
+    #[test]
+    fn two_killed_turns_each_report_their_own_spend() {
+        let mut events = vec![
+            user_msg("go"),
+            assistant_msg("round one"),
+            turn_usage(0.5, 40),
+            user_msg("resumed"),
+            assistant_msg("round two"),
+            turn_usage(0.2, 10),
+        ];
+        chain(&mut events);
+        let mut replayed = Vec::new();
+        replay_session_events(&events, |event| replayed.push(event));
+
+        let killed: Vec<f64> = replayed
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::TurnUsage { cost, .. } => Some(*cost),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(killed.len(), 2, "{replayed:?}");
+        assert!((killed[0] - 0.5).abs() < 1e-9 && (killed[1] - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_auto_continue_notice_does_not_split_a_turn() {
+        // The notice is a display row of the same turn, so the turn's own
+        // marker must still supersede the snapshots before and after it.
+        let mut events = vec![
+            user_msg("go"),
+            assistant_msg("round one"),
+            turn_usage(0.5, 40),
+            user_msg_with_kind("token limit reached", lofi_types::PromptKind::Notice),
+            assistant_msg("round two"),
+            turn_usage(0.2, 10),
+            turn_end(),
+        ];
+        chain(&mut events);
+        let mut replayed = Vec::new();
+        replay_session_events(&events, |event| replayed.push(event));
+
+        assert!(
+            replayed
+                .iter()
+                .all(|event| !matches!(event, AgentEvent::TurnUsage { .. })),
+            "the marker carries the whole turn: {replayed:?}"
         );
     }
 

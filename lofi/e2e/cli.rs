@@ -395,9 +395,18 @@ fn print_mode_resumes_the_session_it_named() {
         .spawn()
         .unwrap();
 
-    // The prompt checkpoint lands before the provider answers, so a kill
-    // during the request loses only the unstreamed answer.
-    fixture.wait_for_event_count("message", 1);
+    // Wait for the checkpoint that holds the prompt and for the request it
+    // sent: a kill then loses only the answer the provider never delivered.
+    fixture.wait_for_prompt("killed print prompt");
+    let started = std::time::Instant::now();
+    while server.request_count() < 1 && started.elapsed() < WAIT {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        server.request_count(),
+        1,
+        "the killed run reached the provider"
+    );
     kill(
         Pid::from_raw(i32::try_from(child.id()).unwrap()),
         Signal::SIGKILL,

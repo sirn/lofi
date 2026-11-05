@@ -1,4 +1,6 @@
 #![allow(clippy::wildcard_imports)]
+use std::collections::HashSet;
+
 use super::*;
 
 pub(super) use lofi_core::session::replay::last_run_model_from_index;
@@ -13,10 +15,46 @@ fn is_accounting(kind: store::IndexKind) -> bool {
         store::IndexKind::TurnEnd
             | store::IndexKind::TurnFailed
             | store::IndexKind::TurnCancelled
+            | store::IndexKind::TurnUsage
             | store::IndexKind::SubagentUsage
             | store::IndexKind::ContextReported
             | store::IndexKind::Compaction
     )
+}
+
+/// The offsets the gauges apply, in file order: every accounting record,
+/// except that a turn reports its spend once.
+///
+/// A terminal marker carries the whole turn and supersedes the snapshots its
+/// own checkpoints wrote, so it replaces them. A turn no marker settled — a
+/// process killed mid-turn wrote none — reports its last snapshot, which is
+/// all a resume has of what that turn cost.
+fn accounting_offsets(
+    index: &[store::SessionIndexEntry],
+    visible: &[usize],
+    notices: &HashSet<usize>,
+) -> Vec<u64> {
+    let mut kept: Vec<u64> = Vec::new();
+    let mut snapshot: Option<u64> = None;
+    for (pos, &i) in visible.iter().enumerate() {
+        let entry = &index[i];
+        match entry.kind {
+            store::IndexKind::TurnUsage => snapshot = Some(entry.offset),
+            store::IndexKind::TurnEnd
+            | store::IndexKind::TurnFailed
+            | store::IndexKind::TurnCancelled => {
+                snapshot = None;
+                kept.push(entry.offset);
+            }
+            // A prompt that is not a notice opens the next turn, which settles
+            // the snapshot of a turn that never got its marker.
+            store::IndexKind::UserPrompt if !notices.contains(&pos) => kept.extend(snapshot.take()),
+            kind if is_accounting(kind) => kept.push(entry.offset),
+            _ => {}
+        }
+    }
+    kept.extend(snapshot);
+    kept
 }
 
 /// Restore the transcript as file-backed turn shells. Turns need only their
@@ -59,24 +97,28 @@ pub(super) fn replay_indexed_session(
     }
     app.transcript.turn_byte_ranges.clear();
     app.transcript.turn_event_offsets.clear();
+    // A notice opens a display row, not a turn: its spend belongs to the turn
+    // that auto-continued through it.
+    let notices: HashSet<usize> = starts
+        .iter()
+        .enumerate()
+        .filter(|(turn, _)| {
+            prompts
+                .get(*turn)
+                .is_some_and(|(_, kind)| *kind == lofi_types::PromptKind::Notice)
+        })
+        .map(|(_, &pos)| pos)
+        .collect();
     // Read every turn-outcome event in one sweep of the file: per-turn
     // `event_at` would open and seek the transcript once per turn — over a
     // thousand opens on a long resume.
-    let mut flat_outcomes: Vec<u64> = Vec::new();
-    for (turn, &start_pos) in starts.iter().enumerate() {
-        let end_pos = starts.get(turn + 1).copied().unwrap_or(visible.len());
-        for &i in &visible[start_pos..end_pos] {
-            if is_accounting(index[i].kind) {
-                flat_outcomes.push(index[i].offset);
-            }
-        }
-    }
-    let mut outcomes: Vec<SessionEvent> = Vec::with_capacity(flat_outcomes.len());
-    cursor.visit_events(&flat_outcomes, |ev| {
+    let applied_offsets = accounting_offsets(index, &visible, &notices);
+    let mut outcomes: Vec<SessionEvent> = Vec::with_capacity(applied_offsets.len());
+    cursor.visit_events(&applied_offsets, |ev| {
         outcomes.push(ev);
         Ok(())
     })?;
-    let mut outcomes = outcomes.into_iter();
+    let mut next_outcome = 0usize;
     for (turn, &start_pos) in starts.iter().enumerate() {
         let end_pos = starts.get(turn + 1).copied().unwrap_or(visible.len());
         let selected = &visible[start_pos..end_pos];
@@ -92,25 +134,22 @@ pub(super) fn replay_indexed_session(
             let (prompt, kind) = prompts.get(turn).cloned().unwrap_or_default();
             app.apply_file_backed_replay_event(AgentEvent::Prompt { prompt, kind });
         }
-        // A shell turn has no accounting of its own, but a compaction or a
-        // subagent's spend that followed it belongs to this range: apply what
-        // the sweep read, or the gauges drift.
-        for &i in selected {
-            if !is_accounting(index[i].kind) {
-                continue;
-            }
-            let Some(event) = outcomes.next() else {
-                break;
-            };
-            replay_selected_session_events(std::slice::from_ref(&event), |ev| {
-                app.apply_file_backed_replay_event(ev);
-            });
-        }
         let start = index[visible[start_pos]].offset;
         let lineage_end = visible.last().map_or(file_size, |&i| index[i].end_offset);
         let end = starts
             .get(turn + 1)
             .map_or(lineage_end, |&p| index[visible[p]].offset);
+        // A shell turn has no accounting of its own, but a compaction or a
+        // subagent's spend that followed it belongs to this range: apply what
+        // the sweep read, or the gauges drift. A killed turn's spend lands in
+        // the row it opened, before the next turn reports its own.
+        while next_outcome < applied_offsets.len() && applied_offsets[next_outcome] < end {
+            let event = &outcomes[next_outcome];
+            next_outcome += 1;
+            replay_selected_session_events(std::slice::from_ref(event), |ev| {
+                app.apply_file_backed_replay_event(ev);
+            });
+        }
         app.transcript
             .restore_last_turn(start, end, offsets, contiguous);
     }

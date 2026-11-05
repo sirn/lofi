@@ -1164,6 +1164,33 @@ impl Fixture {
         panic!("timed out waiting for {count} {kind} events");
     }
 
+    /// Wait until the transcript holds this user prompt. A test that kills
+    /// the process after the wait cannot lose the prompt it means to resume.
+    pub fn wait_for_prompt(&self, text: &str) {
+        let start = Instant::now();
+        while start.elapsed() < WAIT {
+            let found = self
+                .session_files()
+                .iter()
+                .filter_map(|path| std::fs::read_to_string(path).ok())
+                .flat_map(|body| {
+                    body.lines()
+                        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                        .collect::<Vec<_>>()
+                })
+                .any(|event| {
+                    event["type"] == "message"
+                        && event["role"] == "user"
+                        && event["blocks"][0]["text"] == text
+                });
+            if found {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!("timed out waiting for the {text:?} prompt");
+    }
+
     pub fn session_files(&self) -> Vec<PathBuf> {
         let mut files = Vec::new();
         collect_files(&self.state.join("lofi").join("sessions"), &mut files);
