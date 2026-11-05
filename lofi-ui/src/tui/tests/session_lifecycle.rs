@@ -380,6 +380,74 @@ fn resumed_shell_turn_applies_the_accounting_that_follows_it() {
 }
 
 #[test]
+fn a_resumed_notice_keeps_one_turn_spend() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store::SessionStore::new(dir.path().join("sessions"));
+    let cursor = store
+        .create_cursor(std::path::Path::new("/workspace"), &"p/m".into())
+        .unwrap();
+    let checkpoint = |cost: f64, input: u64| SessionEventKind::TurnUsage {
+        elapsed_ms: 300,
+        cost,
+        usage: Usage {
+            input_tokens: input,
+            output_tokens: 1,
+            ..Usage::default()
+        },
+    };
+    let notice = Message {
+        kind: PromptKind::Notice,
+        ..user("A potential loop was detected")
+    };
+    let kinds = [
+        msg(user("go")),
+        msg(assistant("round one")),
+        checkpoint(0.25, 40),
+        // The notice is a display row of the same turn, so the turn's marker
+        // still owns the whole spend.
+        msg(notice),
+        msg(assistant("round two")),
+        checkpoint(0.1, 10),
+        SessionEventKind::TurnEnd {
+            model: "p/m".into(),
+            elapsed_ms: 600,
+            cost: 0.25,
+            usage: Usage {
+                input_tokens: 50,
+                output_tokens: 2,
+                ..Usage::default()
+            },
+            stop_reason: None,
+        },
+    ];
+    let mut events: Vec<_> = kinds
+        .into_iter()
+        .map(|kind| SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind,
+        })
+        .collect();
+    cursor.append_events(&mut events).unwrap();
+    let snapshot = cursor.snapshot().unwrap();
+
+    let mut a = app();
+    a.session.cursor = Some(cursor.clone());
+    a.restore_indexed_session(
+        &cursor,
+        &snapshot.index,
+        snapshot.file_size,
+        snapshot.history_start,
+        snapshot.contiguous,
+    )
+    .unwrap();
+
+    assert!((a.cost - 0.25).abs() < 1e-9, "{}", a.cost);
+    assert_eq!(a.total_in, 50);
+    assert_eq!(a.total_out, 2);
+}
+
+#[test]
 fn a_resumed_session_shows_what_a_killed_turn_spent() {
     let dir = tempfile::tempdir().unwrap();
     let store = store::SessionStore::new(dir.path().join("sessions"));
