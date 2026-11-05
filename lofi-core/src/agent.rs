@@ -97,6 +97,7 @@ pub use exec::{
     exec_input_code_and_label, exec_label, exec_result_display, exec_tool_schema, parse_exec_input,
 };
 pub(crate) use model::assemble_system_prompt;
+pub(crate) use model::select_model_for_subagent;
 pub(crate) use model::{parse_model_query, NO_MODELS_HINT};
 pub use model::{rebuild_agent, select_model, select_model_with_level};
 

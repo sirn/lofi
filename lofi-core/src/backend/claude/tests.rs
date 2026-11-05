@@ -58,15 +58,11 @@ fn effort_levels_include_the_cli_maximum() {
 
 #[test]
 fn effort_flag_omits_off_and_passes_max() {
+    assert_eq!(effort_flag(&lofi_types::ThinkingLevel::Off), None);
     assert_eq!(
-        effort_flag(&lofi_types::ThinkingLevel::Off).ok(),
-        Some(None)
+        effort_flag(&lofi_types::ThinkingLevel::Custom("max".into())),
+        Some("--effort=max".into())
     );
-    assert_eq!(
-        effort_flag(&lofi_types::ThinkingLevel::Custom("max".into())).ok(),
-        Some(Some("--effort=max".into()))
-    );
-    assert!(effort_flag(&lofi_types::ThinkingLevel::Custom("nope".into())).is_err());
 }
 
 #[test]

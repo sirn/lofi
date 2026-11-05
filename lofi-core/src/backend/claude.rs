@@ -26,29 +26,16 @@ const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 pub(super) fn effort_levels() -> Vec<lofi_types::ThinkingLevel> {
     EFFORT_LEVELS
         .iter()
-        .map(|level| match lofi_types::ThinkingLevel::parse(level) {
-            Some(level) => level,
-            None => lofi_types::ThinkingLevel::Custom((*level).into()),
-        })
+        .map(|level| lofi_types::ThinkingLevel::parse_or_custom(level))
         .collect()
 }
 
 /// `Some("--effort=high")`, or None to leave the CLI default.
 ///
-/// # Errors
-/// Returns a configuration error for a level outside `EFFORT_LEVELS`.
-fn effort_flag(level: &lofi_types::ThinkingLevel) -> Result<Option<String>> {
-    if *level == lofi_types::ThinkingLevel::Off {
-        return Ok(None);
-    }
-    if !effort_levels().contains(level) {
-        return Err(Error::Config(format!(
-            "thinking level \"{}\" is not supported by Claude Code; allowed: {}",
-            level.as_str(),
-            EFFORT_LEVELS.join(", ")
-        )));
-    }
-    Ok(Some(format!("--effort={}", level.as_str())))
+/// The level was checked against `EFFORT_LEVELS` when the backend opened, so
+/// this renders it and does not check it again.
+pub(super) fn effort_flag(level: &lofi_types::ThinkingLevel) -> Option<String> {
+    (*level != lofi_types::ThinkingLevel::Off).then(|| format!("--effort={}", level.as_str()))
 }
 
 /// The `message.content` of one user frame: a plain string when the turn is
@@ -239,7 +226,7 @@ impl ClaudeSession {
             .arg("--system-prompt-file")
             .arg(&files.system_prompt);
         // Off selects no effort flag, which leaves the CLI default.
-        if let Some(flag) = effort_flag(&effort)? {
+        if let Some(flag) = effort_flag(&effort) {
             process.arg(flag);
         }
         process.arg(format!(

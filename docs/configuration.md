@@ -196,7 +196,7 @@ A Claude Code session can spawn a Claude Code child or an HTTP child.
 An HTTP session can spawn a Claude Code child.
 A child that names another model with `lofi.subagent` opens that model's transport.
 On a CLI backend the name must be one its config lists: its `model`, a
-name from `models`, or `default` for the configured one.
+name from `models`, or `default`, which leaves the CLI's own default.
 A child shares the session's job registry, policy, and truncation limits.
 It has its own sandbox thread, its own auto-mode context, and its own inbox.
 

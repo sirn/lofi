@@ -15,6 +15,20 @@ use crate::agent::ToolExecutor;
 use crate::lifecycle::{lineage_catch_up, CatchUp};
 use crate::session::store::SessionCursor;
 
+/// The thinking levels one CLI backend accepts. The picker and the check read
+/// this one table, so they cannot disagree.
+#[must_use]
+fn levels() -> Vec<lofi_types::ThinkingLevel> {
+    super::claude::effort_levels()
+}
+
+/// Whether a CLI backend runs at a level. Off always means "pass no effort
+/// flag", so it needs no entry in the table.
+#[must_use]
+pub(crate) fn accepts(level: &lofi_types::ThinkingLevel) -> bool {
+    *level == lofi_types::ThinkingLevel::Off || levels().contains(level)
+}
+
 /// Model choices of one CLI backend, in picker order: the configured model
 /// first, then the configured list, then "default" when nothing is named.
 #[must_use]
@@ -37,7 +51,7 @@ pub fn configured_models(
             provider: name.into(),
             name: id.clone(),
             id,
-            thinking_levels: super::claude::effort_levels(),
+            thinking_levels: levels(),
             service_tiers: Vec::new(),
             supports_image: true,
             // Learned from the child at turn end; the choice reads the cell.
@@ -47,10 +61,9 @@ pub fn configured_models(
 }
 
 /// The model ids a backend accepts in a query, in picker order: the configured
-/// model, then its `models`, then the `default` alias that opens the
-/// configured one.
-#[must_use]
-pub fn model_ids(config: &lofi_types::BackendConfig) -> Vec<String> {
+/// model, then its `models`, then `default`, which opens the CLI's own
+/// default model.
+fn model_ids(config: &lofi_types::BackendConfig) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
     if let Some(model) = config.model() {
         ids.push(model.to_string());
@@ -64,6 +77,51 @@ pub fn model_ids(config: &lofi_types::BackendConfig) -> Vec<String> {
         ids.push("default".to_string());
     }
     ids
+}
+
+/// Check one selection against a backend's config: the model it names, the
+/// level it runs at, and the tier it asks for.
+///
+/// Every caller that names a backend model goes through here — the factory
+/// opening a session, a live model switch, and a subagent override — so the
+/// rule and its error text exist once.
+///
+/// # Errors
+/// Returns [`Error::Config`] for a model outside the config, a service tier
+/// other than `auto`, or a level the backend does not accept.
+pub(crate) fn check_selection(
+    config: &lofi_types::BackendConfig,
+    backend: &str,
+    model: &str,
+    level: &lofi_types::ThinkingLevel,
+    tier: &lofi_types::ServiceTier,
+) -> Result<()> {
+    let ids = model_ids(config);
+    if !ids.iter().any(|id| id == model) {
+        return Err(Error::Config(format!(
+            "no model `{model}` for backend `{backend}`; configured: {}",
+            ids.join(", ")
+        )));
+    }
+    if *tier != lofi_types::ServiceTier::Auto {
+        return Err(Error::Config(format!(
+            "service tier `{}` is not supported by `{backend}`",
+            tier.as_str()
+        )));
+    }
+    if !accepts(level) {
+        let allowed = levels();
+        let names: Vec<&str> = allowed
+            .iter()
+            .map(lofi_types::ThinkingLevel::as_str)
+            .collect();
+        return Err(Error::Config(format!(
+            "thinking level `{}` is not supported by `{backend}`; allowed: {}",
+            level.as_str(),
+            names.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -621,7 +679,7 @@ impl Backend for ExternalBackend {
                 provider: self.name.clone(),
                 id: current.clone(),
                 name: current,
-                thinking_levels: super::claude::effort_levels(),
+                thinking_levels: levels(),
                 service_tiers: Vec::new(),
                 supports_image: true,
                 context_window: None,
@@ -650,38 +708,18 @@ impl Backend for ExternalBackend {
                 parsed.provider, self.name
             )));
         }
-        if !self.config.models().iter().any(|id| id == &parsed.model)
-            && self.config.model() != Some(parsed.model.as_str())
-            && parsed.model != "default"
-        {
-            let models = self.config.models().join(", ");
-            return Err(Error::Config(format!(
-                "no model \"{}\" for backend \"{}\"; configured: {models}",
-                parsed.model, self.name
-            )));
-        }
-        if parsed.tier != lofi_types::ServiceTier::Auto {
-            return Err(Error::Config(format!(
-                "service tier \"{}\" is not supported by \"{}\"",
-                parsed.tier.as_str(),
-                self.name
-            )));
-        }
-        if let Some(level) = parsed.level.clone() {
-            let allowed = self.choice().thinking_levels;
-            if level != lofi_types::ThinkingLevel::Off && !allowed.contains(&level) {
-                let names: Vec<&str> = allowed
-                    .iter()
-                    .map(lofi_types::ThinkingLevel::as_str)
-                    .collect();
-                return Err(Error::Config(format!(
-                    "thinking level \"{}\" is not supported by \"{}\"; allowed: {}",
-                    level.as_str(),
-                    self.name,
-                    names.join(", ")
-                )));
-            }
-        }
+        // A switch that names no level keeps the one the session runs at.
+        let level = parsed
+            .level
+            .clone()
+            .unwrap_or_else(|| self.thinking.clone());
+        check_selection(
+            &self.config,
+            &self.name,
+            &parsed.model,
+            &level,
+            &parsed.tier,
+        )?;
         let mut next = self.clone();
         let model = (parsed.model != "default").then_some(parsed.model);
         // The learned window belongs to the model that reported it.
@@ -691,10 +729,7 @@ impl Backend for ExternalBackend {
         next.model = model;
         // A query without a level keeps the session's effort, as it does on
         // the native path.
-        next.thinking = parsed
-            .level
-            .clone()
-            .unwrap_or_else(|| self.thinking.clone());
+        next.thinking = level;
         // The worker writes the cell when it takes this turn: a switch made
         // while another turn runs must not change the model that turn uses.
         Ok(Arc::new(next))

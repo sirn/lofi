@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::agent::model::select_model_for_subagent;
-use crate::agent::subagent::override_query;
+use crate::backend::Backend;
 
 fn mc() -> ModelConfig {
     ModelConfig {
@@ -98,6 +98,20 @@ fn provider(
         service_tiers: Vec::new(),
         auto_continue: lofi_types::AutoContinueConfig::default(),
     }
+}
+
+/// The query a spawn override opens, resolved the way the spawn path resolves
+/// it: through the factory, which reads both the provider and the backend
+/// catalogs.
+fn override_query(
+    support: &SubagentSupport,
+    template: &dyn Backend,
+    model: &str,
+    level: Option<ThinkingLevel>,
+) -> Result<String> {
+    support
+        .factory()?
+        .resolve_model_query(&template.selection(), model, level)
 }
 
 fn build(providers: IndexMap<String, ProviderConfig>) -> (Config, ModelRegistry) {
@@ -984,7 +998,7 @@ fn subagent_restore_keeps_a_recorded_auto_tier() {
     assert_eq!(RunModel::parse(&restored).service_tier, ServiceTier::Auto);
 }
 
-/// A CLI backend names its own models, and `default` is the configured one.
+/// A CLI backend names its own models, and `default` leaves the CLI's own.
 fn claude_backend(model: Option<&str>, listed: &[&str]) -> lofi_types::BackendConfig {
     lofi_types::BackendConfig::ClaudeCode {
         command: "claude".to_string(),
@@ -1006,10 +1020,23 @@ fn backend_support(backend: lofi_types::BackendConfig, dir: &std::path::Path) ->
 }
 
 fn backend_override(backend: lofi_types::BackendConfig, model: &str) -> Result<String> {
+    backend_override_from(backend, model, ThinkingLevel::Off, ServiceTier::Auto, None)
+}
+
+/// The same, with the parent's selection chosen and an explicit level.
+fn backend_override_from(
+    backend: lofi_types::BackendConfig,
+    model: &str,
+    parent_thinking: ThinkingLevel,
+    parent_tier: ServiceTier,
+    level: Option<ThinkingLevel>,
+) -> Result<String> {
     let dir = tempdir().unwrap();
     let support = backend_support(backend, dir.path());
-    let agent = agent_with(Vec::new(), dir.path());
-    override_query(&support, &agent, model, None)
+    let mut agent = agent_with(Vec::new(), dir.path());
+    agent.model.thinking = parent_thinking;
+    agent.model.service_tier = parent_tier;
+    override_query(&support, &agent, model, level)
 }
 
 #[test]
@@ -1072,6 +1099,76 @@ fn subagent_override_rejects_a_name_the_backend_does_not_list() {
 }
 
 #[test]
+fn subagent_override_inherits_a_level_the_backend_accepts() {
+    let query = backend_override_from(
+        claude_backend(Some("claude-opus-5-5"), &[]),
+        "claude/claude-opus-5-5",
+        ThinkingLevel::High,
+        ServiceTier::Auto,
+        None,
+    )
+    .unwrap();
+    assert_eq!(RunModel::parse(&query).thinking, ThinkingLevel::High);
+}
+
+/// A provider model may think at a level no CLI offers. The override named no
+/// level, so the child must start without one instead of failing.
+#[test]
+fn subagent_override_drops_a_parent_level_the_backend_lacks() {
+    let query = backend_override_from(
+        claude_backend(Some("claude-opus-5-5"), &[]),
+        "claude/claude-opus-5-5",
+        ThinkingLevel::Custom("minimal".into()),
+        ServiceTier::Auto,
+        None,
+    )
+    .unwrap();
+    assert_eq!(RunModel::parse(&query).thinking, ThinkingLevel::Off);
+}
+
+#[test]
+fn subagent_override_level_argument_beats_the_query_suffix() {
+    let query = backend_override_from(
+        claude_backend(Some("claude-opus-5-5"), &[]),
+        "claude/claude-opus-5-5:low",
+        ThinkingLevel::High,
+        ServiceTier::Auto,
+        Some(ThinkingLevel::Medium),
+    )
+    .unwrap();
+    assert_eq!(RunModel::parse(&query).thinking, ThinkingLevel::Medium);
+}
+
+/// A service tier is a provider concept: a CLI child runs the parent's only
+/// when it is `auto`.
+#[test]
+fn subagent_override_keeps_a_backend_child_at_auto() {
+    let query = backend_override_from(
+        claude_backend(Some("claude-opus-5-5"), &[]),
+        "claude/claude-opus-5-5",
+        ThinkingLevel::Off,
+        ServiceTier::Flex,
+        None,
+    )
+    .unwrap();
+    assert_eq!(RunModel::parse(&query).service_tier, ServiceTier::Auto);
+}
+
+#[test]
+fn subagent_override_rejects_a_tier_a_backend_cannot_run() {
+    let error = backend_override(
+        claude_backend(Some("claude-opus-5-5"), &[]),
+        "claude/claude-opus-5-5@flex",
+    )
+    .unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("service tier `flex` is not supported by `claude`"),
+        "{text}"
+    );
+}
+
+#[test]
 fn subagent_override_rejects_a_level_the_backend_does_not_accept() {
     let error = backend_override(
         claude_backend(Some("claude-opus-5-5"), &[]),
@@ -1079,6 +1176,6 @@ fn subagent_override_rejects_a_level_the_backend_does_not_accept() {
     )
     .unwrap_err();
     let text = error.to_string();
-    assert!(text.contains("thinking level bogus"), "{text}");
+    assert!(text.contains("thinking level `bogus`"), "{text}");
     assert!(text.contains("allowed: "), "{text}");
 }

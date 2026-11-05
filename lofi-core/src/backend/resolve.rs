@@ -236,26 +236,15 @@ impl BackendFactory {
             .backends
             .get(&parsed.provider)
             .ok_or_else(|| Error::Config(format!("unknown backend \"{}\"", parsed.provider)))?;
-        let model = (parsed.model != "default").then_some(parsed.model.clone());
-        if model.is_some()
-            && !config.models().iter().any(|id| id == &parsed.model)
-            && config.model() != Some(parsed.model.as_str())
-        {
-            return Err(Error::Config(format!(
-                "no model \"{}\" for backend \"{}\"; configured: {}",
-                parsed.model,
-                parsed.provider,
-                super::model_ids(config).join(", ")
-            )));
-        }
-        if parsed.tier != ServiceTier::Auto {
-            return Err(Error::Config(format!(
-                "service tier \"{}\" is not supported by \"{}\"",
-                parsed.tier.as_str(),
-                parsed.provider
-            )));
-        }
         let thinking = parsed.level.clone().unwrap_or(ThinkingLevel::Off);
+        super::session::check_selection(
+            config,
+            &parsed.provider,
+            &parsed.model,
+            &thinking,
+            &parsed.tier,
+        )?;
+        let model = (parsed.model != "default").then_some(parsed.model.clone());
         let system_prompt = executor.system_prompt();
         Ok(Arc::new(
             ExternalBackend::configure(
@@ -290,6 +279,68 @@ impl BackendFactory {
     /// Session state for a backend opened by this factory.
     fn prepare(&self, executor: ToolExecutor) -> ToolExecutor {
         executor.with_skills_dir(self.skills_dir.clone())
+    }
+
+    /// The query a model name selects, with the level and tier the target will
+    /// run at.
+    ///
+    /// The name may belong to a provider or to a CLI backend. Neither the
+    /// caller nor the backend it opens learns which one: this is the one place
+    /// that reads both catalogs.
+    ///
+    /// `parent` supplies what the name leaves unsaid: a backend selection that
+    /// names no level runs at the parent's, when that backend accepts it, and at
+    /// `off` otherwise; the service tier is inherited when the target declares
+    /// it.
+    ///
+    /// # Errors
+    /// Returns a configuration error for an unqualified or unknown name, a
+    /// model the target does not declare, or a level it does not accept.
+    pub(crate) fn resolve_model_query(
+        &self,
+        parent: &ModelSelection,
+        query: &str,
+        level: Option<ThinkingLevel>,
+    ) -> Result<String> {
+        let parsed = crate::agent::parse_model_query(query)?;
+        if let Some(config) = self.config.backends.get(&parsed.provider) {
+            // A parent's level carries over only when this backend runs it: a
+            // provider model may think at a level no CLI offers.
+            let desired = match level.or(parsed.level) {
+                Some(level) => level,
+                None if super::session::accepts(&parent.thinking) => parent.thinking.clone(),
+                None => ThinkingLevel::Off,
+            };
+            let tier = parsed.tier.unwrap_or(ServiceTier::Auto);
+            super::session::check_selection(
+                config,
+                &parsed.provider,
+                &parsed.model,
+                &desired,
+                &tier,
+            )?;
+            return Ok(format!(
+                "{}/{}:{}@{}",
+                parsed.provider,
+                parsed.model,
+                desired.as_str(),
+                tier.as_str()
+            ));
+        }
+        let (model, thinking) = crate::agent::select_model_for_subagent(
+            &self.registry,
+            &self.config,
+            query,
+            level,
+            &parent.service_tier,
+        )?;
+        Ok(format!(
+            "{}/{}:{}@{}",
+            model.provider,
+            model.id,
+            thinking.as_str(),
+            model.service_tier.as_str()
+        ))
     }
 
     /// Resolve the configured default when the caller names no model.

@@ -238,10 +238,9 @@ pub(crate) fn parse_model_query(query: &str) -> Result<ModelQuery> {
     // An unrecognized level becomes a provider-defined `Custom`: the CLI
     // accepts `max`, and each backend still validates against its own list.
     let (qual, level) = match qual.rsplit_once(':') {
-        Some((head, tail)) if !tail.is_empty() => (
-            head,
-            Some(ThinkingLevel::parse(tail).unwrap_or_else(|| ThinkingLevel::Custom(tail.into()))),
-        ),
+        Some((head, tail)) if !tail.is_empty() => {
+            (head, Some(ThinkingLevel::parse_or_custom(tail)))
+        }
         _ => (qual, None),
     };
     let (provider, model) = qual.split_once('/').ok_or_else(|| {

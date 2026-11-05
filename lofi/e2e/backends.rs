@@ -265,6 +265,12 @@ fn fake_claude_code(text: &str) -> &'static str {
         "subagent override" => {
             r#"const out = await lofi.subagent({prompt:"child task",model:"mock/child",timeoutMs:5000}); await lofi.write({path:"subagent-result",text:JSON.stringify(out)}); return out"#
         }
+        "subagent cli override" => {
+            r#"const out = await lofi.subagent({prompt:"child task",model:"claude/child-model",timeoutMs:5000}); await lofi.write({path:"subagent-result",text:JSON.stringify(out)}); return out"#
+        }
+        "subagent max effort" => {
+            r#"const out = await lofi.subagent({prompt:"child task",model:"claude/child-model",thinking:"max",timeoutMs:5000}); await lofi.write({path:"subagent-result",text:JSON.stringify(out)}); return out"#
+        }
         _ => {
             r#"await lofi.write({path:"backend-result",text:"real exec"}); return await lofi.read("backend-result")"#
         }
@@ -1031,7 +1037,7 @@ fn claude_effort_flag_follows_the_thinking_level() {
     );
     tui.submit("/thinking");
     tui.wait_for("Thinking level", WAIT);
-    // Rows are off / low / medium / high / xhigh, pre-selected at off.
+    // Rows are off / low / medium / high / xhigh / max, pre-selected at off.
     tui.send(b"\x1b[B\x1b[B\r");
     tui.submit("again");
     fixture.wait_for_event_count("turn_end", 2);
@@ -1872,6 +1878,48 @@ fn external_default_model_resets_in_place_and_survives_resume() {
     tui.wait_exit();
 }
 
+/// A switch that names no level keeps the effort the session runs at, so
+/// changing the model does not quietly reset it.
+#[test]
+fn claude_model_switch_keeps_the_thinking_level() {
+    let fixture = claude_fixture();
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        format!("{config}models = [\"test-model\", \"default\"]\n"),
+    )
+    .unwrap();
+    let mut tui = fixture.spawn(&[]);
+    tui.submit("write");
+    fixture.wait_for_event_count("turn_end", 1);
+    tui.submit("/thinking");
+    tui.wait_for("Thinking level", WAIT);
+    // Rows are off / low / medium / high / xhigh / max, pre-selected at off.
+    tui.send(b"\x1b[B\x1b[B\r");
+    tui.submit("again");
+    fixture.wait_for_event_count("turn_end", 2);
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("claude-effort")).unwrap(),
+        "medium"
+    );
+    tui.submit("/model");
+    tui.wait_for("claude/default", WAIT);
+    tui.send(b"\x1b[B\r");
+    tui.wait_for("for the next turn", WAIT);
+    tui.submit("switched");
+    fixture.wait_for_event_count("turn_end", 3);
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("selected-model")).unwrap(),
+        "default"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("claude-effort")).unwrap(),
+        "medium"
+    );
+    tui.submit("/quit");
+    tui.wait_exit();
+}
+
 #[test]
 fn external_shell_results_reach_the_next_prompt() {
     let fixture = claude_fixture();
@@ -1889,14 +1937,107 @@ fn external_shell_results_reach_the_next_prompt() {
     tui.wait_exit();
 }
 
+/// The ticket case end to end: a CLI parent spawns a CLI child on a model
+/// that only the backend's own config names.
+#[test]
+fn claude_backend_spawns_a_cli_child_at_the_named_model() {
+    let fixture = claude_fixture();
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        format!("{config}models = [\"child-model\"]\n"),
+    )
+    .unwrap();
+    let output = fixture.output(&["--print", "subagent cli override"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body = std::fs::read_to_string(fixture.workspace.join("subagent-result")).unwrap();
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["status"], "completed", "{body}");
+    // The child starts its own process, so it writes the file last.
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("selected-model")).unwrap(),
+        "child-model"
+    );
+}
+
+/// The subagent hook is installed when the CLI worker starts, so an override
+/// must read the effort the session runs at now, not the one it started with.
+#[test]
+fn claude_spawned_child_inherits_the_live_effort() {
+    let fixture = claude_fixture();
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        format!("{config}models = [\"child-model\"]\n"),
+    )
+    .unwrap();
+    let mut tui = fixture.spawn(&[]);
+    tui.submit("write");
+    fixture.wait_for_event_count("turn_end", 1);
+    tui.submit("/thinking");
+    tui.wait_for("Thinking level", WAIT);
+    // Rows are off / low / medium / high / xhigh / max, pre-selected at off.
+    tui.send(b"\x1b[B\x1b[B\r");
+    tui.submit("subagent cli override");
+    fixture.wait_for_event_count("turn_end", 2);
+    // The child launched last, so its argv is the one on disk.
+    let args = std::fs::read_to_string(fixture.workspace.join("claude-args")).unwrap();
+    assert!(args.contains("--effort=medium"), "{args}");
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("selected-model")).unwrap(),
+        "child-model"
+    );
+    tui.submit("/quit");
+    tui.wait_exit();
+}
+
+/// `max` is not a named level: it reaches the child as a custom one, and the
+/// backend accepts it.
+#[test]
+fn claude_backend_spawns_a_cli_child_at_max_effort() {
+    let fixture = claude_fixture();
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        format!("{config}models = [\"child-model\"]\n"),
+    )
+    .unwrap();
+    let output = fixture.output(&["--print", "subagent max effort"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The child launched last, so its argv is the one on disk.
+    let args = std::fs::read_to_string(fixture.workspace.join("claude-args")).unwrap();
+    assert!(args.contains("--effort=max"), "{args}");
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("selected-model")).unwrap(),
+        "child-model"
+    );
+}
+
+/// A level reaches the CLI as an effort flag at open time, not at the child's
+/// first turn.
+#[test]
+fn external_backend_rejects_unknown_levels() {
+    let fixture = claude_fixture();
+    let output = fixture.output(&["--model", "claude/test-model:bogus", "--print", "write"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("thinking level `bogus` is not supported by `claude`"));
+}
+
 #[test]
 fn external_backend_rejects_unknown_models() {
     let fixture = claude_fixture();
     let output = fixture.output(&["--model", "claude/unused-model", "--print", "write"]);
     assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("no model \"unused-model\" for backend")
-    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no model `unused-model` for backend"));
 }
 
 #[test]

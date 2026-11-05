@@ -67,8 +67,8 @@ pub(super) async fn complete(
         .arg("--system-prompt-file")
         .arg(&prompt_file)
         .arg(format!("--session-id={id}"));
-    if *effort != ThinkingLevel::Off {
-        process.arg(format!("--effort={}", effort.as_str()));
+    if let Some(flag) = super::claude::effort_flag(effort) {
+        process.arg(flag);
     }
     if let Some(model) = model {
         process.arg(format!("--model={model}"));

@@ -134,6 +134,14 @@ impl ThinkingLevel {
         }
     }
 
+    /// The level a name spells, or a provider-defined one this build does not
+    /// know. A caller that names a level lets the target reject what it cannot
+    /// run, so an unknown name must survive parsing.
+    #[must_use]
+    pub fn parse_or_custom(s: &str) -> Self {
+        Self::parse(s).unwrap_or_else(|| Self::Custom(s.to_owned()))
+    }
+
     #[must_use]
     pub fn as_str(&self) -> &str {
         match self {
@@ -165,7 +173,7 @@ impl<'de> Deserialize<'de> for ThinkingLevel {
         if value.is_empty() {
             Err(serde::de::Error::custom("thinking level cannot be empty"))
         } else {
-            Ok(Self::parse(&value).unwrap_or(Self::Custom(value)))
+            Ok(Self::parse_or_custom(&value))
         }
     }
 }

@@ -438,13 +438,16 @@ log reads, mechanical edits).
 - `model` (string, optional) — model query (e.g. `anthropic/claude-haiku-4.5`)
   overriding the session model. List choices with `lofi.models()`. On a
   CLI backend, name its configured `model`, one of its `models`, or
-  `default` for the configured one; `lofi.models()` lists provider models
-  only. The run keeps the session service tier when it is not `auto` and
-  the new model declares it (see `service_tiers` in `lofi.models()`);
-  otherwise the normal default order applies (model, provider, then the
-  configured `[agent]` tier). A `@tier` suffix in `model` always wins.
-- `thinking` (string, optional) — thinking level (`off`, `low`, `medium`,
-  `high`, `xhigh`).
+  `default`, which leaves the CLI's own default model. The run keeps the
+  session service tier when it is not `auto` and the new model declares it
+  (see `service_tiers` in `lofi.models()`); otherwise the normal default
+  order applies (model, provider, then the configured `[agent]` tier). A
+  `@tier` suffix in `model` always wins. On a CLI backend the parent's
+  thinking level carries over only when that backend runs it; otherwise the
+  child starts with no effort flag.
+- `thinking` (string, optional) — a level the target model declares, for
+  example `off`, `low`, `medium`, `high`, `xhigh`, or `max` on a CLI
+  backend. A level the target does not accept fails the run.
 - `system` (string, optional) — system prompt override.
 - `timeout_ms` (number, optional) — wall-clock limit for the whole run.
 - `output_limit` (number, optional) — cap on the returned result bytes.

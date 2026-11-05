@@ -932,7 +932,7 @@ impl SubagentSupport {
     ///
     /// The factory carries this catalog, so an override can name a model the
     /// provider discovered at startup.
-    fn factory(&self) -> Result<BackendFactory> {
+    pub(super) fn factory(&self) -> Result<BackendFactory> {
         Ok(
             BackendFactory::new(self.config.clone(), &self.cwd, self.env.clone())?
                 .with_resolved_registry(self.registry.clone())
@@ -2594,100 +2594,6 @@ pub(super) fn child_executor(
     executor.with_child_identity("", None, None, None)
 }
 
-/// The query a model override opens.
-///
-/// The target model is resolved with the level, and it inherits the session's
-/// non-auto service tier when it declares one: a child spawned from a
-/// flex-tier session stays on flex where the target supports it.
-pub(super) fn override_query(
-    support: &SubagentSupport,
-    template: &dyn Backend,
-    model: &str,
-    level: Option<ThinkingLevel>,
-) -> Result<String> {
-    let selection = template.selection();
-    // A CLI backend keeps its model list in its own config, so the provider
-    // registry cannot resolve it. The backend branch runs first: the registry
-    // holds providers only.
-    if let Some(query) = backend_query(&support.config, &selection.thinking, model, level.as_ref())
-        .map_err(|e| Error::Tool(format!("invalid model override: {e}")))?
-    {
-        return Ok(query);
-    }
-    let (model, thinking) = super::model::select_model_for_subagent(
-        &support.registry,
-        &support.config,
-        model,
-        level,
-        &selection.service_tier,
-    )
-    .map_err(|e| Error::Tool(format!("invalid model override: {e}")))?;
-    Ok(format!(
-        "{}/{}:{}@{}",
-        model.provider,
-        model.id,
-        thinking.as_str(),
-        model.service_tier.as_str()
-    ))
-}
-
-/// The query a model override for a CLI backend opens, or `None` when the name
-/// belongs to a provider.
-///
-/// A backend's models live in its own config. The name must be one that
-/// config names: its `model`, one of its `models`, or `default` for the
-/// configured one, which the backend itself resolves. The level defaults to
-/// the spawning session's, and a level the backend does not accept fails here
-/// rather than at the child's first request.
-fn backend_query(
-    config: &Config,
-    template_thinking: &ThinkingLevel,
-    query: &str,
-    level: Option<&ThinkingLevel>,
-) -> Result<Option<String>> {
-    let parsed = super::model::parse_model_query(query)?;
-    let Some(backend) = config.backends.get(&parsed.provider) else {
-        return Ok(None);
-    };
-    let ids = crate::backend::model_ids(backend);
-    if !ids.iter().any(|id| id == &parsed.model) {
-        return Err(Error::Config(format!(
-            "no model `{}` for backend `{}`; configured: {}",
-            parsed.model,
-            parsed.provider,
-            ids.join(", ")
-        )));
-    }
-    // Every id of one backend declares the same levels: the picker reads them
-    // from the same table.
-    let levels = crate::backend::configured_models(&parsed.provider, backend, backend.model())
-        .into_iter()
-        .next()
-        .map(|choice| choice.thinking_levels)
-        .unwrap_or_default();
-    let desired = level
-        .cloned()
-        .or(parsed.level)
-        .unwrap_or_else(|| template_thinking.clone());
-    if desired != ThinkingLevel::Off && !levels.contains(&desired) {
-        let allowed: Vec<&str> = levels.iter().map(ThinkingLevel::as_str).collect();
-        return Err(Error::Config(format!(
-            "thinking level {} is not supported by backend `{}`; allowed: {}",
-            desired.as_str(),
-            parsed.provider,
-            allowed.join(", ")
-        )));
-    }
-    let tier = parsed.tier.unwrap_or(lofi_types::ServiceTier::Auto);
-    Ok(Some(format!(
-        "{}/{}:{}@{}",
-        parsed.provider,
-        parsed.model,
-        desired.as_str(),
-        tier.as_str()
-    )))
-}
-
 /// The same child at another thinking level. Off is always allowed, and a
 /// session model that declares no levels still runs at Off.
 fn with_thinking(
@@ -2728,32 +2634,35 @@ async fn child_backend(
     args: &Value,
 ) -> std::result::Result<BackendRef, RunRejection> {
     let model = str_arg(args, "model")?;
-    let level = str_arg(args, "thinking")?
-        .map(|level| {
-            ThinkingLevel::parse(level)
-                .ok_or_else(|| Error::Tool(format!("unknown thinking level: {level}")))
-        })
-        .transpose()?;
+    // An unknown level becomes a custom one: the target decides whether it
+    // accepts it, the same way a `:level` suffix does.
+    let level = str_arg(args, "thinking")?.map(ThinkingLevel::parse_or_custom);
     // Captured once, before the fork, from the parent session's live hints.
     let root_request = inherited_request(template.as_ref());
+    let executor = child_executor(template.as_ref(), support, root_request);
+    // The subagent hook is installed when the worker starts, so its template
+    // keeps the selection the worker was opened with: fork reads the live one,
+    // which a model or thinking switch has since changed.
+    let parent = template.fork(executor.clone());
     let mut child = if let Some(query) = model {
-        // An explicit level is resolved together with the model so it is
-        // validated against the supported levels of the target.
-        let query = override_query(support, template.as_ref(), query, level.clone())?;
-        let executor = child_executor(template.as_ref(), support, root_request.clone());
+        // The factory resolves the name against whichever catalog holds it, and
+        // an explicit level is resolved with the model so it is validated
+        // against the supported levels of the target.
+        let factory = support.factory()?;
+        let query = factory
+            .resolve_model_query(&parent.selection(), query, level)
+            .map_err(|e| Error::Tool(format!("invalid model override: {e}")))?;
         // The factory opens a session backend; a child forks from it so it
         // runs without run management of its own.
-        let opened = support
-            .factory()?
+        let opened = factory
             .open(Some(&query), executor.clone())
             .await
             .map_err(|e| Error::Tool(format!("invalid model override: {e}")))?;
         opened.fork(executor)
     } else {
-        let child = template.fork(child_executor(template.as_ref(), support, root_request));
         match level {
-            Some(level) => with_thinking(child, &level)?,
-            None => child,
+            Some(level) => with_thinking(parent, &level)?,
+            None => parent,
         }
     };
     if let Some(system) = str_arg(args, "system")? {
