@@ -22,6 +22,9 @@ pub struct Exchange {
     /// The model asked for no more tools.
     pub finished: bool,
     pub stop_reason: Option<StopReason>,
+    /// The transport stopped the round at its reply byte budget and kept the
+    /// answer so far. The turn decides whether to ask again.
+    pub capped: bool,
 }
 
 impl Exchange {
@@ -30,6 +33,17 @@ impl Exchange {
         Self {
             finished: true,
             stop_reason,
+            capped: false,
+        }
+    }
+
+    /// The same terminal round, cut at the reply byte budget.
+    #[must_use]
+    pub fn done_capped(stop_reason: Option<StopReason>) -> Self {
+        Self {
+            finished: true,
+            stop_reason,
+            capped: true,
         }
     }
 
@@ -38,6 +52,7 @@ impl Exchange {
         Self {
             finished: false,
             stop_reason,
+            capped: false,
         }
     }
 }

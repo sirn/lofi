@@ -414,3 +414,148 @@ fn thinking_only_detection_requires_reasoning_and_no_answer_content() {
         },
     ])));
 }
+
+/// Reasoning that holds no repeated pattern, so the loop guard leaves it to
+/// the byte budget. A constant filler reads as a loop after 100 bytes.
+fn noisy_reasoning(len: usize, salt: u64) -> String {
+    let mut state = 0x2545_f491_4f6c_dd1d_u64 ^ salt;
+    (0..len)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            char::from(b'a' + ((state >> 33) % 26) as u8)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_round_at_its_reply_budget_keeps_its_answer_and_asks_once_for_less() {
+    let dir = tempdir().unwrap();
+    let budget = MAX_ROUND_BYTES;
+    // The answer the model had begun, then reasoning that fills the budget:
+    // a thinking: high model spends the reply on it before it says anything.
+    let capped_round = vec![
+        StreamingEvent::TextDelta("partial answer".into()),
+        StreamingEvent::ThinkingDelta(noisy_reasoning(budget / 2, 1)),
+        StreamingEvent::ThinkingDelta(noisy_reasoning(budget / 2 + 1, 2)),
+    ];
+    let brief_round = vec![
+        StreamingEvent::TextDelta("brief answer".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::EndTurn),
+        },
+    ];
+    let agent = agent_with(vec![capped_round, brief_round], dir.path());
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), PromptKind::User),
+            tx,
+            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let answers: Vec<&Message> = messages
+        .iter()
+        .filter(|message| message.role == Role::Assistant)
+        .collect();
+    assert_eq!(answers.len(), 2, "{messages:?}");
+    // The answer so far stays; the reasoning that filled the budget does not:
+    // an incomplete trace carries no signature, and a provider rejects a part
+    // it did not sign.
+    assert_eq!(
+        answers[0].blocks,
+        vec![ContentBlock::Text {
+            text: "partial answer".into()
+        }],
+        "{:?}",
+        answers[0].blocks
+    );
+    assert_eq!(
+        answers[1].blocks,
+        vec![ContentBlock::Text {
+            text: "brief answer".into()
+        }]
+    );
+
+    let notices: Vec<&Message> = messages
+        .iter()
+        .filter(|message| message.kind == PromptKind::Notice)
+        .collect();
+    assert_eq!(notices.len(), 1, "{messages:?}");
+    let ContentBlock::Text { text } = &notices[0].blocks[0] else {
+        panic!("expected notice text");
+    };
+    assert!(text.contains("reply size limit"), "{text}");
+
+    let mut saw_budget_notice = false;
+    while let Ok(event) = rx.try_recv() {
+        if let AgentEvent::Notice(text) = event {
+            if text.contains("byte budget") {
+                saw_budget_notice = true;
+            }
+        }
+    }
+    assert!(saw_budget_notice, "the round is reported, not failed");
+}
+
+#[tokio::test]
+async fn a_second_round_at_the_reply_budget_stops_the_turn() {
+    let dir = tempdir().unwrap();
+    let oversized = |salt| {
+        vec![StreamingEvent::ThinkingDelta(noisy_reasoning(
+            MAX_ROUND_BYTES + 1,
+            salt,
+        ))]
+    };
+    let agent = agent_with(vec![oversized(3), oversized(4)], dir.path());
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), PromptKind::User),
+            tx,
+            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // Both rounds filled the budget inside their reasoning, so neither kept a
+    // message: an empty assistant message is not a valid request.
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.role == Role::Assistant)
+            .count(),
+        0,
+        "{messages:?}"
+    );
+    let notices: Vec<String> = messages
+        .iter()
+        .filter(|message| message.kind == PromptKind::Notice)
+        .filter_map(|message| match &message.blocks[0] {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notices.len(), 2, "{notices:?}");
+    assert!(notices[0].contains("reply size limit"), "{notices:?}");
+    assert!(
+        notices[1].contains("byte budget again"),
+        "a second round at the budget ends the turn: {notices:?}"
+    );
+}

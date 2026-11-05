@@ -9,7 +9,8 @@ use lofi_types::{ContentBlock, Message, PromptKind, Role, StopReason};
 
 pub(super) use super::super::THINKING_ONLY_CONTINUATION_PROMPT as THINKING_ONLY_PROMPT;
 use super::super::{
-    INTENT_CONTINUATION_PROMPT, LOST_TOOL_CONTINUATION_PROMPT, TRUNCATION_CONTINUATION_PROMPT,
+    BYTE_BUDGET_CONTINUATION_PROMPT, INTENT_CONTINUATION_PROMPT, LOST_TOOL_CONTINUATION_PROMPT,
+    TRUNCATION_CONTINUATION_PROMPT,
 };
 use super::contract::Exchange;
 
@@ -93,6 +94,36 @@ pub(super) fn handle_loop_detection(
         action: RecoveryAction::Continue,
         removal: interrupted_thinking_index.map(|index| (index, notice)),
         notice: loop_recovery_message(detail),
+    })
+}
+
+/// The plan for a round that stopped at its reply byte budget with no tool
+/// call. The round kept what the model wrote, so the turn asks once for a
+/// briefer answer. A second round at the budget stops the turn: asking again
+/// spends the run on a model that cannot say less.
+pub(super) fn handle_byte_budget(capped: bool, recovered: &mut bool) -> Option<RecoveryPlan> {
+    if !capped {
+        return None;
+    }
+    let (action, notice) = if *recovered {
+        (
+            RecoveryAction::Stop,
+            notice_message(format!(
+                "agent stopped after the reply exceeded the {} byte budget again",
+                super::super::MAX_ROUND_BYTES
+            )),
+        )
+    } else {
+        *recovered = true;
+        (
+            RecoveryAction::Continue,
+            notice_message(BYTE_BUDGET_CONTINUATION_PROMPT),
+        )
+    };
+    Some(RecoveryPlan {
+        action,
+        removal: None,
+        notice,
     })
 }
 

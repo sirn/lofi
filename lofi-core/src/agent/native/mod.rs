@@ -235,6 +235,8 @@ impl Agent {
         let mut tool_emitted: HashMap<String, usize> = HashMap::new();
         let mut tool_decoders: HashMap<String, super::CodePrefixDecoder> = HashMap::new();
         let mut provider_progress = false;
+        // The round stopped at its reply byte budget instead of failing.
+        let mut budget_capped = false;
         let collect = async {
             let mut thinking_open: Option<Instant> = None;
             loop {
@@ -387,10 +389,20 @@ impl Agent {
                     StreamingEvent::Done { .. } => 0,
                 });
                 if round_bytes > super::MAX_ROUND_BYTES {
-                    return Err(Error::Provider(format!(
-                        "round exceeded {} byte budget",
-                        super::MAX_ROUND_BYTES
-                    )));
+                    // Keep what the model wrote before the budget ran out and
+                    // let the turn ask again. A round of reasoning that big is
+                    // not an answer, and failing the turn on it spends the run.
+                    if !sink
+                        .notice(format!(
+                            "reply exceeded {} byte budget; kept the answer so far",
+                            super::MAX_ROUND_BYTES
+                        ))
+                        .await
+                    {
+                        return Err(Error::Cancelled);
+                    }
+                    budget_capped = true;
+                    break;
                 }
                 assembler.push(e);
                 if terminal {
@@ -439,26 +451,39 @@ impl Agent {
             } else {
                 std::collections::HashSet::new()
             };
-        let assistant_index = messages.len();
         let mut assistant = assembler.finish();
         stamp_message_origin(&mut assistant, &model);
         cap_exec_descriptions(&mut assistant.blocks);
-        messages.push(assistant);
-        let tool_uses: Vec<(String, String, serde_json::Value)> = {
-            let assistant = &messages[assistant_index];
+        if budget_capped {
+            // Reasoning that filled the budget cannot be replayed: an
+            // incomplete trace carries no signature, and a provider rejects a
+            // part it did not sign. The answer and the tool calls stay.
             assistant
                 .blocks
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::ToolUse { id, name, input } => {
-                        Some((id.clone(), name.clone(), input.clone()))
-                    }
-                    _ => None,
-                })
-                .collect()
-        };
+                .retain(|block| !matches!(block, ContentBlock::Thinking { .. }));
+        }
+        let tool_uses: Vec<(String, String, serde_json::Value)> = assistant
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::ToolUse { id, name, input } => {
+                    Some((id.clone(), name.clone(), input.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        // A capped round that kept nothing — the budget filled inside its
+        // reasoning — adds no message: an empty one is not a valid request.
+        let kept_nothing = budget_capped && assistant.blocks.is_empty();
+        if !kept_nothing {
+            messages.push(assistant);
+        }
         if tool_uses.is_empty() {
-            return Ok(Exchange::done(round_stop_reason));
+            return Ok(if budget_capped {
+                Exchange::done_capped(round_stop_reason)
+            } else {
+                Exchange::done(round_stop_reason)
+            });
         }
         // The prompt is durable before the first tool runs.
         io.commit(messages).await;

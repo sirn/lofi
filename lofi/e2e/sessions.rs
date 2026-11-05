@@ -619,6 +619,8 @@ fn five_hundred_mebibyte_transcript_stays_below_memory_limit() {
             48,
             "MEMORY_STREAM_DONE",
         ),
+        // The capped round is kept and the turn asks once for a brief answer.
+        text_response("memory brief answer"),
     ]);
     let fixture = Fixture::new(&server);
     let mut seed = fixture.spawn(&[]);
@@ -642,7 +644,7 @@ fn five_hundred_mebibyte_transcript_stays_below_memory_limit() {
     let startup_rss = tui.resident_kib();
     let startup_peak = tui.peak_resident_kib();
     tui.submit("memory turn prompt");
-    tui.wait_for("round exceeded 1048576 byte budget", WAIT);
+    tui.wait_for("reply exceeded 1048576 byte budget", WAIT);
     std::thread::sleep(std::time::Duration::from_millis(250));
     let turn_rss = tui.resident_kib();
     let turn_peak = tui.peak_resident_kib();

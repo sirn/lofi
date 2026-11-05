@@ -140,6 +140,7 @@ pub(crate) const TRUNCATION_CONTINUATION_PROMPT: &str =
 pub(crate) const THINKING_ONLY_CONTINUATION_PROMPT: &str = "Your previous response contained reasoning but no final answer. Continue the task and give the final answer.";
 pub(crate) const LOST_TOOL_CONTINUATION_PROMPT: &str = "Your tool call was not received. Continue the task by issuing the required tool call again. If no tool call is required, give the final answer.";
 pub(crate) const INTENT_CONTINUATION_PROMPT: &str = "Continue the task now. If the task is already complete, give the final answer. Do not only describe the next action.";
+pub(crate) const BYTE_BUDGET_CONTINUATION_PROMPT: &str = "Your previous response was cut off at the reply size limit. Answer briefly: give the result and omit long reasoning.";
 
 /// Spend of one complete usage report, or `None` when the model carries no
 /// price. The same arithmetic bills a finished round and a one-shot call.

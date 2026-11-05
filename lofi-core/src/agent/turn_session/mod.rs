@@ -38,8 +38,9 @@ use crate::session::recorder::{SessionRecorder, TurnOutcome};
 use crate::session::store::SessionCursor;
 
 use recovery::{
-    handle_loop_detection, handle_thinking_only_stop, notice_message, recovery_round_exceeded,
-    terminal_recovery_prompt, RecoveryAction, RecoveryPlan, THINKING_ONLY_PROMPT,
+    handle_byte_budget, handle_loop_detection, handle_thinking_only_stop, notice_message,
+    recovery_round_exceeded, terminal_recovery_prompt, RecoveryAction, RecoveryPlan,
+    THINKING_ONLY_PROMPT,
 };
 
 /// Input for a new prompt or a silent hard-compaction continuation.
@@ -200,6 +201,7 @@ pub async fn run(
     let mut driver_view = TurnDriver::new(io.events().sender().clone());
     let mut auto_continued = false;
     let mut loop_recovered = false;
+    let mut budget_recovered = false;
     let mut recovery_rounds = 0usize;
     let mut retry = RetrySession::new(policy.retry);
     let mut opened = false;
@@ -325,6 +327,9 @@ pub async fn run(
                         thinking_only_prompt,
                         &mut auto_continued,
                     );
+                }
+                if plan.is_none() {
+                    plan = handle_byte_budget(exchange.capped, &mut budget_recovered);
                 }
                 if let Some(plan) = plan {
                     match repair_round(&mut driver_view, &io, messages, plan, &policy).await {
