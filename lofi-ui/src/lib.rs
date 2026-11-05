@@ -75,6 +75,20 @@ impl InteractiveOptions {
     }
 }
 
+/// Where a print-mode run keeps its transcript.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PrintSession {
+    /// Write no transcript; the default.
+    #[default]
+    None,
+    /// Start a new session for this run.
+    Fresh,
+    /// Continue the most recent session of this workspace.
+    Continue,
+    /// Resume the session whose id starts with this prefix.
+    Resume(String),
+}
+
 #[derive(Debug, Clone)]
 pub struct PrintOptions {
     pub prompt: String,
@@ -85,6 +99,8 @@ pub struct PrintOptions {
     pub env: Vec<String>,
     /// Where to write one JSON record of the run; `None` writes nothing.
     pub summary: Option<PathBuf>,
+    /// Where the run keeps its transcript, so a killed run can be resumed.
+    pub session: PrintSession,
 }
 
 impl PrintOptions {
@@ -98,6 +114,7 @@ impl PrintOptions {
             backend: None,
             env: Vec::new(),
             summary: None,
+            session: PrintSession::None,
         }
     }
 
@@ -123,6 +140,27 @@ impl PrintOptions {
     #[must_use]
     pub fn with_summary(mut self, path: impl Into<PathBuf>) -> Self {
         self.summary = Some(path.into());
+        self
+    }
+
+    /// Start a new session for this run.
+    #[must_use]
+    pub fn with_session(mut self) -> Self {
+        self.session = PrintSession::Fresh;
+        self
+    }
+
+    /// Continue the most recent session of this workspace.
+    #[must_use]
+    pub fn with_continue(mut self) -> Self {
+        self.session = PrintSession::Continue;
+        self
+    }
+
+    /// Resume the session whose id starts with `id`.
+    #[must_use]
+    pub fn with_resume(mut self, id: impl Into<String>) -> Self {
+        self.session = PrintSession::Resume(id.into());
         self
     }
 }
@@ -402,6 +440,82 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
     result
 }
 
+/// The transcript one print run writes, and the history it resumed.
+struct PrintTranscript {
+    /// Holds the store and the session file open for the whole run.
+    _sink: lofi_core::session::sink::SessionSink,
+    cursor: lofi_core::session::store::SessionCursor,
+    /// Messages a resumed session already holds, oldest first.
+    history: Vec<lofi_types::Message>,
+}
+
+impl PrintTranscript {
+    fn cursor(&self) -> &lofi_core::session::store::SessionCursor {
+        &self.cursor
+    }
+
+    fn id(&self) -> String {
+        self.cursor.id()
+    }
+
+    /// Hand the resumed history to the turn exactly once.
+    fn take_history(&mut self) -> Vec<lofi_types::Message> {
+        std::mem::take(&mut self.history)
+    }
+}
+
+/// Open the transcript a print run asked for. A run without one writes
+/// nothing, the way every print run used to behave.
+fn open_transcript(
+    opts: &PrintOptions,
+    model: &lofi_types::RunModel,
+    system_prompt: &str,
+) -> Result<Option<PrintTranscript>> {
+    use lofi_core::session::{replay, sink::SessionSink};
+    match &opts.session {
+        PrintSession::None => Ok(None),
+        PrintSession::Resume(id) => {
+            let (sink, cursor, snapshot) = SessionSink::resume_by_id(&opts.root, id)?;
+            let history =
+                replay::history_from_index(&cursor, &snapshot.index, snapshot.history_start)?;
+            Ok(Some(PrintTranscript {
+                _sink: sink,
+                cursor,
+                history,
+            }))
+        }
+        PrintSession::Continue => match SessionSink::resume_last(&opts.root)? {
+            Some((sink, cursor, snapshot)) => {
+                let history =
+                    replay::history_from_index(&cursor, &snapshot.index, snapshot.history_start)?;
+                Ok(Some(PrintTranscript {
+                    _sink: sink,
+                    cursor,
+                    history,
+                }))
+            }
+            // --continue with nothing to continue starts a session, the way
+            // it starts the TUI on a fresh transcript.
+            None => Ok(Some(fresh_transcript(&opts.root, model, system_prompt)?)),
+        },
+        PrintSession::Fresh => Ok(Some(fresh_transcript(&opts.root, model, system_prompt)?)),
+    }
+}
+
+fn fresh_transcript(
+    root: &std::path::Path,
+    model: &lofi_types::RunModel,
+    system_prompt: &str,
+) -> Result<PrintTranscript> {
+    let mut sink = lofi_core::session::sink::SessionSink::open(root)?;
+    let cursor = sink.cursor_or_create(model, system_prompt)?;
+    Ok(PrintTranscript {
+        _sink: sink,
+        cursor,
+        history: Vec::new(),
+    })
+}
+
 /// Runs one non-interactive turn and folds its events into `summary`.
 #[allow(clippy::too_many_lines)]
 async fn run_print_turn(
@@ -433,10 +547,24 @@ async fn run_print_turn(
     // fails before its first round reports one.
     summary.borrow_mut().set_model(agent.run_model());
 
+    // A run in a session keeps a transcript, so a driver that kills it and
+    // resumes the id gets every completed round back.
+    let mut transcript = open_transcript(opts, &agent.run_model(), agent.system_prompt())?;
+    let mut messages = transcript
+        .as_mut()
+        .map(PrintTranscript::take_history)
+        .unwrap_or_default();
+    if let Some(transcript) = &transcript {
+        // The driver that kills this run needs the id to resume it, and the
+        // record carries the same id for a driver that reads it afterwards.
+        let id = transcript.id();
+        eprintln!("session: {id}");
+        summary.borrow_mut().set_session(id);
+    }
+
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
 
     let prompt = opts.prompt.clone();
-    let mut messages = Vec::new();
     let agent_run = agent.run_turn(
         &mut messages,
         lofi_core::TurnRequest {
@@ -448,7 +576,7 @@ async fn run_print_turn(
             notices: Vec::new(),
         },
         tx,
-        None,
+        transcript.as_ref().map(PrintTranscript::cursor),
         lofi_core::RunControls {
             cancel: None,
             preempt: None,
@@ -479,6 +607,7 @@ async fn run_print_turn(
                 | AgentEvent::RoundCommitted { .. }
                 | AgentEvent::TurnCommitted { .. }
                 | AgentEvent::RoundUsage { .. }
+                | AgentEvent::TurnUsage { .. }
                 | AgentEvent::SubagentUsage { .. }
                 | AgentEvent::ContextReported { .. }
                 | AgentEvent::ModelReported { .. }

@@ -6,7 +6,7 @@ use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 
 use crate::support::{
-    delayed_text_response, stop_text_response, text_response, thinking_response,
+    delayed_text_response, event_types, stop_text_response, text_response, thinking_response,
     thinking_tool_response, tool_response, Fixture, MockResponse, MockServer, WAIT,
 };
 
@@ -326,6 +326,128 @@ fn a_failed_env_spec_still_writes_its_record() {
             .is_some_and(|error| error.contains("LOFI_E2E_UNSET_ENV_NAME")),
         "{record}"
     );
+}
+
+#[test]
+fn print_mode_writes_a_transcript_when_asked() {
+    let server = MockServer::start(vec![stop_text_response("session answer")]);
+    let fixture = Fixture::new(&server);
+    let path = fixture.workspace.join("session-summary.json");
+
+    let output = fixture.output(&[
+        "--print",
+        "session prompt",
+        "--session",
+        "--summary",
+        path.to_str().unwrap(),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let reported = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("session: "))
+        .expect("the run names its session before the first round")
+        .to_string();
+
+    let files = fixture.session_files();
+    assert_eq!(files.len(), 1, "one transcript: {files:?}");
+    let stem = files[0]
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap()
+        .to_string();
+    assert!(
+        stem.starts_with(&reported),
+        "the reported id resumes this run: {reported:?} vs {stem:?}"
+    );
+    let events = fixture.events();
+    let kinds = event_types(&events);
+    assert_eq!(
+        kinds.iter().filter(|kind| **kind == "turn_end").count(),
+        1,
+        "one turn: {kinds:?}"
+    );
+    assert!(kinds.contains(&"message"), "{kinds:?}");
+
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(record["session"], serde_json::json!(stem), "{record}");
+}
+
+#[test]
+fn print_mode_resumes_the_session_it_named() {
+    let server = MockServer::start(vec![
+        delayed_text_response(
+            "answer the killed run never wrote",
+            std::time::Duration::from_millis(500),
+        ),
+        text_response("print resume answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut child = fixture
+        .command(&["--print", "killed print prompt", "--session"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // The prompt checkpoint lands before the provider answers, so a kill
+    // during the request loses only the unstreamed answer.
+    fixture.wait_for_event_count("message", 1);
+    kill(
+        Pid::from_raw(i32::try_from(child.id()).unwrap()),
+        Signal::SIGKILL,
+    )
+    .unwrap();
+    child.wait().unwrap();
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
+    let reported = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("session: "))
+        .expect("the killed run named its session")
+        .to_string();
+
+    let output = fixture.output(&["--print", "resumed print prompt", "--resume", &reported]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("print resume answer"), "{stdout:?}");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let resumed = &requests[1].body;
+    assert!(
+        resumed.contains("killed print prompt"),
+        "the interrupted prompt stays in the request: {resumed}"
+    );
+    assert!(resumed.contains("resumed print prompt"), "{resumed}");
+    assert!(!resumed.contains("answer the killed run never wrote"));
+}
+
+#[test]
+fn print_mode_refuses_no_session_with_a_session_flag() {
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+
+    let output = fixture.output(&[
+        "--print",
+        "conflicting prompt",
+        "--no-session",
+        "--resume",
+        "abc123",
+    ]);
+    assert!(!output.status.success(), "the flags conflict");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--no-session conflicts"), "{stderr}");
+    assert!(fixture.session_files().is_empty());
 }
 
 #[test]

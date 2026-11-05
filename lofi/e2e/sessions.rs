@@ -931,6 +931,50 @@ fn prompt_is_durable_when_the_process_stops_during_the_provider_request() {
 }
 
 #[test]
+fn a_killed_round_keeps_its_spend_for_the_resumed_session() {
+    let server = MockServer::start(vec![
+        tool_response_with_usage("spend-round", "return { done: true };", 42),
+        delayed_text_response(
+            "answer the killed turn never wrote",
+            std::time::Duration::from_millis(500),
+        ),
+        text_response("resumed after a killed round"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut killed = fixture.spawn(&[]);
+
+    killed.submit("killed round prompt");
+    // The round's checkpoint lands when the second request starts: the tool
+    // result is durable before the provider answers again.
+    let started = std::time::Instant::now();
+    while server.request_count() < 2 && started.elapsed() < WAIT {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    fixture.wait_for_event_count("turn_usage", 2);
+    killed.kill_now();
+    drop(killed);
+    std::thread::sleep(std::time::Duration::from_millis(550));
+
+    // The turn never settled, so the checkpoint's spend is all a resume has.
+    let events = fixture.events();
+    let snapshot = events
+        .iter()
+        .rfind(|event| event["type"] == "turn_usage")
+        .expect("the killed turn recorded what its round cost");
+    assert_eq!(snapshot["usage"]["input_tokens"], json!(42), "{snapshot}");
+    assert!(!event_types(&events).contains(&"turn_end"));
+
+    let mut resumed = fixture.spawn(&["--continue"]);
+    resumed.submit("resumed after the killed round");
+    resumed.wait_for("resumed after a killed round", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].body.contains("killed round prompt"));
+    assert!(requests[2].body.contains("resumed after the killed round"));
+}
+
+#[test]
 fn user_shell_output_creates_a_session_and_survives_restart() {
     let server = MockServer::start(vec![text_response("shell resume answer")]);
     let fixture = Fixture::new(&server);

@@ -156,6 +156,14 @@ pub enum AgentEvent {
         cost: f64,
         usage: Usage,
     },
+    /// Spend of a turn the transcript holds but no process ever settled: the
+    /// process died mid-turn, and the turn's checkpoints carry what it cost.
+    /// `cost` is the turn's cumulative and `usage` its latest round's, so a
+    /// fold adds both once, exactly like [`TurnEnd`](Self::TurnEnd).
+    TurnUsage {
+        cost: f64,
+        usage: Usage,
+    },
     /// Spend of subagent runs that settled since the last event, as deltas.
     /// The UI folds these into the session totals only: child tokens never
     /// occupy the parent context window, so the gauge must not see them.

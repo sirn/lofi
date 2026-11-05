@@ -126,12 +126,7 @@ impl AgentLifecycle {
         index: &[SessionIndexEntry],
         history_start: usize,
     ) -> Result<()> {
-        let offsets: Vec<u64> = index[history_start.min(index.len())..]
-            .iter()
-            .rev()
-            .map(|entry| entry.offset)
-            .collect();
-        let messages = history_from_cursor(cursor, &offsets)?;
+        let messages = crate::session::replay::history_from_index(cursor, index, history_start)?;
         self.replace_history(messages)?;
         Ok(())
     }

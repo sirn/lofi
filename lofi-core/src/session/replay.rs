@@ -108,6 +108,9 @@ pub fn replay_selected_session_events(events: &[SessionEvent], emit: impl FnMut(
 
 #[allow(clippy::too_many_lines)]
 fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEvent)) {
+    // A checkpoint's spend stands for a turn no marker ended. A later
+    // terminal marker on the same lineage supersedes it.
+    let mut unterminated: Option<(f64, Usage)> = None;
     let mut tool_elapsed: Map<&str, u64> = Map::new();
     let mut native_by_parent: Map<&str, Vec<&NativeToolRecord>> = Map::new();
     let mut thinking_timing: Vec<u64> = Vec::new();
@@ -302,6 +305,7 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                     summary: summary.clone(),
                 });
             }
+            SessionEventKind::TurnUsage { cost, usage, .. } => unterminated = Some((*cost, *usage)),
             SessionEventKind::TurnEnd {
                 model,
                 elapsed_ms,
@@ -310,6 +314,7 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                 stop_reason,
                 ..
             } => {
+                unterminated = None;
                 emit(AgentEvent::TurnEnd {
                     model: model.clone(),
                     elapsed_ms: *elapsed_ms,
@@ -326,6 +331,7 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                 usage,
                 ..
             } => {
+                unterminated = None;
                 emit(AgentEvent::TurnFailed {
                     model: model.clone(),
                     elapsed_ms: *elapsed_ms,
@@ -340,6 +346,7 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                 cost,
                 usage,
             } => {
+                unterminated = None;
                 emit(AgentEvent::TurnCancelled {
                     model: model.clone(),
                     elapsed_ms: *elapsed_ms,
@@ -348,6 +355,10 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                 });
             }
         }
+    }
+    // The last turn left no marker: report the spend its checkpoints kept.
+    if let Some((cost, usage)) = unterminated {
+        emit(AgentEvent::TurnUsage { cost, usage });
     }
 }
 
@@ -365,7 +376,7 @@ pub fn agent_message_for_event(kind: &SessionEventKind) -> Option<Message> {
         // so the lifecycle rule is visible without scanning the `_` arm.
         SessionEventKind::JobStarted { .. } | SessionEventKind::JobFinished { .. } => None,
         // Accounting only; the model never sees subagent spend.
-        SessionEventKind::SubagentUsage { .. } => None,
+        SessionEventKind::SubagentUsage { .. } | SessionEventKind::TurnUsage { .. } => None,
         // Host bookkeeping: the timer set lives outside the conversation.
         SessionEventKind::TimerState { .. } => None,
         SessionEventKind::Message(m) => Some(m.clone()),
@@ -556,6 +567,31 @@ pub fn visible_index_path(index: &[SessionIndexEntry]) -> Vec<usize> {
         .collect()
 }
 
+/// Rebuild the model history of a session from its index: every event from
+/// `history_start` on, projected the way a live turn projects it. Print mode
+/// resumes a session with this, so a prompt the killed run never finished is
+/// in the request the new run sends.
+///
+/// # Errors
+/// Propagates transcript reads.
+pub fn history_from_index(
+    cursor: &SessionCursor,
+    index: &[SessionIndexEntry],
+    history_start: usize,
+) -> lofi_error::Result<Vec<Message>> {
+    let offsets: Vec<u64> = index[history_start.min(index.len())..]
+        .iter()
+        .rev()
+        .map(|entry| entry.offset)
+        .collect();
+    let mut projection = AgentHistoryProjection::default();
+    cursor.visit_events(&offsets, |event| {
+        projection.push(&event);
+        Ok(())
+    })?;
+    Ok(projection.finish())
+}
+
 #[must_use]
 pub fn last_run_model_from_index(
     cursor: &SessionCursor,
@@ -597,7 +633,10 @@ pub fn compaction_status_from_index(
         .filter(|(_, event)| {
             matches!(
                 event.kind,
-                IndexKind::TurnEnd | IndexKind::TurnFailed | IndexKind::TurnCancelled
+                IndexKind::TurnEnd
+                    | IndexKind::TurnFailed
+                    | IndexKind::TurnCancelled
+                    | IndexKind::TurnUsage
             )
         })
         .find_map(|(pos, event)| {
@@ -605,7 +644,8 @@ pub fn compaction_status_from_index(
             match ev.kind {
                 SessionEventKind::TurnEnd { usage, .. }
                 | SessionEventKind::TurnFailed { usage, .. }
-                | SessionEventKind::TurnCancelled { usage, .. } => Some((pos, usage)),
+                | SessionEventKind::TurnCancelled { usage, .. }
+                | SessionEventKind::TurnUsage { usage, .. } => Some((pos, usage)),
                 _ => None,
             }
         });
@@ -923,6 +963,69 @@ mod tests {
                 usage: Usage::default(),
             },
         }
+    }
+
+    fn turn_usage(cost: f64, input_tokens: u64) -> SessionEvent {
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::TurnUsage {
+                elapsed_ms: 5,
+                cost,
+                usage: Usage {
+                    input_tokens,
+                    ..Usage::default()
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn a_turn_no_marker_ended_reports_the_spend_its_checkpoint_kept() {
+        let mut events = vec![
+            user_msg("go"),
+            assistant_msg("round one"),
+            turn_usage(0.5, 40),
+        ];
+        chain(&mut events);
+        let mut replayed = Vec::new();
+        replay_session_events(&events, |event| replayed.push(event));
+
+        assert!(
+            replayed.iter().any(|event| matches!(
+                event,
+                AgentEvent::TurnUsage { cost, usage }
+                    if (*cost - 0.5).abs() < 1e-9 && usage.input_tokens == 40
+            )),
+            "a killed turn keeps its spend: {replayed:?}"
+        );
+    }
+
+    #[test]
+    fn a_terminal_marker_supersedes_the_checkpoint_spend() {
+        let mut events = vec![
+            user_msg("go"),
+            assistant_msg("round one"),
+            turn_usage(0.5, 40),
+            turn_end(),
+        ];
+        chain(&mut events);
+        let mut replayed = Vec::new();
+        replay_session_events(&events, |event| replayed.push(event));
+
+        assert!(
+            replayed
+                .iter()
+                .all(|event| !matches!(event, AgentEvent::TurnUsage { .. })),
+            "the terminal marker already carries the same spend: {replayed:?}"
+        );
+        assert_eq!(
+            replayed
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::TurnEnd { .. }))
+                .count(),
+            1
+        );
     }
 
     #[test]

@@ -37,6 +37,7 @@ See [End-to-end testing](docs/e2e.md) for the current coverage map, architecture
 | `-c`, `--continue` | Resume the most recent session for this workspace. |
 | `--resume <ID>` | Resume a specific session by id prefix. |
 | `--no-session` | Do not persist a transcript. |
+| `--session` | With `--print`, write a transcript of the run so it can be resumed. |
 | `--summary <FILE>` | With `--print`, write one JSON record of the run to FILE. See [Run summary](#run-summary). |
 
 ### Run summary
@@ -64,6 +65,29 @@ A run that SIGINT or SIGTERM kills dies by that signal and writes no
 record. Do not read FILE after a signal kills the run: it can be empty,
 hold part of a record, or still hold what it held before the run.
 `--summary` without `--print` is rejected before the run starts.
+The `session` field names the transcript the run wrote or resumed, or
+`null` when it kept none.
+
+### Print-mode sessions
+
+A print run keeps a transcript when you ask for one: `--session` starts a
+session, `--resume <ID>` continues one by id prefix, and `--continue`
+resumes this workspace's most recent one.
+A resumed run sends the history the transcript holds, so a prompt the
+killed run never finished is part of the new request.
+
+```sh
+lofi --print "Fix the failing test" --session
+lofi --print "Now add the test" --resume 3f9a2c
+```
+
+A run in a session prints `session: <ID>` on stderr before its first
+round, so a driver that kills the run knows what to resume.
+`--no-session` with `--session`, `--continue`, or `--resume` is rejected:
+print mode never ignores a session flag.
+A checkpoint after each round keeps that round's tokens and cost, so a
+run that dies mid-turn still reports what it spent when the session is
+resumed.
 
 ### Subcommands
 

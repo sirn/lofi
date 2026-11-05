@@ -50,6 +50,8 @@ pub(crate) struct PrintSummary {
     /// Child spend, as deltas over the run.
     subagents: Usage,
     subagent_cost: f64,
+    /// The session this run wrote or resumed; absent when it kept none.
+    session: Option<String>,
 }
 
 impl PrintSummary {
@@ -57,6 +59,11 @@ impl PrintSummary {
     /// first round still says what it was going to use.
     pub(crate) fn set_model(&mut self, model: RunModel) {
         self.model = Some(model);
+    }
+
+    /// Name the session a driver resumes this run by.
+    pub(crate) fn set_session(&mut self, id: String) {
+        self.session = Some(id);
     }
 
     /// Reconcile the record with the error the run returned. A consumer
@@ -145,6 +152,7 @@ impl PrintSummary {
             "cost": self.cost,
             "subagents": usage_json(&self.subagents, Some(self.subagent_cost)),
             "stop_reason": self.stop_reason.and_then(|reason| serde_json::to_value(reason).ok()),
+            "session": self.session,
             "duration_ms": wall_ms,
             "error": self.error,
         })
@@ -268,6 +276,27 @@ mod tests {
             "the record covers the whole run, not just the turn: {record}"
         );
         assert_eq!(record["error"], serde_json::Value::Null, "{record}");
+        assert_eq!(
+            record["session"],
+            serde_json::Value::Null,
+            "a run that kept no transcript names no session: {record}"
+        );
+    }
+
+    #[test]
+    fn the_record_names_the_session_a_driver_resumes_by() {
+        let mut summary = summary();
+        summary.set_session("abc123".to_string());
+        summary.note(&AgentEvent::TurnEnd {
+            model: model(),
+            elapsed_ms: 10,
+            cost: 0.1,
+            usage: Usage::default(),
+            stop_reason: Some(StopReason::EndTurn),
+        });
+
+        let record = summary.record(20);
+        assert_eq!(record["session"], json!("abc123"), "{record}");
     }
 
     #[test]

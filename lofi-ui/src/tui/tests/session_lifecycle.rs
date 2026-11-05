@@ -789,6 +789,34 @@ fn turn_end_updates_usage() {
 }
 
 #[test]
+fn an_unterminated_turn_spend_counts_once_after_a_resume() {
+    let mut a = app();
+    a.apply_event(AgentEvent::Prompt {
+        prompt: "killed turn".into(),
+        kind: lofi_types::PromptKind::User,
+    });
+    // The transcript's last turn has a checkpoint but no terminal marker.
+    a.apply_event(AgentEvent::TurnUsage {
+        cost: 0.25,
+        usage: Usage {
+            input_tokens: 40,
+            output_tokens: 3,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        },
+    });
+
+    assert_eq!(a.total_in, 40, "the killed turn's tokens stay spent");
+    assert_eq!(a.total_out, 3);
+    assert!((a.cost - 0.25).abs() < 1e-9, "and its cost: {}", a.cost);
+    assert_eq!(a.status_usage.map(|usage| usage.input_tokens), Some(40));
+    assert!(
+        !a.turn_has_round_usage,
+        "the snapshot settles the fold: no later turn_end pending here"
+    );
+}
+
+#[test]
 fn round_usage_updates_totals_per_round() {
     let mut a = app();
     a.apply_event(AgentEvent::Prompt {

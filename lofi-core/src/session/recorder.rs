@@ -87,6 +87,17 @@ pub struct TurnBatch<'a> {
     tool_elapsed: Vec<(&'a String, &'a u64)>,
     thinking_elapsed: &'a [u64],
     terminal: Option<SessionEventKind>,
+    /// Spend so far, written with a mid-turn checkpoint and dropped for a
+    /// terminal one: the marker carries the same numbers.
+    usage: Option<UsageSnapshot>,
+}
+
+/// Spend of a turn at one checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct UsageSnapshot {
+    elapsed_ms: u64,
+    cost: f64,
+    usage: Usage,
 }
 
 impl store::SessionCursor {
@@ -110,6 +121,7 @@ impl store::SessionCursor {
             tool_elapsed: Vec::new(),
             thinking_elapsed: &[],
             terminal: None,
+            usage: None,
         };
         self.record(SessionRecord::Turn(batch)).map(|_| ())
     }
@@ -282,6 +294,16 @@ fn record_turn(cursor: &store::SessionCursor, batch: TurnBatch<'_>) -> Result<(u
             parent_id: None,
             kind,
         });
+    } else if let Some(snapshot) = batch.usage {
+        events.push(SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::TurnUsage {
+                elapsed_ms: snapshot.elapsed_ms,
+                cost: snapshot.cost,
+                usage: snapshot.usage,
+            },
+        });
     }
     if events.is_empty() {
         return Ok((0, 0));
@@ -370,7 +392,12 @@ impl SessionRecorder {
             return Ok(None);
         }
         let discarded = self.flush_pending_discard()?;
-        let appended = self.append_pending(messages, summary, None)?;
+        let usage = Some(UsageSnapshot {
+            elapsed_ms: summary.elapsed_ms,
+            cost: summary.cost,
+            usage: summary.usage,
+        });
+        let appended = self.append_pending(messages, summary, None, usage)?;
         Ok(merge_ranges(discarded, appended))
     }
 
@@ -433,7 +460,7 @@ impl SessionRecorder {
             TurnOutcome::ContextPressure | TurnOutcome::Detached => None,
         };
         let discarded = self.flush_pending_discard()?;
-        let appended = self.append_pending(messages, summary, terminal)?;
+        let appended = self.append_pending(messages, summary, terminal, None)?;
         self.flushed = true;
         Ok(merge_ranges(discarded, appended))
     }
@@ -455,6 +482,7 @@ impl SessionRecorder {
         messages: &[Message],
         summary: &TurnSummary,
         terminal: Option<SessionEventKind>,
+        usage: Option<UsageSnapshot>,
     ) -> Result<Option<(u64, u64)>> {
         let slice_from = self
             .message_count
@@ -479,6 +507,7 @@ impl SessionRecorder {
             tool_elapsed: new_tool_timings,
             thinking_elapsed: new_thinking,
             terminal,
+            usage,
         }))?;
         if end <= start {
             return Ok(None);
@@ -558,6 +587,11 @@ mod tests {
         assert!(matches!(events[i].kind, SessionEventKind::Message(_)));
         i += 1;
         assert!(matches!(events[i].kind, SessionEventKind::Message(_)));
+        i += 1;
+        match &events[i].kind {
+            SessionEventKind::TurnUsage { elapsed_ms, .. } => assert_eq!(*elapsed_ms, 50),
+            other => panic!("expected the checkpoint's spend, got {other:?}"),
+        }
         i += 1;
         match &events[i].kind {
             SessionEventKind::NativeTool(rec) => {
@@ -666,6 +700,59 @@ mod tests {
             .is_none());
         assert_complete_turn(&cursor.load_tree_events().unwrap());
         let _ = range;
+    }
+
+    #[test]
+    fn a_checkpoint_keeps_the_spend_of_a_turn_that_never_settles() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, header()).unwrap();
+        let cursor = store::SessionCursor::new(path, None);
+        let mut rec = SessionRecorder::new(cursor.clone(), "m".into());
+        let mut spend = summary(10);
+        spend.cost = 0.25;
+        spend.usage = Usage {
+            input_tokens: 40,
+            output_tokens: 2,
+            ..Usage::default()
+        };
+        let messages = vec![user_msg("go"), assistant_text("round one")];
+
+        rec.checkpoint(&messages, &spend).unwrap();
+
+        let snapshots = |events: &[SessionEvent]| {
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, SessionEventKind::TurnUsage { .. }))
+                .count()
+        };
+        let events = cursor.load_tree_events().unwrap();
+        assert_eq!(snapshots(&events), 1, "a checkpoint carries the spend");
+        let snapshot = events
+            .iter()
+            .find(|event| matches!(event.kind, SessionEventKind::TurnUsage { .. }))
+            .unwrap();
+        assert!(matches!(
+            snapshot.kind,
+            SessionEventKind::TurnUsage { cost, usage, .. }
+                if (cost - 0.25).abs() < 1e-9
+                    && usage.input_tokens == 40
+                    && usage.output_tokens == 2
+        ));
+
+        // The terminal marker carries the same numbers: it replaces the
+        // snapshot instead of repeating it.
+        rec.flush(&messages, &TurnOutcome::Finished, &spend)
+            .unwrap();
+        let events = cursor.load_tree_events().unwrap();
+        assert_eq!(snapshots(&events), 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, SessionEventKind::TurnEnd { .. }))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -823,7 +910,7 @@ mod tests {
                     saw_discard_marker = true;
                     assert!(detail.contains("loop"));
                 }
-                SessionEventKind::TurnEnd { .. } => {}
+                SessionEventKind::TurnEnd { .. } | SessionEventKind::TurnUsage { .. } => {}
                 other => panic!("unexpected event in test: {other:?}"),
             }
         }

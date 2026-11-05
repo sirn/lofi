@@ -387,6 +387,16 @@ impl App {
                 self.context_pressure = true;
                 return;
             }
+            AgentEvent::TurnUsage { cost, usage } => {
+                // The transcript's last turn never settled: the process died
+                // before its terminal marker. Its checkpoints kept the spend,
+                // so the resumed totals match what the provider billed.
+                self.cost += cost;
+                self.total_in += usage.input_tokens;
+                self.total_out += usage.output_tokens;
+                self.status_usage = Some(usage);
+                return;
+            }
             AgentEvent::Compaction { .. } => self.mark_compacted(),
             _ => {}
         }

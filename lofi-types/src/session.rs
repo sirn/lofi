@@ -76,6 +76,16 @@ pub enum SessionEventKind {
         #[serde(default)]
         keep_context: bool,
     },
+    /// Spend of a turn still in progress, written after each checkpointed
+    /// round. A process killed mid-turn writes no terminal marker, so this is
+    /// the only record of what the turn cost; a terminal marker on the same
+    /// lineage replaces it. `usage` is the latest round's, `cost` the turn's
+    /// cumulative, exactly like the terminal markers.
+    TurnUsage {
+        elapsed_ms: u64,
+        cost: f64,
+        usage: Usage,
+    },
     /// A turn explicitly interrupted by the user.
     /// message, completed rounds and the partial current response remain both
     /// visible and available to subsequent model turns.

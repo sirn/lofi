@@ -37,6 +37,9 @@ struct Cli {
     /// Write one JSON record of the print-mode run to this file
     #[arg(long, value_name = "FILE", requires = "print")]
     summary: Option<std::path::PathBuf>,
+    /// Write a transcript of the print-mode run so it can be resumed
+    #[arg(long, requires = "print")]
+    session: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -205,7 +208,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
         return Ok(());
     }
     if let Some(prompt) = cli.print.clone() {
-        let opts = build_print_opts(&cli, prompt, root);
+        let opts = build_print_opts(&cli, prompt, root)?;
         crate::run_print(opts).await?;
     } else {
         let opts = build_interactive_opts(&cli, root);
@@ -300,7 +303,11 @@ fn policy_explain(cmd: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_print_opts(cli: &Cli, prompt: String, root: std::path::PathBuf) -> PrintOptions {
+fn build_print_opts(
+    cli: &Cli,
+    prompt: String,
+    root: std::path::PathBuf,
+) -> anyhow::Result<PrintOptions> {
     let mut opts = PrintOptions::new(prompt, root);
     opts.backend.clone_from(&cli.backend);
     if let Some(m) = &cli.model {
@@ -312,7 +319,20 @@ fn build_print_opts(cli: &Cli, prompt: String, root: std::path::PathBuf) -> Prin
     if let Some(path) = &cli.summary {
         opts = opts.with_summary(path.clone());
     }
-    opts
+    // Print mode never ignores a session flag: --resume and --continue mean
+    // here what they mean interactively, and --no-session refuses both
+    // rather than writing a transcript nobody asked for.
+    if cli.no_session && (cli.session || cli.continue_last || cli.resume.is_some()) {
+        anyhow::bail!("--no-session conflicts with --session, --continue and --resume");
+    }
+    if let Some(id) = &cli.resume {
+        opts = opts.with_resume(id);
+    } else if cli.continue_last {
+        opts = opts.with_continue();
+    } else if cli.session {
+        opts = opts.with_session();
+    }
+    Ok(opts)
 }
 
 fn build_interactive_opts(cli: &Cli, root: std::path::PathBuf) -> InteractiveOptions {
