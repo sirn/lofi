@@ -2436,11 +2436,16 @@ fn classify_outcome(
                     }
                     // A pressure turn stops with the window full: a resume does
                     // not compact the child history, so it would stop again.
-                    TurnOutcome::ContextPressure => (
+                    TurnOutcome::ContextPressure { resume: true } => (
                         Status::Failed,
                         Some("context window is full".to_string()),
                         true,
                     ),
+                    // A child that stopped on its own keeps the answer it
+                    // wrote, and the parent reads it as the child's result.
+                    TurnOutcome::ContextPressure { resume: false } => {
+                        (Status::Completed, None, true)
+                    }
                     // A failed turn settles as `Err` from the turn session, so
                     // this arm is a guard on that contract, not a live path.
                     TurnOutcome::Failed(error) => (Status::Failed, Some(error), true),

@@ -299,6 +299,15 @@ fn openai_effort(level: &ThinkingLevel) -> Option<&str> {
     (level != &ThinkingLevel::Off).then(|| level.as_str())
 }
 
+/// Retained mapper state is endpoint-controlled: an endpoint can send an id or
+/// a signature for every index it never reuses and never starts a call for it.
+/// Past these bounds a call is not mapped at all: its start, arguments, and
+/// signature go nowhere, so the round keeps its other calls and never runs one
+/// whose arguments were lost.
+const MAX_MAPPED_TOOL_CALLS: usize = 256;
+const MAX_MAPPED_TOOL_CALL_BYTES: usize = 1024 * 1024;
+const MAX_PENDING_SIGNATURE_BYTES: usize = 1024 * 1024;
+
 /// `OpenAI` identifies each streaming tool call by a stable `index`; the call
 /// `id` arrives only on the first delta for that index. We map `index -> id`
 /// so later argument deltas (which carry `index` but not `id`) are emitted
@@ -309,6 +318,10 @@ fn openai_effort(level: &ThinkingLevel) -> Option<&str> {
 pub(crate) struct ChatMapperState {
     index_to_id: std::collections::HashMap<u64, String>,
     pending_signature_by_index: std::collections::HashMap<u64, (String, String)>,
+    /// Bytes held in `index_to_id`.
+    mapped_id_bytes: usize,
+    /// Bytes held in `pending_signature_by_index`.
+    pending_signature_bytes: usize,
     // The delta key the server used to stream its chain-of-thought for the
     // current block (see the reasoning-delta branch in map_openai_chat_event).
     reasoning_field: Option<String>,
@@ -442,10 +455,22 @@ fn map_tool_call(call: &Value, state: &mut ChatMapperState, out: &mut Vec<Stream
         .and_then(Value::as_str);
 
     if let (Some(index), Some(id)) = (index, id) {
-        state
-            .index_to_id
-            .entry(index)
-            .or_insert_with(|| id.to_string());
+        if !state.index_to_id.contains_key(&index) {
+            let room = state.index_to_id.len() < MAX_MAPPED_TOOL_CALLS
+                && state.mapped_id_bytes.saturating_add(id.len()) <= MAX_MAPPED_TOOL_CALL_BYTES;
+            if !room {
+                // Later frames of this call carry only its index, so its
+                // arguments can never be assembled. Running the calls the
+                // map did hold would hide that the round lost one, so the
+                // round fails instead of looking whole.
+                out.push(StreamingEvent::Error(format!(
+                    "the reply named more tool calls than the map holds: {MAX_MAPPED_TOOL_CALLS} calls, {MAX_MAPPED_TOOL_CALL_BYTES} bytes of ids"
+                )));
+                return;
+            }
+            state.mapped_id_bytes += id.len();
+            state.index_to_id.insert(index, id.to_string());
+        }
     }
     if let (Some(id), Some(name)) = (id, name) {
         if !name.is_empty() {
@@ -474,17 +499,53 @@ fn map_tool_signature(
     state: &mut ChatMapperState,
     out: &mut Vec<StreamingEvent>,
 ) {
-    let signature = extra_content_signature(call)
+    let mut signature = extra_content_signature(call)
         .map(|(namespace, signature)| (namespace.to_string(), signature.to_string()));
     if let (Some(index), Some(signature)) = (index, signature.as_ref()) {
+        let held = signature.0.len() + signature.1.len();
+        let replaced = state
+            .pending_signature_by_index
+            .get(&index)
+            .map_or(0, |(namespace, signature)| {
+                namespace.len() + signature.len()
+            });
         if id.is_none() && !state.index_to_id.contains_key(&index) {
+            // A repeat for the same index replaces its entry, so the count
+            // limit cannot block a replacement that the byte limit holds.
+            let room = (replaced > 0
+                || state.pending_signature_by_index.len() < MAX_MAPPED_TOOL_CALLS)
+                && state
+                    .pending_signature_bytes
+                    .saturating_sub(replaced)
+                    .saturating_add(held)
+                    <= MAX_PENDING_SIGNATURE_BYTES;
+            if !room {
+                // The call would start without the signature its reasoning
+                // was signed with, and the provider rejects that replay.
+                out.push(StreamingEvent::Error(format!(
+                    "the reply carried more tool signatures than the map holds: {MAX_MAPPED_TOOL_CALLS} pending, {MAX_PENDING_SIGNATURE_BYTES} bytes"
+                )));
+                return;
+            }
+            state.pending_signature_bytes = state
+                .pending_signature_bytes
+                .saturating_sub(replaced)
+                .saturating_add(held);
             state
                 .pending_signature_by_index
                 .insert(index, signature.clone());
         }
     }
-    let signature = signature
-        .or_else(|| index.and_then(|index| state.pending_signature_by_index.remove(&index)));
+    if signature.is_none() {
+        if let Some(index) = index {
+            if let Some((namespace, held)) = state.pending_signature_by_index.remove(&index) {
+                state.pending_signature_bytes = state
+                    .pending_signature_bytes
+                    .saturating_sub(namespace.len() + held.len());
+                signature = Some((namespace, held));
+            }
+        }
+    }
     let Some((namespace, signature)) = signature else {
         return;
     };
@@ -795,6 +856,133 @@ mod tests {
                 ..
             } if target == "call_2" && signature == "opaque"
         )));
+    }
+
+    #[test]
+    fn a_call_the_map_cannot_hold_fails_the_round() {
+        let mut state = ChatMapperState {
+            mapped_id_bytes: MAX_MAPPED_TOOL_CALL_BYTES,
+            ..ChatMapperState::default()
+        };
+        // Later frames carry only the index, so the call could never be
+        // assembled. Running the calls the map did hold would make the lost
+        // one invisible.
+        let first = json!({"choices":[{"delta":{"tool_calls":[{
+            "index": 3,
+            "id": "call_3",
+            "function": {"name": "exec", "arguments": "{\"code\":"}
+        }]}}]});
+        let events = map_openai_chat_event(&first, &mut state).unwrap();
+        assert!(
+            matches!(events.as_slice(), [StreamingEvent::Error(message)] if message.contains("more tool calls")),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_replaced_pending_signature_releases_its_bytes() {
+        let mut state = ChatMapperState {
+            provider: "plexus".to_string(),
+            model: "google/gemini-3.7-flash".to_string(),
+            ..ChatMapperState::default()
+        };
+        // An endpoint that rewrites one index in every frame must not spend
+        // the signature budget once per rewrite.
+        let big = "s".repeat(MAX_PENDING_SIGNATURE_BYTES / 2 + 1);
+        for _ in 0..8 {
+            let chunk = json!({"choices":[{"delta":{"tool_calls":[{
+                "index": 1,
+                "extra_content": {"google": {"thought_signature": big}}
+            }]}}]});
+            assert!(map_openai_chat_event(&chunk, &mut state)
+                .unwrap()
+                .is_empty());
+        }
+        assert_eq!(state.pending_signature_bytes, "google".len() + big.len());
+        assert!(state.pending_signature_by_index.contains_key(&1));
+    }
+    #[test]
+    fn the_call_count_limit_fails_the_round_on_the_next_call() {
+        let mut state = ChatMapperState::default();
+        for index in 0..MAX_MAPPED_TOOL_CALLS {
+            let chunk = json!({"choices":[{"delta":{"tool_calls":[{
+                "index": index,
+                "id": format!("call_{index}"),
+                "function": {"name": "exec", "arguments": "{}"}
+            }]}}]});
+            let events = map_openai_chat_event(&chunk, &mut state).unwrap();
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, StreamingEvent::Error(_))),
+                "{index}: {events:?}"
+            );
+        }
+        let extra = json!({"choices":[{"delta":{"tool_calls":[{
+            "index": MAX_MAPPED_TOOL_CALLS,
+            "id": "call_extra",
+            "function": {"name": "exec", "arguments": "{}"}
+        }]}}]});
+        let events = map_openai_chat_event(&extra, &mut state).unwrap();
+        assert!(
+            matches!(events.as_slice(), [StreamingEvent::Error(message)] if message.contains("more tool calls")),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_pending_signature_is_replaced_at_the_count_limit() {
+        let mut state = ChatMapperState {
+            provider: "plexus".to_string(),
+            model: "google/gemini-3.7-flash".to_string(),
+            ..ChatMapperState::default()
+        };
+        for index in 0..MAX_MAPPED_TOOL_CALLS {
+            let chunk = json!({"choices":[{"delta":{"tool_calls":[{
+                "index": index,
+                "extra_content": {"google": {"thought_signature": "first"}}
+            }]}}]});
+            assert!(map_openai_chat_event(&chunk, &mut state)
+                .unwrap()
+                .is_empty());
+        }
+        assert_eq!(
+            state.pending_signature_by_index.len(),
+            MAX_MAPPED_TOOL_CALLS
+        );
+        // The cap counts entries, not rewrites, so the latest signature for
+        // an index the map already holds still lands.
+        let replace = json!({"choices":[{"delta":{"tool_calls":[{
+            "index": 0,
+            "extra_content": {"google": {"thought_signature": "latest"}}
+        }]}}]});
+        assert!(map_openai_chat_event(&replace, &mut state)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            state
+                .pending_signature_by_index
+                .get(&0)
+                .map(|(_, signature)| signature.as_str()),
+            Some("latest")
+        );
+    }
+
+    #[test]
+    fn a_pending_signature_the_map_cannot_hold_fails_the_round() {
+        let mut state = ChatMapperState {
+            pending_signature_bytes: MAX_PENDING_SIGNATURE_BYTES,
+            ..ChatMapperState::default()
+        };
+        let chunk = json!({"choices":[{"delta":{"tool_calls":[{
+            "index": 1,
+            "extra_content": {"google": {"thought_signature": "opaque"}}
+        }]}}]});
+        let events = map_openai_chat_event(&chunk, &mut state).unwrap();
+        assert!(
+            matches!(events.as_slice(), [StreamingEvent::Error(message)] if message.contains("more tool signatures")),
+            "{events:?}"
+        );
     }
 
     #[test]

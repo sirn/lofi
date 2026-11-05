@@ -10,7 +10,7 @@ use lofi_types::{AutoContinuePolicy, ContentBlock, Message, PromptKind, Role, St
 pub(super) use super::super::THINKING_ONLY_CONTINUATION_PROMPT as THINKING_ONLY_PROMPT;
 use super::super::{
     BYTE_BUDGET_CONTINUATION_PROMPT, INTENT_CONTINUATION_PROMPT, LOST_TOOL_CONTINUATION_PROMPT,
-    TRUNCATION_CONTINUATION_PROMPT,
+    MAX_ROUND_BYTES, TRUNCATION_CONTINUATION_PROMPT,
 };
 use super::contract::Exchange;
 
@@ -97,46 +97,48 @@ pub(super) fn handle_loop_detection(
     })
 }
 
-/// The plan for a round that stopped at its reply byte budget with no tool
-/// call. The round kept what the model wrote, so the turn asks once for a
-/// briefer answer. A second round at the budget stops the turn: asking again
-/// spends the run on a model that cannot say less.
+/// The plan for a round cut at its reply byte budget, for the nth cut of the
+/// turn. The round kept what the model wrote, so a terminal cut asks once for
+/// a briefer answer, and a tool round takes its cut results and runs the next
+/// round on its own. A second cut or a disabled byte cap stops, and so does a
+/// cut answer when the turn already spent its continuation: asking again spends
+/// the run on a model that cannot say less.
 pub(super) fn handle_byte_budget(
-    capped: bool,
+    cut: usize,
+    finished: bool,
     policy: AutoContinuePolicy,
-    recovered: &mut bool,
+    continued: &mut bool,
 ) -> Option<RecoveryPlan> {
-    if !capped {
+    if cut == 0 {
         return None;
     }
-    let (action, notice) = if !policy.byte_cap {
-        (
-            RecoveryAction::Stop,
-            notice_message(format!(
-                "agent stopped: the reply exceeded the {} byte budget",
-                super::super::MAX_ROUND_BYTES
-            )),
-        )
-    } else if *recovered {
-        (
-            RecoveryAction::Stop,
-            notice_message(format!(
-                "agent stopped after the reply exceeded the {} byte budget again",
-                super::super::MAX_ROUND_BYTES
-            )),
-        )
-    } else {
-        *recovered = true;
-        (
-            RecoveryAction::Continue,
-            notice_message(BYTE_BUDGET_CONTINUATION_PROMPT),
-        )
-    };
+    if !policy.byte_cap || cut > 1 {
+        return Some(byte_budget_stop());
+    }
+    // The tool results already tell the model that its call was cut, so the
+    // first tool round runs on without spending the continuation.
+    if !finished {
+        return None;
+    }
+    if *continued {
+        return Some(byte_budget_stop());
+    }
+    *continued = true;
     Some(RecoveryPlan {
-        action,
+        action: RecoveryAction::Continue,
         removal: None,
-        notice,
+        notice: notice_message(BYTE_BUDGET_CONTINUATION_PROMPT),
     })
+}
+
+fn byte_budget_stop() -> RecoveryPlan {
+    RecoveryPlan {
+        action: RecoveryAction::Stop,
+        removal: None,
+        notice: notice_message(format!(
+            "agent stopped: the reply exceeded the {MAX_ROUND_BYTES} byte budget"
+        )),
+    }
 }
 
 pub(super) fn handle_thinking_only_stop(

@@ -201,7 +201,7 @@ pub async fn run(
     let mut driver_view = TurnDriver::new(io.events().sender().clone());
     let mut auto_continued = false;
     let mut loop_recovered = false;
-    let mut budget_recovered = false;
+    let mut budget_cuts = 0usize;
     let mut recovery_rounds = 0usize;
     let mut retry = RetrySession::new(policy.retry);
     let mut opened = false;
@@ -312,13 +312,44 @@ pub async fn run(
                     assistant.filter(|index| assistant_is_thinking_only(&messages[*index]));
                 let terminal_prompt =
                     terminal_recovery_prompt(&exchange, announced, policy.auto_continue);
-                let mut plan = loop_stop.as_ref().and_then(|stop| {
-                    handle_loop_detection(
-                        Some(&stop.detail),
-                        stop.in_message.then_some(assistant).flatten(),
-                        &mut loop_recovered,
-                    )
-                });
+                let budget_cut = if exchange.capped {
+                    budget_cuts += 1;
+                    budget_cuts
+                } else {
+                    0
+                };
+                // A cut round decides before the prompt shapes do: a trace
+                // cut by the budget is not a thinking-only answer. The cut is
+                // counted whatever plan wins, so an endpoint that cuts twice
+                // is not asked a third time.
+                let byte_plan = handle_byte_budget(
+                    budget_cut,
+                    exchange.finished,
+                    policy.auto_continue,
+                    &mut auto_continued,
+                );
+                // A stop the budget requires is final: a loop repair asks
+                // the model again, and the budget already said not to.
+                let mut plan = if matches!(
+                    &byte_plan,
+                    Some(RecoveryPlan {
+                        action: RecoveryAction::Stop,
+                        ..
+                    })
+                ) {
+                    byte_plan
+                } else {
+                    loop_stop
+                        .as_ref()
+                        .and_then(|stop| {
+                            handle_loop_detection(
+                                Some(&stop.detail),
+                                stop.in_message.then_some(assistant).flatten(),
+                                &mut loop_recovered,
+                            )
+                        })
+                        .or(byte_plan)
+                };
                 if plan.is_none() && exchange.finished {
                     let thinking_only_prompt = (exchange.stop_reason != Some(StopReason::Other))
                         .then_some(terminal_prompt.unwrap_or(THINKING_ONLY_PROMPT));
@@ -326,13 +357,6 @@ pub async fn run(
                         thinking_only_index,
                         thinking_only_prompt,
                         &mut auto_continued,
-                    );
-                }
-                if plan.is_none() {
-                    plan = handle_byte_budget(
-                        exchange.capped,
-                        policy.auto_continue,
-                        &mut budget_recovered,
                     );
                 }
                 if let Some(plan) = plan {
@@ -348,7 +372,7 @@ pub async fn run(
                 // compaction keeps verbatim). Stop before the next round would
                 // overflow the window and let the UI force-compact + continue.
                 if hard_cap_exceeded(&io, &policy) {
-                    break Ok(TurnOutcome::ContextPressure);
+                    break Ok(TurnOutcome::ContextPressure { resume: true });
                 }
                 if exchange.finished {
                     if !auto_continued {
@@ -440,7 +464,7 @@ pub async fn run(
                 // partial-turn suffix is empty and the recorder's
                 // ContextPressure arm leaves the durable transcript untouched.
                 if is_context_pressure(&error) {
-                    break Ok(TurnOutcome::ContextPressure);
+                    break Ok(TurnOutcome::ContextPressure { resume: true });
                 }
                 if progress {
                     if let Some(attempt) = retry.reset_after_progress() {
@@ -611,12 +635,17 @@ async fn repair_round(
     if !record_notice(driver, io, messages, plan.notice).await? {
         return Ok(Some(TurnOutcome::Detached));
     }
+    // The cap that ends the turn belongs here too: a repair round must not
+    // push a full context over the window, and a stopped turn still leaves
+    // the round it kept for the next prompt to carry. Only a repair asks the
+    // model again, so only a repair may resume after the compaction.
+    if hard_cap_exceeded(io, policy) {
+        return Ok(Some(TurnOutcome::ContextPressure {
+            resume: matches!(plan.action, RecoveryAction::Continue),
+        }));
+    }
     Ok(match plan.action {
-        // The repair asks again, so the cap that ends the turn belongs here
-        // too: a recovery round must not push a full context over the window.
-        RecoveryAction::Continue => {
-            hard_cap_exceeded(io, policy).then_some(TurnOutcome::ContextPressure)
-        }
+        RecoveryAction::Continue => None,
         RecoveryAction::Stop => Some(if io.events().is_closed() {
             TurnOutcome::Detached
         } else {

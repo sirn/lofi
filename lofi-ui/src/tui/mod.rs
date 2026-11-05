@@ -245,11 +245,11 @@ pub(crate) struct App {
     /// evaluated yet.
     settled_usage_fresh: bool,
     compacted: bool,
-    /// Set by `ContextPressure` when the engine force-stopped the run at the
-    /// hard context cap. The run loop reads (and clears) it on channel close
-    /// to drive the force-compact + silent continue, instead of the soft
-    /// `agent_settled` path.
-    context_pressure: bool,
+    /// Set by `ContextPressure` when the engine stopped the run at the hard
+    /// context cap, with whether the turn may resume after the compaction.
+    /// The run loop reads (and clears) it on channel close to drive the
+    /// force-compact, instead of the soft `agent_settled` path.
+    context_pressure: Option<bool>,
     run: Option<usize>,
     run_start: Option<Instant>,
     /// Model label captured when the run started. A mid-run `/model` switch

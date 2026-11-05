@@ -110,16 +110,20 @@ pub enum AgentEvent {
         cost: f64,
         usage: Usage,
     },
-    /// The run hit the hard context cap mid-turn: the latest round's
-    /// input tokens exceeded `context_window - reserved_context_tokens`.
-    /// The engine stops before the next (overflowing) round and commits the
-    /// partial turn (which ends in a completed tool cycle, so its messages
-    /// are kept verbatim). The UI force-compacts and silently continues via
-    /// [`TurnContinue`](Self::TurnContinue). Carries the same accumulators as
+    /// The run hit the hard context cap: the latest round's input tokens
+    /// exceeded `context_window - reserved_context_tokens`.
+    /// With `resume` set the engine stopped before the next (overflowing)
+    /// round and committed the partial turn (which ends in a completed tool
+    /// cycle, so its messages are kept verbatim). The UI force-compacts and
+    /// silently continues via [`TurnContinue`](Self::TurnContinue).
+    /// Without it the turn already stopped on its own and the kept context
+    /// only needs the compaction: asking the model again would override the
+    /// stop it just reported. Carries the same accumulators as
     /// [`TurnEnd`](Self::TurnEnd) so the context gauge and cost stay honest.
     /// Never persisted as a `SessionEvent` — the partial turn is committed
     /// without a terminal marker, so this is a live-only signal.
     ContextPressure {
+        resume: bool,
         elapsed_ms: u64,
         cost: f64,
         usage: Usage,

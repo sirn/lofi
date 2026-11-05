@@ -192,6 +192,27 @@ fn maps_tool_use_lifecycle() {
 }
 
 #[test]
+fn a_cut_before_the_first_end_marker_opens_every_call() {
+    // The protocol ends a call only with its own marker, so a cut that lands
+    // before the first one leaves every call unfinished, including one whose
+    // streamed arguments happen to parse.
+    let mut state = ResponsesMapperState::default();
+    let frames = [
+        json!({"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":""}}),
+        json!({"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"code\":\"1\"}"}),
+        json!({"type":"response.output_item.added","item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"exec","arguments":""}}),
+        json!({"type":"response.function_call_arguments.delta","item_id":"fc_2","delta":"{\"code\":"}),
+    ];
+    let mut assembler = crate::MessageAssembler::new(true);
+    for frame in &frames {
+        for event in map_openai_responses_event(frame, &mut state).unwrap() {
+            assembler.push(event);
+        }
+    }
+    assert_eq!(assembler.open_tool_ids(), ["call_1", "call_2"]);
+}
+
+#[test]
 fn completed_tool_item_recovers_arguments_when_deltas_are_absent() {
     let done = json!({
         "type":"response.output_item.done",

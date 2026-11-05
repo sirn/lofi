@@ -429,6 +429,30 @@ fn noisy_reasoning(len: usize, salt: u64) -> String {
         .collect()
 }
 
+/// A compact view of the history: a failure that dumps the live reasoning
+/// trace is unreadable.
+fn shape(messages: &[Message]) -> String {
+    messages
+        .iter()
+        .map(|message| {
+            let blocks: Vec<String> = message
+                .blocks
+                .iter()
+                .map(|block| match block {
+                    ContentBlock::Text { text } => format!("text({})", text.len()),
+                    ContentBlock::Thinking { text, .. } => format!("thinking({})", text.len()),
+                    ContentBlock::PartSignature { signature, .. } => {
+                        format!("signature({})", signature.len())
+                    }
+                    _ => "other".to_string(),
+                })
+                .collect();
+            format!("{}[{}]", message.role.as_str(), blocks.join(","))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[tokio::test]
 async fn a_round_at_its_reply_budget_keeps_its_answer_and_asks_once_for_less() {
     let dir = tempdir().unwrap();
@@ -448,7 +472,7 @@ async fn a_round_at_its_reply_budget_keeps_its_answer_and_asks_once_for_less() {
         },
     ];
     let agent = agent_with(vec![capped_round, brief_round], dir.path());
-    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
     let mut messages = Vec::new();
     agent
         .run_turn(
@@ -496,16 +520,6 @@ async fn a_round_at_its_reply_budget_keeps_its_answer_and_asks_once_for_less() {
         panic!("expected notice text");
     };
     assert!(text.contains("reply size limit"), "{text}");
-
-    let mut saw_budget_notice = false;
-    while let Ok(event) = rx.try_recv() {
-        if let AgentEvent::Notice(text) = event {
-            if text.contains("byte budget") {
-                saw_budget_notice = true;
-            }
-        }
-    }
-    assert!(saw_budget_notice, "the round is reported, not failed");
 }
 
 #[tokio::test]
@@ -555,18 +569,65 @@ async fn a_second_round_at_the_reply_budget_stops_the_turn() {
     assert_eq!(notices.len(), 2, "{notices:?}");
     assert!(notices[0].contains("reply size limit"), "{notices:?}");
     assert!(
-        notices[1].contains("byte budget again"),
+        notices[1].contains("agent stopped") && notices[1].contains("byte budget"),
         "a second round at the budget ends the turn: {notices:?}"
     );
 }
 
 #[tokio::test]
-async fn a_disabled_byte_cap_ends_the_turn_at_the_first_cut() {
+async fn an_oversized_signature_blob_fails_the_round_and_leaves_no_partial() {
     let dir = tempdir().unwrap();
-    let oversized = vec![StreamingEvent::ThinkingDelta(noisy_reasoning(
-        MAX_ROUND_BYTES + 1,
-        5,
-    ))];
+    // A redacted trace is never published, so the partial must not carry the
+    // blob the bound rejected.
+    let blob = "x".repeat(MAX_OPAQUE_ROUND_BYTES + 1);
+    let round = vec![StreamingEvent::ThinkingRedacted { data: blob }];
+    // A provider error is retryable by pattern; one attempt is enough.
+    let agent = Agent {
+        retry: crate::retry::RetryPolicy {
+            max_retries: 0,
+            ..crate::retry::RetryPolicy::default()
+        },
+        ..agent_with(vec![round], dir.path())
+    };
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    let outcome = agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), PromptKind::User),
+            tx,
+            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
+        )
+        .await;
+    let error = outcome.unwrap_err();
+    assert!(
+        error.to_string().contains("signatures and redacted traces"),
+        "{error}"
+    );
+    assert!(
+        !messages.iter().any(|message| message
+            .blocks
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Thinking { redacted: true, .. }))),
+        "the rejected blob must not reach the history: {}",
+        shape(&messages)
+    );
+}
+
+#[tokio::test]
+async fn a_disabled_byte_cap_drops_the_trace_it_cut_and_ends_the_turn() {
+    let dir = tempdir().unwrap();
+    // A trace that signs itself after its text holds no signature when the
+    // budget cuts it, so it is not replay data. The answer before it keeps
+    // the message, so the cut trace is the only block the pop can drop.
+    let oversized = vec![
+        StreamingEvent::TextDelta("an answer".into()),
+        StreamingEvent::ThinkingDelta(noisy_reasoning(MAX_ROUND_BYTES + 1, 5)),
+    ];
     let never_asked = vec![
         StreamingEvent::TextDelta("should not run".into()),
         StreamingEvent::Done {
@@ -596,9 +657,19 @@ async fn a_disabled_byte_cap_ends_the_turn_at_the_first_cut() {
         .await
         .unwrap();
 
-    assert!(messages
+    let assistant: Vec<&Message> = messages
         .iter()
-        .all(|message| message.role != Role::Assistant));
+        .filter(|message| message.role == Role::Assistant)
+        .collect();
+    assert_eq!(assistant.len(), 1, "{}", shape(&messages));
+    assert!(
+        matches!(
+            assistant[0].blocks.as_slice(),
+            [ContentBlock::Text { text }] if text == "an answer"
+        ),
+        "only the cut trace goes: {:?}",
+        assistant[0].blocks
+    );
     let notices: Vec<String> = messages
         .iter()
         .filter(|message| message.kind == PromptKind::Notice)
@@ -613,4 +684,906 @@ async fn a_disabled_byte_cap_ends_the_turn_at_the_first_cut() {
         !notices[0].contains("reply size limit"),
         "a disabled cap asks for nothing: {notices:?}"
     );
+    assert!(
+        !notices[0].contains("no final answer"),
+        "a cut trace is not a thinking-only answer: {notices:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_cut_trace_a_provider_signed_before_it_streamed_stays() {
+    let dir = tempdir().unwrap();
+    // A chat-completions trace declares the field it streams on before its
+    // text, so the cut lands inside a part the provider already signed.
+    // Replaying that prefix is what the field name asks for, so it stays,
+    // and the answer before it keeps the message.
+    let oversized = vec![
+        StreamingEvent::TextDelta("an answer".into()),
+        StreamingEvent::ThinkingSignature("reasoning_content".into()),
+        StreamingEvent::ThinkingDelta(noisy_reasoning(MAX_ROUND_BYTES + 1, 7)),
+    ];
+    let agent = agent_with(vec![oversized], dir.path()).with_auto_continue(
+        lofi_types::AutoContinuePolicy {
+            byte_cap: false,
+            ..lofi_types::AutoContinuePolicy::default()
+        },
+    );
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), PromptKind::User),
+            tx,
+            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let assistant: Vec<&Message> = messages
+        .iter()
+        .filter(|message| message.role == Role::Assistant)
+        .collect();
+    assert_eq!(assistant.len(), 1, "{}", shape(&messages));
+    assert!(
+        matches!(
+            assistant[0].blocks.as_slice(),
+            [ContentBlock::Text { text }, ContentBlock::Thinking { signature: Some(field), .. }]
+                if text == "an answer" && field == "reasoning_content"
+        ),
+        "the signed trace stays beside the answer: {}",
+        shape(&messages)
+    );
+}
+
+#[tokio::test]
+async fn a_cut_answer_over_the_hard_cap_stops_for_compaction() {
+    let dir = tempdir().unwrap();
+    // The kept answer alone overflows the cap, so the turn must not ask for a
+    // brief answer that carries it again: the UI compacts first.
+    let oversized = vec![StreamingEvent::TextDelta(noisy_reasoning(
+        MAX_ROUND_BYTES + 1,
+        11,
+    ))];
+    let mut agent = agent_with(vec![oversized], dir.path());
+    agent.model.context_window = Some(100_000);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), PromptKind::User),
+            tx,
+            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let assistant: Vec<&Message> = messages
+        .iter()
+        .filter(|message| message.role == Role::Assistant)
+        .collect();
+    assert_eq!(assistant.len(), 1, "{}", shape(&messages));
+    let mut saw_pressure = false;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, AgentEvent::ContextPressure { .. }) {
+            saw_pressure = true;
+        }
+    }
+    assert!(saw_pressure, "a cut over the cap must compact");
+}
+
+#[tokio::test]
+async fn a_cut_round_bills_the_prompt_the_next_request_carries() {
+    let dir = tempdir().unwrap();
+    // The trace this round keeps is dropped, so the history stays tiny: the
+    // injected system prompt alone is over the cap. The next request carries
+    // it, so the turn must compact instead of asking again.
+    let cut = vec![StreamingEvent::ThinkingDelta(noisy_reasoning(
+        MAX_ROUND_BYTES + 1,
+        23,
+    ))];
+    let mut agent = agent_with(vec![cut], dir.path());
+    agent.model.context_window = Some(100_000);
+    agent.system_prompt = "x".repeat(400_000);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), PromptKind::User),
+            tx,
+            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let assistant = messages
+        .iter()
+        .filter(|message| message.role == Role::Assistant)
+        .count();
+    assert_eq!(assistant, 0, "the cut kept no answer: {}", shape(&messages));
+    let mut pressure = None;
+    while let Ok(event) = rx.try_recv() {
+        if let AgentEvent::ContextPressure { resume, .. } = event {
+            pressure = Some(resume);
+        }
+    }
+    assert_eq!(
+        pressure,
+        Some(true),
+        "a prompt over the cap must compact before the next request"
+    );
+}
+
+#[tokio::test]
+async fn a_cut_answer_over_the_hard_cap_stops_with_the_byte_cap_off() {
+    let dir = tempdir().unwrap();
+    // With the byte cap off no continuation is asked, so the stop the budget
+    // returns is the last plan of the turn: it must not skip the cap, or the
+    // next prompt carries an answer the window cannot hold.
+    let oversized = vec![StreamingEvent::TextDelta(noisy_reasoning(
+        MAX_ROUND_BYTES + 1,
+        21,
+    ))];
+    let mut agent = agent_with(vec![oversized, final_round()], dir.path()).with_auto_continue(
+        lofi_types::AutoContinuePolicy {
+            byte_cap: false,
+            ..lofi_types::AutoContinuePolicy::default()
+        },
+    );
+    agent.model.context_window = Some(100_000);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), PromptKind::User),
+            tx,
+            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.blocks.iter().any(
+                |block| matches!(block, ContentBlock::Text { text } if text == "final answer")
+            )),
+        "no round may carry the answer again: {}",
+        shape(&messages)
+    );
+    let mut saw_pressure = None;
+    while let Ok(event) = rx.try_recv() {
+        if let AgentEvent::ContextPressure { resume, .. } = event {
+            saw_pressure = Some(resume);
+        }
+    }
+    assert_eq!(
+        saw_pressure,
+        Some(false),
+        "a stopped cut must compact without asking the model again"
+    );
+}
+
+#[tokio::test]
+async fn a_second_cut_over_the_hard_cap_stops_for_compaction() {
+    let dir = tempdir().unwrap();
+    // The first cut spent the continuation and kept no answer, so the second
+    // cut returns the stop plan. The answer that cut kept is over the cap and
+    // still must not go out: the next request would carry it.
+    let trace_only = vec![StreamingEvent::ThinkingDelta(noisy_reasoning(
+        MAX_ROUND_BYTES + 1,
+        22,
+    ))];
+    let oversized = vec![StreamingEvent::TextDelta(noisy_reasoning(
+        MAX_ROUND_BYTES + 1,
+        23,
+    ))];
+    let mut agent = agent_with(vec![trace_only, oversized, final_round()], dir.path());
+    agent.model.context_window = Some(100_000);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), PromptKind::User),
+            tx,
+            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.blocks.iter().any(
+                |block| matches!(block, ContentBlock::Text { text } if text == "final answer")
+            )),
+        "no round may carry the answer again: {}",
+        shape(&messages)
+    );
+    let mut saw_pressure = None;
+    while let Ok(event) = rx.try_recv() {
+        if let AgentEvent::ContextPressure { resume, .. } = event {
+            saw_pressure = Some(resume);
+        }
+    }
+    assert_eq!(
+        saw_pressure,
+        Some(false),
+        "a stopped cut must compact without asking the model again"
+    );
+}
+
+#[tokio::test]
+async fn a_cut_round_bills_the_tool_result_it_keeps() {
+    let dir = tempdir().unwrap();
+    // The round's call completes and runs before the budget cuts its trace,
+    // so its result joins the next request: the cap must read the fill that
+    // result raises, not the fill of the round before it.
+    let big = vec![
+        StreamingEvent::ToolUseStart {
+            id: "t1".into(),
+            name: "exec".into(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t1".into(),
+            delta: serde_json::json!({
+                "code": "return \"x\".repeat(200_000)",
+                "description": "run code"
+            })
+            .to_string(),
+        },
+        StreamingEvent::ToolUseEnd { id: "t1".into() },
+        StreamingEvent::ThinkingDelta(noisy_reasoning(MAX_ROUND_BYTES + 1, 24)),
+    ];
+    let mut agent = agent_with(vec![big, final_round()], dir.path());
+    // The default reserve leaves a 10k cap: the call's result alone is over.
+    agent.model.context_window = Some(30_000);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), PromptKind::User),
+            tx,
+            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let results: Vec<&ContentBlock> = messages
+        .iter()
+        .filter(|message| message.role == Role::Tool)
+        .flat_map(|message| message.blocks.iter())
+        .collect();
+    assert_eq!(results.len(), 1, "{}", shape(&messages));
+    let ContentBlock::ToolResult {
+        content, is_error, ..
+    } = results[0]
+    else {
+        panic!("expected a tool result");
+    };
+    assert!(!is_error, "{}", shape(&messages));
+    // The result is billed in chars over four, so it alone outgrows the cap.
+    assert!(content.len() > 40_000, "{} bytes", content.len());
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.blocks.iter().any(
+                |block| matches!(block, ContentBlock::Text { text } if text == "final answer")
+            )),
+        "the result fills the window, so no round may send it: {}",
+        shape(&messages)
+    );
+    let mut saw_pressure = false;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, AgentEvent::ContextPressure { .. }) {
+            saw_pressure = true;
+        }
+    }
+    assert!(saw_pressure, "the kept result must reach the cap");
+}
+
+#[tokio::test]
+async fn a_byte_cut_ends_the_turn_even_when_loop_recovery_would_continue() {
+    let dir = tempdir().unwrap();
+    // Five identical calls trip the loop guard, and the fifth round is cut by
+    // the budget too. The budget stop is final: a loop repair asks the model
+    // again, and the second-cut rule never gets to stop that request.
+    let same_call = |salt: Option<u64>| {
+        let mut round = vec![
+            StreamingEvent::ToolUseStart {
+                id: "t1".into(),
+                name: "exec".into(),
+            },
+            StreamingEvent::ToolUseInputDelta {
+                id: "t1".into(),
+                delta: serde_json::json!({ "code": "return 1", "description": "run code" })
+                    .to_string(),
+            },
+            StreamingEvent::ToolUseEnd { id: "t1".into() },
+        ];
+        if let Some(salt) = salt {
+            round.push(StreamingEvent::ThinkingDelta(noisy_reasoning(
+                MAX_ROUND_BYTES + 1,
+                salt,
+            )));
+        }
+        round.push(StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::ToolUse),
+        });
+        round
+    };
+    let mut rounds: Vec<_> = (0..4).map(|_| same_call(None)).collect();
+    rounds.push(same_call(Some(25)));
+    rounds.push(final_round());
+    let agent = agent_with(rounds, dir.path()).with_auto_continue(lofi_types::AutoContinuePolicy {
+        byte_cap: false,
+        ..lofi_types::AutoContinuePolicy::default()
+    });
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), PromptKind::User),
+            tx,
+            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.role == Role::Tool)
+            .flat_map(|message| message.blocks.iter())
+            .count(),
+        5,
+        "the cut round ends the turn: {}",
+        shape(&messages)
+    );
+    let notices: Vec<String> = messages
+        .iter()
+        .filter(|message| message.kind == PromptKind::Notice)
+        .filter_map(|message| match &message.blocks[0] {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].contains("byte budget"), "{notices:?}");
+}
+
+#[tokio::test]
+async fn a_capped_tool_round_cuts_the_call_and_a_second_cut_stops_the_turn() {
+    let dir = tempdir().unwrap();
+    // The round writes a tool call that the budget cuts in half: running it
+    // would send the model arguments it never wrote.
+    let cut_round = |salt| {
+        vec![
+            StreamingEvent::ToolUseStart {
+                id: "t1".into(),
+                name: "exec".into(),
+            },
+            StreamingEvent::ToolUseInputDelta {
+                id: "t1".into(),
+                delta: format!(
+                    "{{\"code\":\"{}\"",
+                    noisy_reasoning(MAX_ROUND_BYTES + 1, salt)
+                ),
+            },
+        ]
+    };
+    let agent = agent_with(vec![cut_round(7), cut_round(8)], dir.path());
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+    agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), PromptKind::User),
+            tx,
+            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // Both calls are answered as cut instead of executed with arguments the
+    // model never wrote. The first round runs on; the second cut ends it.
+    let tool_results: Vec<&ContentBlock> = messages
+        .iter()
+        .filter(|message| message.role == Role::Tool)
+        .flat_map(|message| message.blocks.iter())
+        .collect();
+    assert_eq!(tool_results.len(), 2, "{messages:?}");
+    for result in tool_results {
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = result
+        else {
+            panic!("expected a tool result");
+        };
+        assert!(is_error, "{content}");
+        assert!(content.contains("cut off"), "{content}");
+        assert!(content.contains("byte budget"), "{content}");
+    }
+    let notices: Vec<String> = messages
+        .iter()
+        .filter(|message| message.kind == PromptKind::Notice)
+        .filter_map(|message| match &message.blocks[0] {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].contains("agent stopped"), "{notices:?}");
+}
+
+#[tokio::test]
+async fn a_complete_trace_before_the_cut_stays_with_its_signature() {
+    let dir = tempdir().unwrap();
+    // Google signs a thought with the part signature that follows it. The
+    // round was cut later, in its text, so the thought is complete replay data.
+    let round = vec![
+        StreamingEvent::ThinkingDelta("weigh the options".into()),
+        StreamingEvent::PartSignature {
+            provider: "p".into(),
+            model: "m".into(),
+            format: lofi_types::PartSignatureFormat::Google,
+            target: None,
+            signature: "c2lnbmF0dXJl".into(),
+        },
+        StreamingEvent::TextDelta(noisy_reasoning(MAX_ROUND_BYTES + 1, 9)),
+    ];
+    let mut agent = agent_with(vec![round], dir.path());
+    agent.model.api = lofi_types::Api::GoogleGenerativeAi;
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+    agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), PromptKind::User),
+            tx,
+            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let Some(assistant) = messages
+        .iter()
+        .find(|message| message.role == Role::Assistant)
+    else {
+        panic!("the cut round is kept: {messages:?}");
+    };
+    assert!(
+        matches!(
+            assistant.blocks.as_slice(),
+            [
+                ContentBlock::Thinking { text, .. },
+                ContentBlock::PartSignature { .. },
+                ContentBlock::Text { .. },
+            ] if text == "weigh the options"
+        ),
+        "{:?}",
+        assistant.blocks
+    );
+}
+
+#[tokio::test]
+async fn a_disabled_byte_cap_stops_at_a_cut_tool_round() {
+    let dir = tempdir().unwrap();
+    // A tool round the budget cuts: with the cap off, the turn reports the cut
+    // and ends instead of running the next round.
+    let cut_round = vec![
+        StreamingEvent::ToolUseStart {
+            id: "t1".into(),
+            name: "exec".into(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t1".into(),
+            delta: format!(
+                "{{\"code\":\"{}\"",
+                noisy_reasoning(MAX_ROUND_BYTES + 1, 11)
+            ),
+        },
+    ];
+    let agent = agent_with(vec![cut_round, final_round()], dir.path()).with_auto_continue(
+        lofi_types::AutoContinuePolicy {
+            byte_cap: false,
+            ..lofi_types::AutoContinuePolicy::default()
+        },
+    );
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+    agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), PromptKind::User),
+            tx,
+            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // The second round never ran, so only the cut round is answered.
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.role == Role::Tool)
+            .flat_map(|message| message.blocks.iter())
+            .count(),
+        1,
+        "{messages:?}"
+    );
+    let notices: Vec<String> = messages
+        .iter()
+        .filter(|message| message.kind == PromptKind::Notice)
+        .filter_map(|message| match &message.blocks[0] {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].contains("byte budget"), "{notices:?}");
+}
+
+#[tokio::test]
+async fn a_terminal_cut_after_a_tool_cut_ends_the_turn() {
+    let dir = tempdir().unwrap();
+    // The first cut runs the next round; the second cut of the turn stops it,
+    // even when the round that hits it is the answer rather than a tool call.
+    let cut_tool_round = vec![
+        StreamingEvent::ToolUseStart {
+            id: "t1".into(),
+            name: "exec".into(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t1".into(),
+            delta: format!(
+                "{{\"code\":\"{}\"",
+                noisy_reasoning(MAX_ROUND_BYTES + 1, 12)
+            ),
+        },
+    ];
+    let cut_answer = vec![StreamingEvent::TextDelta(noisy_reasoning(
+        MAX_ROUND_BYTES + 1,
+        13,
+    ))];
+    let agent = agent_with(vec![cut_tool_round, cut_answer, final_round()], dir.path());
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+    agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), PromptKind::User),
+            tx,
+            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let notices: Vec<String> = messages
+        .iter()
+        .filter(|message| message.kind == PromptKind::Notice)
+        .filter_map(|message| match &message.blocks[0] {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].contains("agent stopped"), "{notices:?}");
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.blocks.iter().any(
+                |block| matches!(block, ContentBlock::Text { text } if text == "final answer")
+            )),
+        "the third round must not run: {messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_cut_round_that_kept_only_reasoning_adds_no_message() {
+    let dir = tempdir().unwrap();
+    // The budget fills after a complete signed trace, so the cut leaves only
+    // reasoning: an orphan trace must not enter the next request.
+    let round = vec![
+        StreamingEvent::ThinkingDelta("weigh the options".into()),
+        StreamingEvent::PartSignature {
+            provider: "p".into(),
+            model: "m".into(),
+            format: lofi_types::PartSignatureFormat::Google,
+            target: None,
+            signature: "signed".into(),
+        },
+        StreamingEvent::ThinkingDelta(noisy_reasoning(MAX_ROUND_BYTES + 1, 14)),
+    ];
+    let agent = agent_with(vec![round, final_round()], dir.path());
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+    agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), PromptKind::User),
+            tx,
+            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let assistant: Vec<&Message> = messages
+        .iter()
+        .filter(|message| message.role == Role::Assistant)
+        .collect();
+    assert_eq!(assistant.len(), 1, "{messages:?}");
+    assert!(
+        assistant[0]
+            .blocks
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Text { text } if text == "final answer")),
+        "only the answer round is kept: {messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_capped_round_cuts_every_open_tool_start() {
+    let dir = tempdir().unwrap();
+    // Two calls start and the budget cuts the round inside the second: neither
+    // may run, because one never held an argument and the other is still being
+    // written.
+    let cut_round = vec![
+        StreamingEvent::ToolUseStart {
+            id: "t0".into(),
+            name: "exec".into(),
+        },
+        StreamingEvent::ToolUseStart {
+            id: "t1".into(),
+            name: "exec".into(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t1".into(),
+            delta: format!(
+                "{{\"code\":\"{}\"",
+                noisy_reasoning(MAX_ROUND_BYTES + 1, 15)
+            ),
+        },
+    ];
+    let agent = agent_with(vec![cut_round, final_round()], dir.path());
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+    agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), PromptKind::User),
+            tx,
+            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let tool_results: Vec<&ContentBlock> = messages
+        .iter()
+        .filter(|message| message.role == Role::Tool)
+        .flat_map(|message| message.blocks.iter())
+        .collect();
+    assert_eq!(tool_results.len(), 2, "{messages:?}");
+    for result in tool_results {
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = result
+        else {
+            panic!("expected a tool result");
+        };
+        assert!(is_error, "{content}");
+        assert!(content.contains("cut off"), "{content}");
+        assert!(content.contains("byte budget"), "{content}");
+    }
+}
+
+#[tokio::test]
+async fn a_capped_round_on_a_marking_protocol_cuts_a_call_without_its_end() {
+    let dir = tempdir().unwrap();
+    // The protocol ends each call with its own marker, and the cut lands
+    // before the first one. A call whose arguments happen to parse is still
+    // unfinished: the provider may replace them when it completes the call.
+    let cut_round = vec![
+        StreamingEvent::ToolUseStart {
+            id: "t0".into(),
+            name: "exec".into(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t0".into(),
+            delta: r#"{"code":"1"}"#.into(),
+        },
+        StreamingEvent::ToolUseStart {
+            id: "t1".into(),
+            name: "exec".into(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t1".into(),
+            delta: format!(
+                "{{\"code\":\"{}\"",
+                noisy_reasoning(MAX_ROUND_BYTES + 1, 17)
+            ),
+        },
+    ];
+    let mut agent = agent_with(vec![cut_round, final_round()], dir.path());
+    agent.model.api = lofi_types::Api::OpenAiResponses;
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+    agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), PromptKind::User),
+            tx,
+            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let tool_results: Vec<&ContentBlock> = messages
+        .iter()
+        .filter(|message| message.role == Role::Tool)
+        .flat_map(|message| message.blocks.iter())
+        .collect();
+    assert_eq!(tool_results.len(), 2, "{messages:?}");
+    for result in tool_results {
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = result
+        else {
+            panic!("expected a tool result");
+        };
+        assert!(is_error, "{content}");
+        assert!(content.contains("cut off"), "{content}");
+        assert!(content.contains("byte budget"), "{content}");
+    }
+}
+
+#[tokio::test]
+async fn a_cut_round_raises_the_fill_it_never_billed() {
+    let dir = tempdir().unwrap();
+    // A capped round never reports usage, so the turn has to bill what the
+    // next request carries. With a small window the cut must reach the hard cap
+    // instead of sending the kept text. The kept answer fits the window, but
+    // the history it joins does not fit the cap the turn watches: a 10k window
+    // keeps a 7.5k cap, and the prompt alone is 8k tokens.
+    let cut_answer = vec![
+        StreamingEvent::TextDelta("partial answer".into()),
+        StreamingEvent::ThinkingDelta(noisy_reasoning(MAX_ROUND_BYTES + 1, 16)),
+    ];
+    let mut agent = agent_with(vec![cut_answer, final_round()], dir.path());
+    agent.model.context_window = Some(10_000);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg(&"h".repeat(32_000))];
+    agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), PromptKind::User),
+            tx,
+            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut saw_pressure = false;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, AgentEvent::ContextPressure { .. }) {
+            saw_pressure = true;
+        }
+    }
+    assert!(saw_pressure, "the cut round raises the fill over the cap");
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.blocks.iter().any(
+                |block| matches!(block, ContentBlock::Text { text } if text == "final answer")
+            )),
+        "the kept text must not be sent to a model without room: {messages:?}"
+    );
+}
+#[tokio::test]
+async fn a_signature_does_not_count_toward_the_reply_budget() {
+    let dir = tempdir().unwrap();
+    // An encrypted reasoning blob bigger than the budget with a small answer:
+    // the model never re-reads the blob, so the round is not cut.
+    let round = vec![
+        StreamingEvent::TextDelta("the answer".into()),
+        StreamingEvent::ThinkingSignature("s".repeat(MAX_ROUND_BYTES + 1)),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::EndTurn),
+        },
+    ];
+    let agent = agent_with(vec![round], dir.path());
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+    agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("go".into(), PromptKind::User),
+            tx,
+            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.kind != PromptKind::Notice),
+        "{messages:?}"
+    );
+    assert!(messages.iter().any(|message| message
+        .blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Text { text } if text == "the answer"))));
 }

@@ -620,13 +620,19 @@ async fn run_print_turn(
                 | AgentEvent::UserShellStart { .. }
                 | AgentEvent::UserShellDelta(_)
                 | AgentEvent::UserShell { .. } => Ok(()),
-                AgentEvent::ContextPressure { .. } => {
-                    context_pressure = true;
-                    let _ = stdout.write_all(b"\n");
-                    writeln!(
-                        stderr,
-                        "error: context limit reached; use the interactive TUI to compact and continue"
-                    )
+                AgentEvent::ContextPressure { resume, .. } => {
+                    if resume {
+                        context_pressure = true;
+                        let _ = stdout.write_all(b"\n");
+                        writeln!(
+                            stderr,
+                            "error: context limit reached; use the interactive TUI to compact and continue"
+                        )
+                    } else {
+                        // The turn already stopped on its own: a one-shot
+                        // run has nothing to continue.
+                        Ok(())
+                    }
                 }
                 AgentEvent::RetryStart {
                     attempt,

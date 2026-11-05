@@ -170,8 +170,7 @@ impl EventSink {
             let mut accounting = self.accounting();
             match event {
                 AgentEvent::RoundUsage { cost, usage } => {
-                    accounting.cost = *cost;
-                    accounting.usage = *usage;
+                    accounting.record_round_usage(*cost, *usage);
                 }
                 AgentEvent::ToolEnd { id, elapsed_ms, .. } => {
                     accounting.tool_elapsed.push((id.clone(), *elapsed_ms));
@@ -287,6 +286,9 @@ impl EventSink {
 pub(crate) struct Accounting {
     cost: f64,
     usage: Usage,
+    /// The lowest fill the turn may assume: the request a cut round leaves for
+    /// the next one, which no usage report billed.
+    fill_floor: u64,
     stop_reason: Option<StopReason>,
     tool_elapsed: Vec<(String, u64)>,
     thinking_elapsed: Vec<u64>,
@@ -295,7 +297,24 @@ pub(crate) struct Accounting {
 impl Accounting {
     /// The fill of the latest request, when one reported usage.
     pub(crate) fn fill(&self) -> Option<u64> {
-        (self.usage != Usage::default()).then(|| self.usage.context_tokens())
+        let reported = (self.usage != Usage::default()).then(|| self.usage.context_tokens());
+        (reported.is_some() || self.fill_floor > 0)
+            .then(|| reported.unwrap_or(0).max(self.fill_floor))
+    }
+
+    /// Bill the request a round cut at its budget leaves for the next round:
+    /// the round stops before its usage report, so the fill must not fall back
+    /// to the previous round while the next request carries the kept message.
+    pub(crate) fn note_fill_floor(&mut self, fill: u64) {
+        self.fill_floor = self.fill_floor.max(fill);
+    }
+
+    /// Fold a round's report: the report covers this round, so the estimate is
+    /// spent.
+    pub(crate) fn record_round_usage(&mut self, cost: f64, usage: Usage) {
+        self.cost = cost;
+        self.usage = usage;
+        self.fill_floor = 0;
     }
 
     pub(crate) fn cost(&self) -> f64 {
@@ -326,6 +345,28 @@ impl Accounting {
             thinking_elapsed: self.thinking_elapsed.clone(),
             stop_reason: self.stop_reason,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cut_raises_the_fill_until_a_round_reports() {
+        let mut accounting = Accounting::default();
+        accounting.note_fill_floor(50_000);
+        assert_eq!(accounting.fill(), Some(50_000));
+        // A later cut adds the request the next round carries.
+        accounting.note_fill_floor(50_000 + 4_000);
+        assert_eq!(accounting.fill(), Some(54_000));
+        // A report covers the whole request, so the estimate is spent.
+        let reported = Usage {
+            input_tokens: 900,
+            ..Usage::default()
+        };
+        accounting.record_round_usage(0.0, reported);
+        assert_eq!(accounting.fill(), Some(reported.context_tokens()));
     }
 }
 

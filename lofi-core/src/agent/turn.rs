@@ -121,8 +121,9 @@ pub(crate) async fn emit_terminal(tx: &Sender<AgentEvent>, terminal: TurnTermina
             })
             .await
         }
-        TurnOutcome::ContextPressure => {
+        TurnOutcome::ContextPressure { resume } => {
             tx.send(AgentEvent::ContextPressure {
+                resume,
                 elapsed_ms,
                 cost,
                 usage,

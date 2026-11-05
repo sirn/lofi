@@ -8,6 +8,17 @@ pub struct MessageAssembler {
     order: Vec<Slot>,
     tools: Vec<ToolBuilder>,
     pending_tool_sigs: HashMap<String, PartSig>,
+    /// The last part the stream sent was reasoning, and no later part has
+    /// closed it yet.
+    thinking_open: bool,
+    /// The protocol marks the end of each call, so a call without a marker
+    /// is unfinished. One that never marks ends proves nothing per call.
+    marks_tool_end: bool,
+    /// Counts the argument events. A protocol without end markers ends inside
+    /// the call that received bytes after the newest start, which parallel
+    /// calls can make an older one.
+    seq: u64,
+    last_start_seq: u64,
 }
 
 #[derive(Debug)]
@@ -17,6 +28,8 @@ struct ToolBuilder {
     input: String,
     ended: bool,
     sig: Option<PartSig>,
+    /// The sequence number of the newest argument bytes this call received.
+    input_seq: u64,
 }
 
 #[derive(Debug)]
@@ -37,38 +50,60 @@ enum Slot {
         sig: Option<String>,
         part_sig: Option<PartSig>,
         redacted: bool,
+        /// A signature arrived after this trace's text, so the part is complete
+        /// and a later delta belongs to the next one.
+        closed: bool,
     },
     Tool(usize),
 }
 
 impl MessageAssembler {
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(marks_tool_end: bool) -> Self {
+        Self {
+            marks_tool_end,
+            ..Self::default()
+        }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn push(&mut self, event: StreamingEvent) {
+        self.note_open_trace(&event);
         match event {
             StreamingEvent::TextDelta(d) => match self.order.last_mut() {
                 Some(Slot::Text { text, .. }) => text.push_str(&d),
                 _ => self.order.push(Slot::Text { text: d, sig: None }),
             },
             StreamingEvent::ThinkingDelta(d) => match self.order.last_mut() {
-                Some(Slot::Thinking { text, .. }) => text.push_str(&d),
+                // A completed trace is closed, so a delta after it opens the
+                // next part instead of extending a part the provider signed.
+                // A signature that arrives before the text marks the field the
+                // text came on, so that slot is still open.
+                Some(Slot::Thinking {
+                    text,
+                    closed: false,
+                    part_sig: None,
+                    ..
+                }) => text.push_str(&d),
                 _ => self.order.push(Slot::Thinking {
                     text: d,
                     sig: None,
                     part_sig: None,
                     redacted: false,
+                    closed: false,
                 }),
             },
             StreamingEvent::ThinkingSignature(s) => {
-                if let Some(Slot::Thinking { sig, .. }) = self
+                if let Some(Slot::Thinking {
+                    sig, text, closed, ..
+                }) = self
                     .order
                     .iter_mut()
                     .rev()
                     .find(|slot| matches!(slot, Slot::Thinking { .. }))
                 {
+                    // A signature that follows its text completes the part.
+                    *closed = !text.is_empty();
                     *sig = Some(s);
                 } else {
                     self.order.push(Slot::Thinking {
@@ -76,6 +111,7 @@ impl MessageAssembler {
                         sig: Some(s),
                         part_sig: None,
                         redacted: false,
+                        closed: false,
                     });
                 }
             }
@@ -85,6 +121,7 @@ impl MessageAssembler {
                     sig: Some(data),
                     part_sig: None,
                     redacted: true,
+                    closed: true,
                 });
             }
             StreamingEvent::PartSignature {
@@ -93,28 +130,15 @@ impl MessageAssembler {
                 format,
                 target,
                 signature,
-            } => {
-                let sig = PartSig {
+            } => self.attach_signature(
+                PartSig {
                     provider,
                     model,
                     format,
                     signature,
-                };
-                if let Some(target) = target {
-                    if let Some(tool) = self.tools.iter_mut().rfind(|tool| tool.id == target) {
-                        tool.sig = Some(sig);
-                    } else {
-                        self.pending_tool_sigs.insert(target, sig);
-                    }
-                } else {
-                    match self.order.last_mut() {
-                        Some(Slot::Text { sig: slot_sig, .. }) => *slot_sig = Some(sig),
-                        Some(Slot::Thinking { part_sig, .. }) => *part_sig = Some(sig),
-                        Some(Slot::Tool(i)) => self.tools[*i].sig = Some(sig),
-                        None => {}
-                    }
-                }
-            }
+                },
+                target,
+            ),
             StreamingEvent::ToolUseStart { id, name } => {
                 let sig = self.pending_tool_sigs.remove(&id);
                 self.tools.push(ToolBuilder {
@@ -123,19 +147,26 @@ impl MessageAssembler {
                     input: String::new(),
                     ended: false,
                     sig,
+                    input_seq: 0,
                 });
+                self.seq += 1;
+                self.last_start_seq = self.seq;
                 self.order.push(Slot::Tool(self.tools.len() - 1));
             }
             StreamingEvent::ToolUseInputDelta { id, delta } => {
                 let pos = self.tools.iter().rposition(|t| !t.ended && t.id == id);
                 if let Some(i) = pos {
+                    self.seq += 1;
                     self.tools[i].input.push_str(&delta);
+                    self.tools[i].input_seq = self.seq;
                 }
             }
             StreamingEvent::ToolUseInputComplete { id, input } => {
                 let pos = self.tools.iter().rposition(|t| !t.ended && t.id == id);
                 if let Some(i) = pos {
+                    self.seq += 1;
                     self.tools[i].input = input;
+                    self.tools[i].input_seq = self.seq;
                 }
             }
             StreamingEvent::ToolUseEnd { id } => {
@@ -146,6 +177,71 @@ impl MessageAssembler {
             }
             StreamingEvent::Done { .. } | StreamingEvent::Error(_) => {}
         }
+    }
+
+    /// Note whether the stream is still inside a reasoning trace: one that no
+    /// later part follows. A signature belongs to the trace it signs, so it
+    /// opens a trace whose text has not started yet and closes the one whose
+    /// text it follows.
+    fn note_open_trace(&mut self, event: &StreamingEvent) {
+        self.thinking_open = match event {
+            StreamingEvent::ThinkingDelta(_) => true,
+            StreamingEvent::ThinkingSignature(_) => !matches!(
+                self.order.last(),
+                Some(Slot::Thinking { text, .. }) if !text.is_empty()
+            ),
+            _ => false,
+        };
+    }
+
+    fn attach_signature(&mut self, sig: PartSig, target: Option<String>) {
+        let Some(target) = target else {
+            match self.order.last_mut() {
+                Some(Slot::Text { sig: slot_sig, .. }) => *slot_sig = Some(sig),
+                Some(Slot::Thinking { part_sig, .. }) => *part_sig = Some(sig),
+                Some(Slot::Tool(i)) => self.tools[*i].sig = Some(sig),
+                None => {}
+            }
+            return;
+        };
+        if let Some(tool) = self.tools.iter_mut().rfind(|tool| tool.id == target) {
+            tool.sig = Some(sig);
+        } else {
+            self.pending_tool_sigs.insert(target, sig);
+        }
+    }
+
+    /// Whether the stream ended inside a reasoning trace: its text started and
+    /// no later part arrived to close it. A signature in front of the text does
+    /// not close it, so a chat-completions trace counts as open from its first
+    /// delta.
+    #[must_use]
+    pub fn open_thinking(&self) -> bool {
+        self.thinking_open
+    }
+
+    /// The calls the stream ended inside. Running one would send arguments
+    /// the model never wrote.
+    ///
+    /// A protocol that marks the end of each call proves which calls finished,
+    /// so every call without a marker is cut. One that does not mark ends
+    /// proves nothing per call, so the cut is the call the stream was inside
+    /// when it ended: the one that received argument bytes after the newest
+    /// start, which parallel calls can make an older call. A call the stream
+    /// never gave an argument is inside it too, and an older call whose
+    /// arguments finished before the newest start is the model's whole input.
+    #[must_use]
+    pub fn open_tool_ids(&self) -> Vec<String> {
+        self.tools
+            .iter()
+            .filter(|tool| {
+                !tool.ended
+                    && (self.marks_tool_end
+                        || tool.input_seq > self.last_start_seq
+                        || tool.input.is_empty())
+            })
+            .map(|tool| tool.id.clone())
+            .collect()
     }
 
     /// Tool calls whose accumulated arguments do not parse as JSON: the
@@ -182,6 +278,7 @@ impl MessageAssembler {
                     sig,
                     part_sig,
                     redacted,
+                    ..
                 } => {
                     blocks.push(ContentBlock::Thinking {
                         text,
@@ -235,7 +332,7 @@ impl MessageAssembler {
 
 #[must_use]
 pub fn assemble_message(events: &[StreamingEvent]) -> Message {
-    let mut assembler = MessageAssembler::new();
+    let mut assembler = MessageAssembler::new(true);
     for event in events {
         assembler.push(event.clone());
     }
@@ -302,7 +399,7 @@ mod tests {
 
     #[test]
     fn unparseable_tool_ids_reports_cut_calls_only() {
-        let mut a = MessageAssembler::new();
+        let mut a = MessageAssembler::new(true);
         a.push(StreamingEvent::ToolUseStart {
             id: "partial".to_string(),
             name: "exec".to_string(),
@@ -474,6 +571,141 @@ mod tests {
             panic!("expected tool_use");
         };
         assert_eq!(input, &serde_json::json!({}));
+    }
+
+    #[test]
+    fn a_signature_after_its_text_closes_the_trace() {
+        let mut assembler = MessageAssembler::new(true);
+        assembler.push(StreamingEvent::ThinkingDelta("plan".to_string()));
+        assembler.push(StreamingEvent::ThinkingSignature("enc_blob".to_string()));
+        assert!(!assembler.open_thinking(), "the signed trace is complete");
+    }
+
+    #[test]
+    fn a_signature_before_any_text_opens_the_trace() {
+        let mut assembler = MessageAssembler::new(true);
+        assembler.push(StreamingEvent::ThinkingSignature(
+            "reasoning_content".into(),
+        ));
+        assembler.push(StreamingEvent::ThinkingDelta("plan".to_string()));
+        assert!(assembler.open_thinking());
+    }
+
+    #[test]
+    fn a_reasoning_delta_after_a_signed_trace_opens_a_new_part() {
+        let events = [
+            StreamingEvent::ThinkingDelta("first".to_string()),
+            StreamingEvent::PartSignature {
+                provider: "google".into(),
+                model: "m".into(),
+                format: PartSignatureFormat::Google,
+                target: None,
+                signature: "c2ln".into(),
+            },
+            StreamingEvent::ThinkingDelta("second".to_string()),
+        ];
+        let m = assemble_message(&events);
+        assert_eq!(m.blocks.len(), 3, "{:?}", m.blocks);
+        assert!(matches!(&m.blocks[0], ContentBlock::Thinking { text, .. } if text == "first"));
+        assert!(matches!(&m.blocks[1], ContentBlock::PartSignature { .. }));
+        assert!(matches!(&m.blocks[2], ContentBlock::Thinking { text, .. } if text == "second"));
+    }
+
+    #[test]
+    fn open_tool_ids_reports_the_last_slot_and_empty_starts() {
+        let mut assembler = MessageAssembler::new(false);
+        assembler.push(StreamingEvent::ToolUseStart {
+            id: "t0".to_string(),
+            name: "exec".to_string(),
+        });
+        assembler.push(StreamingEvent::ToolUseStart {
+            id: "t1".to_string(),
+            name: "exec".to_string(),
+        });
+        assembler.push(StreamingEvent::ToolUseInputDelta {
+            id: "t1".to_string(),
+            delta: r#"{"code":"#.to_string(),
+        });
+        assert_eq!(assembler.open_tool_ids(), ["t0", "t1"]);
+    }
+
+    #[test]
+    fn open_tool_ids_reports_an_unfinished_call_after_an_end_marker() {
+        let mut assembler = MessageAssembler::new(true);
+        assembler.push(StreamingEvent::ToolUseStart {
+            id: "t0".to_string(),
+            name: "exec".to_string(),
+        });
+        assembler.push(StreamingEvent::ToolUseInputDelta {
+            id: "t0".to_string(),
+            delta: r#"{"code":"1"}"#.to_string(),
+        });
+        // A whole-call protocol never replaced this call's arguments, so the
+        // stream ended inside it even though they parse.
+        assembler.push(StreamingEvent::ToolUseStart {
+            id: "t1".to_string(),
+            name: "exec".to_string(),
+        });
+        assembler.push(StreamingEvent::ToolUseEnd {
+            id: "t1".to_string(),
+        });
+        assert_eq!(assembler.open_tool_ids(), ["t0"]);
+    }
+
+    #[test]
+    fn open_tool_ids_trusts_an_earlier_parseable_call_without_end_markers() {
+        let mut assembler = MessageAssembler::new(false);
+        assembler.push(StreamingEvent::ToolUseStart {
+            id: "t0".to_string(),
+            name: "exec".to_string(),
+        });
+        assembler.push(StreamingEvent::ToolUseInputDelta {
+            id: "t0".to_string(),
+            delta: r#"{"code":"1"}"#.to_string(),
+        });
+        assembler.push(StreamingEvent::ToolUseStart {
+            id: "t1".to_string(),
+            name: "exec".to_string(),
+        });
+        assert_eq!(assembler.open_tool_ids(), ["t1"]);
+    }
+
+    #[test]
+    fn open_tool_ids_cuts_the_call_that_received_bytes_after_a_later_start() {
+        let mut assembler = MessageAssembler::new(false);
+        assembler.push(StreamingEvent::ToolUseStart {
+            id: "t0".to_string(),
+            name: "exec".to_string(),
+        });
+        assembler.push(StreamingEvent::ToolUseStart {
+            id: "t1".to_string(),
+            name: "exec".to_string(),
+        });
+        // Parallel calls: the stream went back to the first one, so the cut
+        // landed inside it even though its arguments parse.
+        assembler.push(StreamingEvent::ToolUseInputDelta {
+            id: "t0".to_string(),
+            delta: r#"{"code":"1"}"#.to_string(),
+        });
+        assert_eq!(assembler.open_tool_ids(), ["t0", "t1"]);
+    }
+
+    #[test]
+    fn open_tool_ids_ignores_a_finished_call() {
+        let mut assembler = MessageAssembler::new(true);
+        assembler.push(StreamingEvent::ToolUseStart {
+            id: "t0".to_string(),
+            name: "exec".to_string(),
+        });
+        assembler.push(StreamingEvent::ToolUseInputComplete {
+            id: "t0".to_string(),
+            input: "{}".to_string(),
+        });
+        assembler.push(StreamingEvent::ToolUseEnd {
+            id: "t0".to_string(),
+        });
+        assembler.push(StreamingEvent::TextDelta("tail".to_string()));
+        assert!(assembler.open_tool_ids().is_empty());
     }
 
     #[test]

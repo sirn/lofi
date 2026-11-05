@@ -17,6 +17,54 @@ use super::turn_session::{
 };
 use super::{usage_cost, Agent, AgentEvent};
 
+/// Reply bytes the model re-reads, and opaque bytes it never re-reads: a
+/// provider signature or a redacted reasoning trace.
+fn event_bytes(event: &StreamingEvent) -> (usize, usize) {
+    match event {
+        StreamingEvent::TextDelta(s)
+        | StreamingEvent::ThinkingDelta(s)
+        | StreamingEvent::Error(s) => (s.len(), 0),
+        StreamingEvent::ThinkingSignature(s) => (0, s.len()),
+        StreamingEvent::ThinkingRedacted { data } => (0, data.len()),
+        StreamingEvent::PartSignature {
+            provider,
+            model,
+            format,
+            target,
+            signature,
+        } => (
+            0,
+            provider.len()
+                + model.len()
+                + match format {
+                    lofi_types::PartSignatureFormat::OpenAiExtraContent { namespace } => {
+                        namespace.len()
+                    }
+                    lofi_types::PartSignatureFormat::Google
+                    | lofi_types::PartSignatureFormat::OpenAiReasoningDetail => 0,
+                }
+                + target.as_ref().map_or(0, String::len)
+                + signature.len(),
+        ),
+        StreamingEvent::ToolUseStart { id, name } => (id.len() + name.len(), 0),
+        StreamingEvent::ToolUseInputDelta { id, delta } => (id.len() + delta.len(), 0),
+        StreamingEvent::ToolUseInputComplete { id, .. } | StreamingEvent::ToolUseEnd { id } => {
+            (id.len(), 0)
+        }
+        StreamingEvent::Done { .. } => (0, 0),
+    }
+}
+
+/// Whether a message holds nothing the next request may carry: only reasoning
+/// traces and the signatures that sign them.
+fn has_no_answer(message: &Message) -> bool {
+    message.blocks.iter().all(|block| match block {
+        ContentBlock::Thinking { .. } | ContentBlock::PartSignature { .. } => true,
+        ContentBlock::Text { text } => text.trim().is_empty(),
+        _ => false,
+    })
+}
+
 /// Cap the descriptions the model stated, so the committed transcript and
 /// every later provider request carry the bounded text the label and the
 /// intent come from. Runs on the settled message and on a partial kept
@@ -129,15 +177,34 @@ impl Agent {
         }
     }
 
-    fn request_messages(&self, messages: &[Message]) -> Option<Vec<Message>> {
-        if self.system_prompt.is_empty()
-            || messages.iter().any(|message| {
+    /// Whether a request carries this agent's system prompt beside the
+    /// history: one the history already states is not sent twice.
+    fn injects_system_prompt(&self, messages: &[Message]) -> bool {
+        !self.system_prompt.is_empty()
+            && !messages.iter().any(|message| {
                 message.role == lofi_types::Role::System
                     && message.blocks.iter().any(
                         |block| matches!(block, ContentBlock::Text { text } if !text.is_empty()),
                     )
             })
-        {
+    }
+
+    /// The input tokens a request adds beside the history: the system prompt
+    /// this transport injects and the tool schema it declares. A usage report
+    /// covers both, so an estimate of the history alone is short of the
+    /// request the provider rejects.
+    fn request_overhead_tokens(&self, messages: &[Message]) -> u64 {
+        let prompt = if self.injects_system_prompt(messages) {
+            self.system_prompt.len()
+        } else {
+            0
+        };
+        let schema = serde_json::to_string(&super::exec_tool_schema()).map_or(0, |text| text.len());
+        ((prompt + schema) / 4) as u64
+    }
+
+    fn request_messages(&self, messages: &[Message]) -> Option<Vec<Message>> {
+        if !self.injects_system_prompt(messages) {
             return None;
         }
         let mut request = Vec::with_capacity(messages.len() + 1);
@@ -228,14 +295,15 @@ impl Agent {
             requested.await?
         };
         let mut stream = stream;
-        let mut assembler = lofi_providers::MessageAssembler::new();
+        let mut assembler = lofi_providers::MessageAssembler::new(self.model.api.marks_tool_end());
         let mut round_stop_reason: Option<lofi_types::StopReason> = None;
-        let mut round_bytes = 0usize;
+        let mut reply_bytes = 0usize;
+        let mut opaque_bytes = 0usize;
         let mut tool_raw: HashMap<String, String> = HashMap::new();
         let mut tool_emitted: HashMap<String, usize> = HashMap::new();
         let mut tool_decoders: HashMap<String, super::CodePrefixDecoder> = HashMap::new();
         let mut provider_progress = false;
-        // The round stopped at its reply byte budget instead of failing.
+        // The round stopped at its reply byte budget.
         let mut budget_capped = false;
         let collect = async {
             let mut thinking_open: Option<Instant> = None;
@@ -307,7 +375,7 @@ impl Agent {
                         }
                     }
                     StreamingEvent::ToolUseInputComplete { id, input } => {
-                        round_bytes = round_bytes.saturating_add(
+                        reply_bytes = reply_bytes.saturating_add(
                             input
                                 .len()
                                 .saturating_sub(tool_raw.get(id).map_or(0, String::len)),
@@ -354,43 +422,37 @@ impl Agent {
                     }
                     _ => {}
                 }
-                // Bound retained round bytes so a stream of many small valid
-                // events cannot exhaust memory. The cap bounds the history
-                // the model re-reads, so a signature and a redacted trace it
-                // never sees again cost nothing: a GPT reasoning blob can pass
-                // the cap on its own while the answer stays small.
-                round_bytes = round_bytes.saturating_add(super::PER_EVENT_OVERHEAD);
-                round_bytes = round_bytes.saturating_add(match &e {
-                    StreamingEvent::TextDelta(s)
-                    | StreamingEvent::ThinkingDelta(s)
-                    | StreamingEvent::ThinkingSignature(s)
-                    | StreamingEvent::Error(s) => s.len(),
-                    StreamingEvent::ThinkingRedacted { .. }
-                    | StreamingEvent::PartSignature { .. }
-                    | StreamingEvent::Done { .. } => 0,
-                    StreamingEvent::ToolUseStart { id, name } => id.len() + name.len(),
-                    StreamingEvent::ToolUseInputDelta { id, delta } => id.len() + delta.len(),
-                    StreamingEvent::ToolUseInputComplete { id, .. }
-                    | StreamingEvent::ToolUseEnd { id } => id.len(),
-                });
-                if round_bytes > super::MAX_ROUND_BYTES {
-                    // Keep what the model wrote before the budget ran out and
-                    // let the turn ask again. A round of reasoning that big is
-                    // not an answer, and failing the turn on it spends the run.
-                    if !sink
-                        .notice(format!(
-                            "reply exceeded {} byte budget; kept the answer so far",
-                            super::MAX_ROUND_BYTES
-                        ))
-                        .await
-                    {
-                        return Err(Error::Cancelled);
-                    }
-                    budget_capped = true;
+                let (reply, opaque) = event_bytes(&e);
+                // A signature and a redacted trace are never re-read by the
+                // model, so the reply budget ignores them; a hostile endpoint
+                // still cannot retain them without bound. This check comes
+                // before the push: the sink publishes neither, so the failed
+                // partial must not carry the blob the bound rejected.
+                opaque_bytes = opaque_bytes.saturating_add(opaque);
+                if opaque_bytes > super::MAX_OPAQUE_ROUND_BYTES {
+                    return Err(Error::Provider(format!(
+                        "round exceeded {} bytes of signatures and redacted traces",
+                        super::MAX_OPAQUE_ROUND_BYTES
+                    )));
+                }
+                // The event is published before it is measured, so it must be
+                // retained: a transcript rebuilt from the saved messages would
+                // otherwise lose text the user already saw.
+                assembler.push(e);
+                reply_bytes = reply_bytes
+                    .saturating_add(super::PER_EVENT_OVERHEAD)
+                    .saturating_add(reply);
+                // A round that reported its end within the budget is not cut,
+                // even when that report crosses it: the reply is complete.
+                if terminal {
                     break;
                 }
-                assembler.push(e);
-                if terminal {
+                if reply_bytes > super::MAX_ROUND_BYTES {
+                    // Keep what the model wrote before the budget ran out and
+                    // let the turn report the cut. A round of reasoning that
+                    // big is not an answer, and failing the turn on it spends
+                    // the run.
+                    budget_capped = true;
                     break;
                 }
             }
@@ -402,7 +464,11 @@ impl Agent {
             }
             Ok(())
         };
-        if let Err(error) = collect.await {
+        let result = collect.await;
+        // The budget can end a round early, and a provider keeps generating
+        // and billing while its response is open, so close it here.
+        drop(stream);
+        if let Err(error) = result {
             // The live UI has already rendered every accepted delta. Preserve
             // that same partial assistant message so durable replay cannot make
             // visible output disappear; the rollback decides whether it stays.
@@ -428,24 +494,47 @@ impl Agent {
             });
         }
         // A tool use whose arguments never parse was cut off mid-stream.
-        // Compute before finish consumes the assembler; the set is only
-        // consulted on a token-cap stop.
-        let cut_tool_ids: std::collections::HashSet<String> =
-            if round_stop_reason == Some(lofi_types::StopReason::MaxTokens) {
-                assembler.unparseable_tool_ids().into_iter().collect()
-            } else {
-                std::collections::HashSet::new()
-            };
+        // Compute before finish consumes the assembler; the set is consulted
+        // on a token-cap stop and on a round cut at its byte budget, where a
+        // call the stream never finished is cut too: running it would send the
+        // model arguments it never wrote.
+        let truncated =
+            budget_capped || round_stop_reason == Some(lofi_types::StopReason::MaxTokens);
+        let cut_trace = budget_capped && assembler.open_thinking();
+        let cut_tool_ids: std::collections::HashSet<String> = if truncated {
+            let mut ids: std::collections::HashSet<String> =
+                assembler.unparseable_tool_ids().into_iter().collect();
+            if budget_capped {
+                ids.extend(assembler.open_tool_ids());
+            }
+            ids
+        } else {
+            std::collections::HashSet::new()
+        };
         let mut assistant = assembler.finish();
         stamp_message_origin(&mut assistant, &model);
         cap_exec_descriptions(&mut assistant.blocks);
-        if budget_capped {
-            // Reasoning that filled the budget cannot be replayed: an
-            // incomplete trace carries no signature, and a provider rejects a
-            // part it did not sign. The answer and the tool calls stay.
-            assistant
-                .blocks
-                .retain(|block| !matches!(block, ContentBlock::Thinking { .. }));
+        if cut_trace {
+            // The round broke inside its last reasoning trace, so the trace is a
+            // prefix of what the model meant to write. An unsigned one is not
+            // replay data — a provider that authenticates reasoning rejects a
+            // part it did not sign — so it goes. A signature that follows its
+            // text, or a redacted trace, marks a complete part and stays. So
+            // does a chat-completions field name that arrived before the text:
+            // it only picks the delta field the prefix replays on. Neither the
+            // drop nor the empty message below is recorded as a discarded
+            // round: that mechanism removes whole messages, and a message the
+            // next request may not carry is worse than a gap on resume.
+            if matches!(
+                assistant.blocks.last(),
+                Some(ContentBlock::Thinking {
+                    signature: None,
+                    redacted: false,
+                    ..
+                })
+            ) {
+                assistant.blocks.pop();
+            }
         }
         let tool_uses: Vec<(String, String, serde_json::Value)> = assistant
             .blocks
@@ -457,18 +546,36 @@ impl Agent {
                 _ => None,
             })
             .collect();
-        // A capped round that kept nothing — the budget filled inside its
-        // reasoning — adds no message: an empty one is not a valid request.
-        let kept_nothing = budget_capped && assistant.blocks.is_empty();
+        // A capped round that kept no answer — the budget filled inside its
+        // reasoning — adds no message: a provider rejects an orphan reasoning
+        // item, and one whose only block is a signature.
+        let kept_nothing = budget_capped && has_no_answer(&assistant);
+        if budget_capped {
+            // The round never reported usage, so bill the request the next
+            // round carries into the fill estimate the hard cap reads. What
+            // the round published and this drops is not in that request.
+            let kept = if kept_nothing {
+                0
+            } else {
+                crate::compact::estimate_message_tokens(&assistant) as u64
+            };
+            // A report covers the round that sent it, not the tool results
+            // the rounds after it appended, so the history is the floor too,
+            // with the prompt and schema the next request adds to it.
+            let history: u64 = messages
+                .iter()
+                .map(|message| crate::compact::estimate_message_tokens(message) as u64)
+                .sum::<u64>()
+                + self.request_overhead_tokens(messages);
+            let carried = sink.accounting().fill().unwrap_or(0).max(history);
+            sink.accounting()
+                .note_fill_floor(carried.saturating_add(kept));
+        }
         if !kept_nothing {
             messages.push(assistant);
         }
         if tool_uses.is_empty() {
-            return Ok(if budget_capped {
-                Exchange::done_capped(round_stop_reason)
-            } else {
-                Exchange::done(round_stop_reason)
-            });
+            return Ok(Exchange::done(round_stop_reason).cut(budget_capped));
         }
         // The prompt is durable before the first tool runs.
         io.commit(messages).await;
@@ -497,10 +604,16 @@ impl Agent {
         let mut results = Vec::with_capacity(tool_uses.len());
         for (id, _, _) in &tool_uses {
             if cut_tool_ids.contains(id) {
-                let cut_notice =
-                    "cut off: tool arguments were truncated by the provider token limit; \
-                     resend the tool call"
-                        .to_string();
+                // The model must learn which limit cut it: a call stopped by
+                // the byte budget is not made to fit by sending it again.
+                let cut_notice = if budget_capped {
+                    format!(
+                        "cut off: the reply exceeded the {} byte budget; split the work into smaller calls",
+                        super::MAX_ROUND_BYTES
+                    )
+                } else {
+                    "cut off: tool arguments were truncated; resend the tool call".to_string()
+                };
                 if !sink
                     .emit(AgentEvent::ToolEnd {
                         id: id.clone(),
@@ -531,12 +644,19 @@ impl Agent {
                 results.push(result);
             }
         }
-        messages.push(Message {
+        let appended = Message {
             origin: None,
             role: lofi_types::Role::Tool,
             blocks: results,
             kind: lofi_types::PromptKind::User,
-        });
-        Ok(Exchange::continued(round_stop_reason))
+        };
+        // The results join the next request, and the last report was billed
+        // without them: the cap and the output clip read that report.
+        let fill = sink.accounting().fill().unwrap_or(0);
+        sink.accounting().note_fill_floor(
+            fill.saturating_add(crate::compact::estimate_message_tokens(&appended) as u64),
+        );
+        messages.push(appended);
+        Ok(Exchange::continued(round_stop_reason).cut(budget_capped))
     }
 }

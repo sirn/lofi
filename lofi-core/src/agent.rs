@@ -121,10 +121,15 @@ pub(crate) fn granted_dirs(
         .collect()
 }
 
-/// Maximum cumulative bytes of streamed text/thinking/tool-input retained
-/// for a single round, so a hostile or misbehaving endpoint sending many
-/// small valid events cannot exhaust memory within the stream timeout.
+/// Maximum streamed bytes of one reply the model re-reads: text, thinking, and
+/// tool input, plus a fixed cost per event, so a stream of many tiny deltas is
+/// bounded too. A round over it keeps what it wrote, and the turn reports the
+/// cut.
 const MAX_ROUND_BYTES: usize = 1024 * 1024;
+/// Maximum cumulative bytes of provider signatures and redacted reasoning
+/// kept in one round. The reply budget ignores them because the model never
+/// re-reads them, but they are retained, so they keep their own bound.
+const MAX_OPAQUE_ROUND_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_TOOL_RESULT_BYTES: usize = 50 * 1024;
 /// Outer cap on the whole exec result sent back to the provider. Native
 /// sub-tool results are already individually capped to `MAX_TOOL_RESULT_BYTES`;

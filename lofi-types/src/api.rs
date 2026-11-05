@@ -62,6 +62,18 @@ impl Api {
         }
     }
 
+    /// Whether the protocol marks the end of each tool call with a
+    /// `ToolUseEnd` event. A stream cut before its first marker proves which
+    /// calls it finished only on such a protocol; one without markers leaves
+    /// the cut call to the position of the stream.
+    #[must_use]
+    pub fn marks_tool_end(self) -> bool {
+        matches!(
+            self,
+            Self::OpenAiResponses | Self::AnthropicMessages | Self::GoogleGenerativeAi
+        )
+    }
+
     /// Whether this API answers typed decision questions instead of chat
     /// completions. A decision model cannot run a chat turn, so every chat
     /// path rejects it; only a decision call can open it.

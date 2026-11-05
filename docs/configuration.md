@@ -345,12 +345,24 @@ default is `false`. Enable it only for providers or models whose templates are
 known to lose tool calls.
 
 `byte_cap` recovers a round that the transport cut at its reply byte budget.
-It keeps the answer and the tool calls the round had already produced, drops
-the reasoning, and asks the model once for a brief answer.
-A round cut a second time ends the turn.
-Its built-in default is `true`; `false` ends the turn at the first cut.
-Signatures and redacted reasoning do not count toward the budget, because the
-model never reads them back.
+The budget counts the streamed text, thinking, and tool input the model reads
+back, plus a fixed cost per event, so a stream of many tiny deltas is also
+bounded and can reach the budget before a long single-part reply would.
+The round keeps what the model wrote and the tool calls it finished. A call
+the cut left unfinished is answered as cut off, not run, and so is the call
+the budget stopped last, even when its arguments already parse.
+A reasoning trace the cut left incomplete is dropped, unless a signature in
+front of that trace names the field it replays on.
+A cut answer asks the model once for a brief answer, unless the kept answer
+cannot fit the model window again: asking for less would be rejected before the
+model could answer, so the turn stops.
+A cut tool round takes its results and runs the next round without asking.
+A second cut ends the turn.
+Its built-in default is `true`; `false` ends the turn at the first cut, after
+the calls that round finished have run.
+Signatures and redacted reasoning do not count toward the reply budget,
+because the model never reads them back. They have their own bound: a round
+that keeps more than 8 MiB of them fails.
 
 All automatic recovery paths share a budget of one continuation per user turn.
 The recovery prompt is stored as a notice-kind message, not as user-authored
@@ -667,7 +679,7 @@ keep_calls = 6
 
 ### Hard compaction
 
-`reserved_context_tokens` (default `20000`) reserves room for model output. When a run crosses `context_window - reserved_context_tokens`, lofi stops the run, compacts, and silently continues it.
+`reserved_context_tokens` (default `20000`) reserves room for model output. When a run crosses `context_window - reserved_context_tokens`, lofi stops the run, compacts, and silently continues it. A reserve larger than a quarter of the window is clamped to that, so three quarters of the window stay free for input.
 
 `min_messages_between_hard_compacts` (default `6`) prevents a loop when the retained tail is itself too large. Crossing the hard limit again too soon produces an error instead of another compaction.
 

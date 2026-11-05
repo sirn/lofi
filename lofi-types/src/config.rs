@@ -89,8 +89,9 @@ pub struct AutoContinueConfig {
     /// Recover a clean stop whose final sentence announces an immediate tool action.
     #[serde(default)]
     pub intent: Option<bool>,
-    /// Recover a round cut at its reply byte budget by asking for a brief
-    /// answer. Off ends the turn at the cut.
+    /// Recover a round cut at its reply byte budget: a cut answer asks once
+    /// for a briefer one, and a cut tool round runs the next round with its cut
+    /// results. Off ends the turn at the first cut.
     #[serde(default)]
     pub byte_cap: Option<bool>,
 }
@@ -596,13 +597,19 @@ impl Default for CompactionConfig {
 }
 
 impl CompactionConfig {
+    /// The fill at which a turn must compact before it sends again.
+    ///
+    /// The reserve keeps room for the answer, so a reserve that fills the
+    /// window would leave none and silence the cap. It is clamped to a
+    /// quarter of the window instead: a window with no cap leaves a cut round
+    /// that cannot be carried with no gate to stop it.
     #[must_use]
     pub fn hard_threshold(&self, context_window: u64) -> Option<u64> {
         if context_window == 0 {
             return None;
         }
-        let threshold = context_window.saturating_sub(self.reserved_context_tokens);
-        (threshold > 0).then_some(threshold)
+        let reserved = self.reserved_context_tokens.min(context_window / 4);
+        Some(context_window - reserved)
     }
 
     #[must_use]

@@ -48,7 +48,7 @@ impl App {
             },
             settled_usage_fresh: false,
             compacted: false,
-            context_pressure: false,
+            context_pressure: None,
             cost: 0.0,
             turn_cost: 0.0,
             turn_has_round_usage: false,
@@ -367,13 +367,19 @@ impl App {
                 self.turn_cost = 0.0;
                 self.turn_has_round_usage = false;
             }
-            AgentEvent::ContextPressure { cost, usage, .. } => {
-                // The run force-stopped at the hard cap. Fold the partial
-                // turn's cost/tokens like `TurnEnd`, record the over-cap
-                // usage, and arm the flag so the run loop force-compacts +
-                // continues on channel close. No block is rendered — the
-                // compaction marker (from `compact_now`) is the visible
-                // signal, and the continue appends to this turn.
+            AgentEvent::ContextPressure {
+                resume,
+                cost,
+                usage,
+                ..
+            } => {
+                // The run stopped at the hard cap. Fold the partial turn's
+                // cost/tokens like `TurnEnd`, record the over-cap usage, and
+                // arm the flag so the run loop force-compacts on channel
+                // close, and continues the turn when the stop allows it. No
+                // block is rendered — the compaction marker (from
+                // `compact_now`) is the visible signal, and the continue
+                // appends to this turn.
                 if self.turn_has_round_usage {
                     self.cost += self.turn_cost;
                 } else {
@@ -384,7 +390,7 @@ impl App {
                 self.status_usage = Some(usage);
                 self.turn_cost = 0.0;
                 self.turn_has_round_usage = false;
-                self.context_pressure = true;
+                self.context_pressure = Some(resume);
                 return;
             }
             AgentEvent::TurnUsage { cost, usage } => {

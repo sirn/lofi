@@ -7,6 +7,8 @@ use lofi_types::{CompactionHook, ContentBlock, Message, PromptKind, Role, Sessio
 mod plan;
 mod summary;
 
+pub(crate) use plan::estimate_message_tokens;
+
 pub const HANDOFF_PREAMBLE: &str = "This summary captures work done before the most recent messages in this session. Read it to pick up context — this is work already in progress. Continue directly where you left off.";
 
 /// Stubs in the kept tail carry only the event id, so this line is the

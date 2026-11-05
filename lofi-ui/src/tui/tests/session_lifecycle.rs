@@ -1055,10 +1055,35 @@ fn run_finished_keeps_blocks_for_hard_cap_continuation() {
         byte_start: 100,
         byte_end: 200,
     });
-    a.context_pressure = true;
+    a.context_pressure = Some(true);
 
     a.run_finished();
 
+    assert!(!a.transcript.turns[0].blocks.is_empty());
+}
+
+#[test]
+fn a_stopped_cut_arms_the_compaction_without_a_resume() {
+    let mut a = app();
+    a.apply_event(AgentEvent::Prompt {
+        kind: lofi_types::PromptKind::User,
+        prompt: "go".into(),
+    });
+    a.apply_event(AgentEvent::Text("partial response".into()));
+    a.apply_event(AgentEvent::TurnCommitted {
+        byte_start: 100,
+        byte_end: 200,
+    });
+    a.apply_event(AgentEvent::ContextPressure {
+        resume: false,
+        elapsed_ms: 10,
+        cost: 0.0,
+        usage: Usage::default(),
+    });
+
+    // The run loop compacts the kept round but must not ask the model again.
+    assert_eq!(a.context_pressure, Some(false));
+    a.run_finished();
     assert!(!a.transcript.turns[0].blocks.is_empty());
 }
 

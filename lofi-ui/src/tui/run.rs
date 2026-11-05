@@ -511,20 +511,24 @@ pub(crate) async fn run_loop(
                                             queued.kind,
                                         );
                                     }
-                                } else if app.context_pressure {
+                                } else if let Some(resume) = app.context_pressure.take() {
                                     // Core owns hard-cap eligibility and
                                     // compaction; the UI only presents its outcome.
-                                    app.context_pressure = false;
-                                    app.continue_after_hard_compact = true;
+                                    // A turn that stopped on its own is not
+                                    // resumed: the compaction only keeps the
+                                    // round it stopped on out of the next prompt.
+                                    app.continue_after_hard_compact = resume;
                                     if let Some(outcome) = app.hard_compact() {
                                         app.continue_after_hard_compact = false;
                                         match outcome {
                                             HardCompactOutcome::Compacted(_) => {
-                                                spawn_continue(
-                                                    &mut app,
-                                                    agent.as_ref(),
-                                                    &mut current_run,
-                                                );
+                                                if resume {
+                                                    spawn_continue(
+                                                        &mut app,
+                                                        agent.as_ref(),
+                                                        &mut current_run,
+                                                    );
+                                                }
                                             }
                                             HardCompactOutcome::Cooldown => app.notify(
                                                 NotifyKind::Warn,

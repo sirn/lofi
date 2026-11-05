@@ -619,8 +619,8 @@ fn five_hundred_mebibyte_transcript_stays_below_memory_limit() {
             48,
             "MEMORY_STREAM_DONE",
         ),
-        // The capped round is kept and the turn asks once for a brief answer.
-        text_response("memory brief answer"),
+        // The kept round overflows the mock window, so the turn cannot send
+        // it again.
     ]);
     let fixture = Fixture::new(&server);
     let mut seed = fixture.spawn(&[]);
@@ -644,7 +644,10 @@ fn five_hundred_mebibyte_transcript_stays_below_memory_limit() {
     let startup_rss = tui.resident_kib();
     let startup_peak = tui.peak_resident_kib();
     tui.submit("memory turn prompt");
-    tui.wait_for("reply exceeded 1048576 byte budget", WAIT);
+    // The kept 1 MiB reply does not fit the mock's 100k window, so the next
+    // request would be rejected. The turn raises context pressure instead,
+    // and compaction cannot free the answer itself.
+    tui.wait_for("exceeded the hard cap", WAIT);
     std::thread::sleep(std::time::Duration::from_millis(250));
     let turn_rss = tui.resident_kib();
     let turn_peak = tui.peak_resident_kib();

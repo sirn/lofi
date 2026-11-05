@@ -484,7 +484,9 @@ async fn max_tokens_truncated_tool_call_is_closed_and_valid_calls_still_run() {
     };
     assert_eq!(cut_id, "t_cut");
     assert_eq!(cut_error, &true);
-    assert!(cut_content.contains("token limit"), "{cut_content}");
+    assert!(cut_content.contains("cut off"), "{cut_content}");
+    // The token limit, not the byte budget: a resend can fit.
+    assert!(cut_content.contains("truncated"), "{cut_content}");
     let ContentBlock::ToolResult {
         tool_use_id: ok_id,
         is_error: ok_error,

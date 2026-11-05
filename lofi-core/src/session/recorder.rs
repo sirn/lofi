@@ -19,14 +19,17 @@ use lofi_error::Result;
 pub enum TurnOutcome {
     Finished,
     Failed(String),
-    /// The run was force-stopped at the hard context cap mid-turn. The
-    /// partial turn's messages and timings are written (so a following
-    /// compaction can keep the latest turn verbatim and `messages_from_events`
-    /// includes them), but NO terminal marker is written — the turn did not
-    /// finish or fail, and the UI is signaled via a live `ContextPressure`
-    /// event instead. Behaves like [`Detached`] for the empty-input
-    /// short-circuit (no terminal marker).
-    ContextPressure,
+    /// The run stopped at the hard context cap. The partial turn's messages
+    /// and timings are written (so a following compaction can keep the
+    /// latest turn verbatim and `messages_from_events` includes them), but
+    /// NO terminal marker is written — the turn did not finish or fail, and
+    /// the UI is signaled via a live `ContextPressure` event instead.
+    /// Behaves like [`Detached`] for the empty-input short-circuit (no
+    /// terminal marker). `resume` says whether a compaction may ask the
+    /// model again or only clears the way for the next prompt.
+    ContextPressure {
+        resume: bool,
+    },
     /// Explicit user interruption. Unlike a failure, its messages remain in
     /// model context; the terminal marker records the aborted status.
     Cancelled,
@@ -478,7 +481,7 @@ impl SessionRecorder {
                 cost: summary.cost,
                 usage: summary.usage,
             })),
-            TurnOutcome::ContextPressure | TurnOutcome::Detached => None,
+            TurnOutcome::ContextPressure { .. } | TurnOutcome::Detached => None,
         };
         let discarded = self.flush_pending_discard()?;
         let appended = self.append_pending(messages, summary, terminal, None)?;

@@ -27,6 +27,13 @@ pub(super) struct CompactionPlan {
 
 pub(super) const MIN_SUMMARIZED: usize = 5;
 
+/// The tokens one image adds to a request, in chars so the outer `/4`
+/// estimate keeps its unit. Image tokens scale with pixel dimensions, not
+/// byte length, and we don't retain dimensions on the block, so this is a
+/// fixed per-image estimate: the ballpark of a full-frame image at
+/// Anthropic's ~750px/token.
+const IMAGE_CHARS: usize = 4000;
+
 #[allow(clippy::too_many_lines)]
 pub(super) fn prepare(events: &[SessionEvent], opts: &CompactOptions) -> Option<CompactionPlan> {
     let path = store::active_path_from_leaf(events);
@@ -300,20 +307,19 @@ fn find_suffix_split(live: &[LiveMessage], cut: usize, budget_tokens: usize) -> 
     None
 }
 
-fn estimate_message_tokens(m: &Message) -> usize {
+pub(crate) fn estimate_message_tokens(m: &Message) -> usize {
     let chars: usize = m
         .blocks
         .iter()
         .map(|b| match b {
             ContentBlock::Text { text } | ContentBlock::Thinking { text, .. } => text.len(),
             ContentBlock::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
-            ContentBlock::ToolResult { content, .. } => content.len(),
+            // A result pays for the images it carries beside its text.
+            ContentBlock::ToolResult {
+                content, images, ..
+            } => content.len() + images.len() * IMAGE_CHARS,
             ContentBlock::PartSignature { .. } => 0,
-            // Image tokens scale with pixel dimensions, not byte length, and
-            // we don't retain dimensions on the block. Use a fixed per-image
-            // estimate (in chars so the outer `/4` yields ~1000 tokens, the
-            // ballpark of a full-frame image at Anthropic's ~750px/token).
-            ContentBlock::Image { .. } => 4000,
+            ContentBlock::Image { .. } => IMAGE_CHARS,
         })
         .sum();
     chars / 4
@@ -323,4 +329,45 @@ fn estimate_tokens(msgs: &[LiveMessage]) -> usize {
     msgs.iter()
         .map(|lm| estimate_message_tokens(&lm.message))
         .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool_result(images: Vec<lofi_types::ToolResultImage>) -> Message {
+        Message {
+            origin: None,
+            role: Role::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".to_string(),
+                content: String::new(),
+                is_error: false,
+                images,
+            }],
+            kind: lofi_types::PromptKind::User,
+        }
+    }
+
+    #[test]
+    fn an_image_in_a_tool_result_bills_the_same_as_a_standalone_one() {
+        let image = || lofi_types::ToolResultImage {
+            bytes: vec![0u8; 8],
+            media_type: "image/png".to_string(),
+        };
+        let standalone = Message {
+            origin: None,
+            role: Role::User,
+            blocks: vec![ContentBlock::Image {
+                bytes: vec![0u8; 8],
+                media_type: "image/png".to_string(),
+            }],
+            kind: lofi_types::PromptKind::User,
+        };
+        assert_eq!(estimate_message_tokens(&standalone), IMAGE_CHARS / 4);
+        assert_eq!(
+            estimate_message_tokens(&tool_result(vec![image(), image()])),
+            IMAGE_CHARS / 2
+        );
+    }
 }

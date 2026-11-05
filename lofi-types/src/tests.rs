@@ -514,7 +514,10 @@ fn compaction_hard_threshold_reserved() {
         ..CompactionConfig::default()
     };
     assert_eq!(with_caps.hard_threshold(200_000), Some(180_000));
-    assert_eq!(cfg.hard_threshold(10_000), None);
+    // A reserve larger than the window is clamped to a quarter of it, so
+    // three quarters stay free for input.
+    assert_eq!(cfg.hard_threshold(10_000), Some(7_500));
+    assert_eq!(cfg.hard_threshold(16_000), Some(12_000));
     assert_eq!(cfg.hard_threshold(0), None);
 }
 
