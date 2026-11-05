@@ -436,11 +436,13 @@ log reads, mechanical edits).
   that model and tier are still available; otherwise it uses the session
   model.
 - `model` (string, optional) — model query (e.g. `anthropic/claude-haiku-4.5`)
-  overriding the session model. List choices with `lofi.models()`. The run
-  keeps the session service tier when it is not `auto` and the new model
-  declares it (see `service_tiers` in `lofi.models()`); otherwise the
-  normal default order applies (model, provider, then the configured
-  `[agent]` tier). A `@tier` suffix in `model` always wins.
+  overriding the session model. List choices with `lofi.models()`. On a
+  CLI backend, name its configured `model`, one of its `models`, or
+  `default` for the configured one; `lofi.models()` lists provider models
+  only. The run keeps the session service tier when it is not `auto` and
+  the new model declares it (see `service_tiers` in `lofi.models()`);
+  otherwise the normal default order applies (model, provider, then the
+  configured `[agent]` tier). A `@tier` suffix in `model` always wins.
 - `thinking` (string, optional) — thinking level (`off`, `low`, `medium`,
   `high`, `xhigh`).
 - `system` (string, optional) — system prompt override.

@@ -14,6 +14,6 @@ pub use contract::{Backend, BackendRef, Completion, CompletionRequest, ModelSele
 pub use native::NativeSource;
 pub use resolve::BackendFactory;
 pub(crate) use resolve::{parse_query, ParsedQuery};
-pub use session::configured_models;
+pub use session::{configured_models, model_ids};
 
 pub use mcp::run_stdio_proxy;

@@ -46,6 +46,26 @@ pub fn configured_models(
         .collect()
 }
 
+/// The model ids a backend accepts in a query, in picker order: the configured
+/// model, then its `models`, then the `default` alias that opens the
+/// configured one.
+#[must_use]
+pub fn model_ids(config: &lofi_types::BackendConfig) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    if let Some(model) = config.model() {
+        ids.push(model.to_string());
+    }
+    for id in config.models() {
+        if !ids.iter().any(|known| known == id) {
+            ids.push(id.clone());
+        }
+    }
+    if !ids.iter().any(|known| known == "default") {
+        ids.push("default".to_string());
+    }
+    ids
+}
+
 #[derive(Clone)]
 pub struct ExternalBackend {
     pub(super) name: String,

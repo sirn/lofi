@@ -245,7 +245,7 @@ impl BackendFactory {
                 "no model \"{}\" for backend \"{}\"; configured: {}",
                 parsed.model,
                 parsed.provider,
-                config.models().join(", ")
+                super::model_ids(config).join(", ")
             )));
         }
         if parsed.tier != ServiceTier::Auto {

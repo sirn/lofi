@@ -983,3 +983,102 @@ fn subagent_restore_keeps_a_recorded_auto_tier() {
     let restored = override_query(&support, &agent, &recorded.query(), None).unwrap();
     assert_eq!(RunModel::parse(&restored).service_tier, ServiceTier::Auto);
 }
+
+/// A CLI backend names its own models, and `default` is the configured one.
+fn claude_backend(model: Option<&str>, listed: &[&str]) -> lofi_types::BackendConfig {
+    lofi_types::BackendConfig::ClaudeCode {
+        command: "claude".to_string(),
+        model: model.map(str::to_string),
+        models: listed.iter().map(|id| (*id).to_string()).collect(),
+        context_window: None,
+    }
+}
+
+fn backend_support(backend: lofi_types::BackendConfig, dir: &std::path::Path) -> SubagentSupport {
+    let (mut cfg, reg) = build(one_provider(provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[("gpt-4o", mc())]),
+        None,
+    )));
+    cfg.backends.insert("claude".to_string(), backend);
+    SubagentSupport::new(reg, cfg, dir.to_path_buf())
+}
+
+fn backend_override(backend: lofi_types::BackendConfig, model: &str) -> Result<String> {
+    let dir = tempdir().unwrap();
+    let support = backend_support(backend, dir.path());
+    let agent = agent_with(Vec::new(), dir.path());
+    override_query(&support, &agent, model, None)
+}
+
+#[test]
+fn subagent_override_opens_the_configured_backend_model() {
+    let query = backend_override(
+        claude_backend(
+            Some("claude-opus-5-5"),
+            &["claude-sonnet-5-5", "claude-haiku-5-5"],
+        ),
+        "claude/claude-opus-5-5",
+    )
+    .unwrap();
+    let model = RunModel::parse(&query);
+    assert_eq!(model.provider, "claude");
+    assert_eq!(model.id, "claude-opus-5-5");
+    assert_eq!(model.service_tier, ServiceTier::Auto);
+}
+
+#[test]
+fn subagent_override_opens_a_listed_backend_model() {
+    let query = backend_override(
+        claude_backend(
+            Some("claude-opus-5-5"),
+            &["claude-sonnet-5-5", "claude-haiku-5-5"],
+        ),
+        "claude/claude-haiku-5-5",
+    )
+    .unwrap();
+    assert_eq!(RunModel::parse(&query).id, "claude-haiku-5-5");
+}
+
+#[test]
+fn subagent_override_accepts_default_for_a_backend() {
+    let query = backend_override(
+        claude_backend(Some("claude-opus-5-5"), &["claude-sonnet-5-5"]),
+        "claude/default",
+    )
+    .unwrap();
+    assert_eq!(RunModel::parse(&query).id, "default");
+}
+
+#[test]
+fn subagent_override_rejects_a_name_the_backend_does_not_list() {
+    let error = backend_override(
+        claude_backend(Some("claude-opus-5-5"), &["claude-sonnet-5-5"]),
+        "claude/claude-opus-4",
+    )
+    .unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("no model `claude-opus-4` for backend `claude`"),
+        "{text}"
+    );
+    // The message lists what the backend does accept, the configured model and
+    // the alias included.
+    assert!(
+        text.contains("claude-opus-5-5") && text.contains("default"),
+        "{text}"
+    );
+}
+
+#[test]
+fn subagent_override_rejects_a_level_the_backend_does_not_accept() {
+    let error = backend_override(
+        claude_backend(Some("claude-opus-5-5"), &[]),
+        "claude/claude-opus-5-5:bogus",
+    )
+    .unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("thinking level bogus"), "{text}");
+    assert!(text.contains("allowed: "), "{text}");
+}
