@@ -473,11 +473,12 @@ is evicted. When `result` was cut to fit `output_limit`, `truncated` is
 error are capped at 32768 bytes regardless of `output_limit`, so a status
 or wait after the fact may report a shorter, marked-truncated text than
 the original return. `usage` reports the run's token totals and cost when
-the provider reported them. A timed-out run keeps only the history from
-before that run, so a resume never replays a dangling tool call. Argument
-problems — a missing `prompt`, an empty or unknown `id`, a bad override, a
-value with the wrong type — resolve with `ok: false` and `status: "failed"`
-instead of throwing.
+the provider reported them. A timed-out run keeps the history it reached,
+so a resume continues that work instead of rerunning it. A tool call the
+run left without a result is closed with an interrupted result, so no
+request carries half a call. Argument problems — a missing `prompt`, an empty
+or unknown `id`, a bad override, a value with the wrong type — resolve
+with `ok: false` and `status: "failed"` instead of throwing.
 
 Subagents run with the session's shell policy and truncation config; they
 cannot spawn further subagents. They write transcripts unless the session

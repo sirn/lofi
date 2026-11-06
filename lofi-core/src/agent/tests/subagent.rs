@@ -1,8 +1,9 @@
-#![allow(clippy::await_holding_lock)]
+#![allow(clippy::await_holding_lock, clippy::expect_used)]
 // The lock serializes tests against the process-global LOFI_STATE_HOME, not
 // against shared runtime state, so holding it across awaits is the point.
 
 use super::*;
+use crate::session::store::IndexKind;
 use lofi_code::SubagentOp;
 use serde_json::json;
 
@@ -285,14 +286,14 @@ async fn output_limit_counts_bytes_at_char_boundary() {
 // tests stay deterministic no matter when the stop fires: a prompt "a" asks
 // for a tool call, the follow-up after a tool result pends forever (the run
 // can be stopped mid-turn), and anything else completes with plain text.
-struct TimeoutRollbackProvider {
+struct TimeoutResumeProvider {
     requests: std::sync::Mutex<Vec<Vec<Message>>>,
     tool_round: Vec<StreamingEvent>,
     text_round: Vec<StreamingEvent>,
 }
 
 #[async_trait]
-impl Provider for TimeoutRollbackProvider {
+impl Provider for TimeoutResumeProvider {
     async fn stream(
         &self,
         _model: &Model,
@@ -311,11 +312,11 @@ impl Provider for TimeoutRollbackProvider {
 }
 
 #[tokio::test]
-async fn timeout_rolls_back_the_unfinished_turn() {
+async fn timeout_keeps_the_partial_history() {
     let _env = env_lock();
     let (_state, state_path) = StateEnv::new();
     let dir = tempdir().unwrap();
-    let provider = Arc::new(TimeoutRollbackProvider {
+    let provider = Arc::new(TimeoutResumeProvider {
         requests: std::sync::Mutex::new(Vec::new()),
         tool_round: exec_round("return 1"),
         text_round: text_round("resumed"),
@@ -324,9 +325,14 @@ async fn timeout_rolls_back_the_unfinished_turn() {
     agent.provider = provider.clone();
     let hook = agent.subagent_hook().unwrap();
 
-    // The model round after the tool call pends, so the run times out
-    // mid-turn. A slow tool round is fine too: the resume works either way.
-    let out = hook(SubagentOp::Run, json!({ "prompt": "a", "timeout_ms": 100 })).await;
+    // The model round after the tool call never answers, so the deadline can
+    // only fire once the tool exchange is complete. A deadline long enough to
+    // outlast the sandbox startup keeps the fixture off a race.
+    let out = hook(
+        SubagentOp::Run,
+        json!({ "prompt": "a", "timeout_ms": 2000 }),
+    )
+    .await;
     assert_eq!(out["status"], json!("timed_out"), "{out}");
     let id = out["id"].as_str().unwrap().to_string();
 
@@ -338,53 +344,167 @@ async fn timeout_rolls_back_the_unfinished_turn() {
     assert_eq!(out["status"], json!("completed"), "{out}");
     assert_eq!(out["result"], json!("resumed"), "{out}");
 
-    // In-memory history: the resumed turn sees neither "a" nor the tool call.
+    // The resumed turn continues the timed-out one: it replays the prompt
+    // that run was given, the tool call it made, and the result of that call.
     let requests = provider.requests.lock().unwrap();
-    let roles: Vec<_> = requests
-        .last()
-        .unwrap()
-        .iter()
-        .map(|m| (m.role, first_text(m)))
-        .collect();
+    let last = requests.last().unwrap();
+    let roles: Vec<_> = last.iter().map(|m| m.role).collect();
     assert_eq!(
         roles,
         vec![
-            (Role::System, "sys".to_string()),
-            (Role::User, "b".to_string())
+            Role::System,
+            Role::User,
+            Role::Assistant,
+            Role::Tool,
+            Role::User
         ],
         "{roles:?}"
     );
+    assert_tool_calls_are_answered(last);
+    let calls = last
+        .iter()
+        .flat_map(|m| m.blocks.iter())
+        .filter(|block| matches!(block, ContentBlock::ToolUse { .. }))
+        .count();
+    assert_eq!(calls, 1, "the run's one tool call survives: {last:?}");
     drop(requests);
 
-    // Transcript: the selected lineage holds only the resumed turn.
+    // Transcript: the timed-out run stays on the lineage up to its own settle
+    // marker, so a replay after a restart resumes from the same point.
     let files = find_jsonl(&state_path);
     assert_eq!(files.len(), 1, "{files:?}");
     let (_cursor, snapshot) =
         crate::session::store::SessionCursor::open_snapshot(files[0].clone()).unwrap();
     let kinds: Vec<_> = snapshot.index.iter().map(|e| e.kind).collect();
+    let first_settle = kinds
+        .iter()
+        .position(|kind| *kind == IndexKind::RunSettled)
+        .expect("the timed-out run leaves a settle marker");
+    assert_eq!(kinds.first(), Some(&IndexKind::SystemMessage), "{kinds:?}");
+    assert!(
+        kinds[..first_settle].contains(&IndexKind::ToolResult),
+        "the timed-out run's tool exchange is off its lineage: {kinds:?}"
+    );
     assert_eq!(
-        kinds,
-        vec![
-            crate::session::store::IndexKind::SystemMessage,
-            // The timed-out run's settle marker, at the rollback point.
-            crate::session::store::IndexKind::RunSettled,
-            // The resumed turn opens at its own boundary, before its prompt.
-            crate::session::store::IndexKind::TurnStarted,
-            // The checkpoint at admission keeps what a killed turn spent: no
-            // marker will ever report it.
-            crate::session::store::IndexKind::TurnUsage,
-            crate::session::store::IndexKind::UserPrompt,
-            // The round that follows checkpoints again.
-            crate::session::store::IndexKind::TurnUsage,
-            // The round reports its context fill before the answer lands.
-            crate::session::store::IndexKind::ContextReported,
-            crate::session::store::IndexKind::AssistantMessage,
-            crate::session::store::IndexKind::TurnUsage,
-            crate::session::store::IndexKind::TurnEnd,
-            // The resumed run's settle marker ends the lineage.
-            crate::session::store::IndexKind::RunSettled,
-        ],
-        "{kinds:?}"
+        kinds
+            .iter()
+            .filter(|kind| **kind == IndexKind::UserPrompt)
+            .count(),
+        2,
+        "both prompts stay on the lineage: {kinds:?}"
+    );
+}
+
+/// Every tool call in a request must be answered before the next message of
+/// another role: a provider rejects an orphaned call.
+fn assert_tool_calls_are_answered(request: &[Message]) {
+    for (index, message) in request.iter().enumerate() {
+        if message.role != Role::Assistant {
+            continue;
+        }
+        let pending: Vec<&str> = message
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        if pending.is_empty() {
+            continue;
+        }
+        let answered: Vec<&str> = request[index + 1..]
+            .iter()
+            .take_while(|message| message.role == Role::Tool)
+            .flat_map(|message| message.blocks.iter())
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        for id in pending {
+            assert!(
+                answered.contains(&id),
+                "call {id} has no result: {request:?}"
+            );
+        }
+    }
+}
+
+// Answers the first prompt with a tool call whose tool outlives the run's
+// timeout, so the run stops with that call still open; a later prompt gets
+// plain text.
+struct SlowToolProvider {
+    requests: std::sync::Mutex<Vec<Vec<Message>>>,
+}
+
+#[async_trait]
+impl Provider for SlowToolProvider {
+    async fn stream(
+        &self,
+        _model: &Model,
+        messages: &[Message],
+        _tools: &[ToolSchema],
+    ) -> Result<futures::stream::BoxStream<'static, Result<StreamingEvent>>> {
+        self.requests.lock().unwrap().push(messages.to_vec());
+        let round = match messages.last() {
+            Some(message) if message.role == Role::User && first_text(message) == "a" => {
+                exec_round("await lofi.sleep(5)")
+            }
+            _ => text_round("resumed"),
+        };
+        Ok(Box::pin(stream::iter(round.into_iter().map(Ok))))
+    }
+}
+
+#[tokio::test]
+async fn timeout_inside_a_tool_call_stays_resumable() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let provider = Arc::new(SlowToolProvider {
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let mut agent = agent_with(vec![], dir.path()).with_subagent_support(support(dir.path()));
+    agent.provider = provider.clone();
+    let hook = agent.subagent_hook().unwrap();
+
+    // The tool outlives the run's timeout, so the run stops with its call open.
+    let out = hook(SubagentOp::Run, json!({ "prompt": "a", "timeout_ms": 200 })).await;
+    assert_eq!(out["status"], json!("timed_out"), "{out}");
+    let id = out["id"].as_str().unwrap().to_string();
+
+    let out = hook(
+        SubagentOp::Run,
+        json!({ "id": id, "prompt": "b", "timeout_ms": 5000 }),
+    )
+    .await;
+    assert_eq!(out["status"], json!("completed"), "{out}");
+
+    // The second resume replays the history that open call now sits inside.
+    let out = hook(
+        SubagentOp::Run,
+        json!({ "id": id, "prompt": "c", "timeout_ms": 5000 }),
+    )
+    .await;
+    assert_eq!(out["status"], json!("completed"), "{out}");
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    for request in requests.iter() {
+        assert_tool_calls_are_answered(request);
+    }
+    let texts: Vec<_> = requests
+        .last()
+        .unwrap()
+        .iter()
+        .filter(|message| message.role == Role::User)
+        .map(first_text)
+        .collect();
+    assert_eq!(
+        texts,
+        vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        "{texts:?}"
     );
 }
 
@@ -447,7 +567,7 @@ async fn dropped_hook_future_cancels_and_stays_resumable() {
     let _env = env_lock();
     let _state = StateEnv::new();
     let dir = tempdir().unwrap();
-    let provider = Arc::new(TimeoutRollbackProvider {
+    let provider = Arc::new(TimeoutResumeProvider {
         requests: std::sync::Mutex::new(Vec::new()),
         tool_round: exec_round("return 1"),
         text_round: text_round("resumed"),
@@ -565,7 +685,7 @@ async fn spawn_applies_the_system_override() {
     let _env = env_lock();
     let _state = StateEnv::new();
     let dir = tempdir().unwrap();
-    let provider = Arc::new(TimeoutRollbackProvider {
+    let provider = Arc::new(TimeoutResumeProvider {
         requests: std::sync::Mutex::new(Vec::new()),
         tool_round: exec_round("return 1"),
         text_round: text_round("done"),
@@ -1731,7 +1851,7 @@ async fn rehydrate_runs_once_per_parent_and_after_clear() {
 }
 
 #[tokio::test]
-async fn resume_after_rehydrate_trims_dangling_tool_calls() {
+async fn resume_after_rehydrate_closes_dangling_tool_calls() {
     let _env = env_lock();
     let _state = StateEnv::new();
     let dir = tempdir().unwrap();
@@ -1773,12 +1893,22 @@ async fn resume_after_rehydrate_trims_dangling_tool_calls() {
     assert_eq!(out["status"], json!("completed"), "{out}");
     let requests = provider.requests();
     assert_eq!(requests.len(), 1);
-    let has_tool_use = requests[0].iter().any(|m| {
-        m.blocks
-            .iter()
-            .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+    // The stored call has no result, so the resume closes it: the model learns
+    // the call did not finish instead of losing the record of it.
+    let request = &requests[0];
+    let call_at = request
+        .iter()
+        .position(|m| {
+            m.blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+        })
+        .expect("the interrupted call reaches the request");
+    assert_eq!(request[call_at + 1].role, Role::Tool, "{request:?}");
+    let closed = request[call_at + 1].blocks.iter().any(|b| {
+        matches!(b, ContentBlock::ToolResult { tool_use_id, is_error: true, .. } if tool_use_id == "t1")
     });
-    assert!(!has_tool_use, "{:?}", requests[0]);
+    assert!(closed, "{request:?}");
     let texts: Vec<_> = requests[0]
         .iter()
         .filter(|m| m.role == Role::User)

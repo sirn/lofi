@@ -26,7 +26,9 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::AbortHandle;
 
 use super::mailbox::{Mailbox, MailboxScope, PARENT_ADDRESS};
-use super::{lock, Agent, AgentEvent, RunControls, ToolExecutor, TurnRequest};
+use super::{
+    close_unanswered_tool_uses, lock, Agent, AgentEvent, RunControls, ToolExecutor, TurnRequest,
+};
 use crate::backend::{Backend, BackendFactory, BackendRef};
 use crate::models::ModelRegistry;
 use crate::session::recorder::TurnOutcome;
@@ -1828,11 +1830,12 @@ async fn start(
     // The transcript id lets the caller locate the persisted session later;
     // the registry id alone is meaningless after a restart or an eviction.
     let session_id = cursor.as_ref().map(SessionCursor::id);
-    // History length before this run: the result text and the timeout
-    // rollback both consider only what this run appended.
+    // History length before this run: the result text considers only what
+    // this run appended.
     let base_len = messages.len();
-    // Transcript head before this run: the timeout and unwatched-end paths
-    // move it back so the transcript and the in-memory history stay in sync.
+    // Transcript head before this run: an unwatched end moves it back so the
+    // transcript and the in-memory history stay in sync. A timeout keeps the
+    // head where the run reached.
     let pre_run_leaf = cursor.as_ref().and_then(SessionCursor::leaf_id);
     // Capture the generation at admission, not in the task: a clear()
     // between the two would let the task publish into the new session.
@@ -1928,7 +1931,6 @@ async fn run_task(
         registry.clone(),
         id.clone(),
         base_len,
-        pre_run_leaf,
         timeout,
         prompt,
         output_limit,
@@ -2281,8 +2283,8 @@ fn cap_event_text(text: &str) -> String {
 }
 
 /// Run one turn to completion and finalize the registry entry: status,
-/// stored history, transcript rollback on timeout, and the sandbox thread of
-/// an idle entry.
+/// stored history, the open tool call a timeout closes, and the sandbox
+/// thread of an idle entry.
 #[allow(clippy::too_many_arguments)]
 async fn run_turn_with_timeout(
     backend: BackendRef,
@@ -2292,7 +2294,6 @@ async fn run_turn_with_timeout(
     registry: SubagentRegistry,
     id: String,
     base_len: usize,
-    pre_run_leaf: Option<String>,
     timeout: Duration,
     prompt: String,
     output_limit: usize,
@@ -2343,16 +2344,14 @@ async fn run_turn_with_timeout(
             .filter(|&budget| spent > budget)
             .map(|budget| (spent, budget))
     };
-    let (status, error, keep) = classify_outcome(
-        outcome,
-        budget_over,
-        &cancel,
-        cursor.as_ref(),
-        pre_run_leaf,
-        timeout,
-    );
-    if !keep {
-        messages.truncate(base_len);
+    let (status, error) = classify_outcome(outcome, budget_over, &cancel, timeout);
+    if status == Status::TimedOut {
+        // A timeout keeps what the run reached, so a resume continues
+        // instead of paying for the work again. The abort may leave a tool
+        // call open, which providers reject, so close it with the interrupted
+        // result. The transcript keeps the open call, and a replay repairs it
+        // the same way.
+        close_unanswered_tool_uses(&mut messages);
     }
     let (result, full_bytes) = if status == Status::Completed {
         last_text(&messages[base_len..], output_limit)
@@ -2416,56 +2415,44 @@ fn classify_outcome(
     outcome: std::result::Result<Result<TurnOutcome>, tokio::time::error::Elapsed>,
     budget_over: Option<(u64, u64)>,
     cancel: &Arc<AtomicBool>,
-    cursor: Option<&SessionCursor>,
-    pre_run_leaf: Option<String>,
     timeout: Duration,
-) -> (Status, Option<String>, bool) {
+) -> (Status, Option<String>) {
     match outcome {
         Ok(Ok(outcome)) => {
             if let Some((spent, budget)) = budget_over {
                 (
                     Status::Failed,
                     Some(format!("token budget exceeded ({spent} > {budget})")),
-                    true,
                 )
             } else {
                 match outcome {
-                    TurnOutcome::Finished => (Status::Completed, None, true),
                     TurnOutcome::Cancelled | TurnOutcome::Detached => {
-                        (Status::Cancelled, Some("cancelled".to_string()), true)
+                        (Status::Cancelled, Some("cancelled".to_string()))
                     }
                     // A pressure turn stops with the window full: a resume does
                     // not compact the child history, so it would stop again.
-                    TurnOutcome::ContextPressure { resume: true } => (
-                        Status::Failed,
-                        Some("context window is full".to_string()),
-                        true,
-                    ),
+                    TurnOutcome::ContextPressure { resume: true } => {
+                        (Status::Failed, Some("context window is full".to_string()))
+                    }
                     // A child that stopped on its own keeps the answer it
                     // wrote, and the parent reads it as the child's result.
-                    TurnOutcome::ContextPressure { resume: false } => {
-                        (Status::Completed, None, true)
+                    TurnOutcome::Finished | TurnOutcome::ContextPressure { resume: false } => {
+                        (Status::Completed, None)
                     }
                     // A failed turn settles as `Err` from the turn session, so
                     // this arm is a guard on that contract, not a live path.
-                    TurnOutcome::Failed(error) => (Status::Failed, Some(error), true),
+                    TurnOutcome::Failed(error) => (Status::Failed, Some(error)),
                 }
             }
         }
-        Ok(Err(e)) => (Status::Failed, Some(e.to_string()), true),
+        Ok(Err(e)) => (Status::Failed, Some(e.to_string())),
         Err(_) => {
             cancel.store(true, Ordering::SeqCst);
-            // The dropped turn may have appended a tool call without
-            // its result; resume from the pre-run history instead.
-            if let Some(cursor) = cursor {
-                if let Err(e) = cursor.restore_branch(pre_run_leaf) {
-                    tracing::debug!(error = %e, "subagent transcript rollback failed");
-                }
-            }
+            // The run keeps the history it reached: a resume continues from
+            // the work already done instead of rerunning the task.
             (
                 Status::TimedOut,
                 Some(format!("timed out after {} ms", timeout.as_millis())),
-                false,
             )
         }
     }
@@ -3179,7 +3166,7 @@ fn unclaim(registry: &SubagentRegistry, id: &str, error: &Error) {
 /// Replay a transcript into the resume history: a bounded projection of the
 /// selected lineage (events stream one at a time; the full event vector is
 /// never materialized), the latest system prompt split out for the agent,
-/// and a trailing incomplete tool exchange dropped.
+/// and every tool call without a result closed with an interrupted result.
 fn load_entry_history(
     cursor: Option<SessionCursor>,
     transcript_path: Option<PathBuf>,
@@ -3227,37 +3214,8 @@ fn load_entry_history(
     } else {
         None
     };
-    trim_dangling_tool_calls(&mut messages);
+    close_unanswered_tool_uses(&mut messages);
     Ok((messages, cursor, system))
-}
-
-/// A process can exit between an assistant tool call and its result;
-/// providers reject a history whose tail calls tools without results. Drop
-/// the unfinished turn tail: the partial exchange stays in the transcript
-/// for display, but the model never sees half a call.
-fn trim_dangling_tool_calls(messages: &mut Vec<Message>) {
-    while let Some(assistant) = messages
-        .iter()
-        .rposition(|message| message.role == Role::Assistant)
-    {
-        let dangling = {
-            let answered: std::collections::HashSet<&str> = messages[assistant + 1..]
-                .iter()
-                .flat_map(|message| message.blocks.iter())
-                .filter_map(|block| match block {
-                    ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
-                    _ => None,
-                })
-                .collect();
-            messages[assistant].blocks.iter().any(|block| {
-                matches!(block, ContentBlock::ToolUse { id, .. } if !answered.contains(id.as_str()))
-            })
-        };
-        if !dangling {
-            break;
-        }
-        messages.truncate(assistant);
-    }
 }
 
 /// Answer of the run: the text of its final assistant message, truncated to

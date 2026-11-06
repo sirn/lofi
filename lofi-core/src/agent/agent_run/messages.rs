@@ -86,6 +86,9 @@ pub(in crate::agent) fn assistant_announces_tool_intent(message: &Message) -> bo
     )
 }
 
+/// Result text of a call that was interrupted before it produced one.
+const INTERRUPTED_TOOL_RESULT: &str = "cancelled: tool run interrupted before producing a result";
+
 /// Enforces the pairing invariant: every trailing assistant `ToolUse` block
 /// must be answered by a `ToolResult` before the message list is handed back
 /// to the caller. Providers like the Anthropic Messages API reject an orphaned
@@ -127,12 +130,7 @@ pub(crate) fn close_orphaned_tool_uses(messages: &mut Vec<Message>) {
     let synthesized: Vec<ContentBlock> = pending
         .iter()
         .filter(|id| !answered.contains(id.as_str()))
-        .map(|id| ContentBlock::ToolResult {
-            tool_use_id: id.clone(),
-            content: "cancelled: tool run interrupted before producing a result".to_string(),
-            is_error: true,
-            images: Vec::new(),
-        })
+        .map(|id| interrupted_result(id))
         .collect();
     if synthesized.is_empty() {
         return;
@@ -143,6 +141,127 @@ pub(crate) fn close_orphaned_tool_uses(messages: &mut Vec<Message>) {
         blocks: synthesized,
         kind: lofi_types::PromptKind::User,
     });
+}
+
+/// The result a call gets when its run stopped before producing one.
+fn interrupted_result(tool_use_id: &str) -> ContentBlock {
+    ContentBlock::ToolResult {
+        tool_use_id: tool_use_id.to_string(),
+        content: INTERRUPTED_TOOL_RESULT.to_string(),
+        is_error: true,
+        images: Vec::new(),
+    }
+}
+
+/// Close every tool call in a stored history that has no result beside it. A
+/// run that stopped mid-exchange leaves such a call in the transcript, and a
+/// later turn records past it, so the orphan sits in the middle of the
+/// lineage where the tail-only repair above cannot reach. The result is
+/// synthesized in memory: the repair follows from the stored events, so every
+/// replay rebuilds the same history. Idempotent.
+pub(crate) fn close_unanswered_tool_uses(messages: &mut Vec<Message>) {
+    let mut index = 0;
+    while index < messages.len() {
+        let pending: Vec<String> = if messages[index].role == Role::Assistant {
+            messages[index]
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // Results answer a call in the messages that follow it, before the
+        // next message of another role. A transcript written before results
+        // had a role of their own keeps them in a user message.
+        let end = index
+            + 1
+            + messages[index + 1..]
+                .iter()
+                .take_while(|message| carries_tool_results(message))
+                .count();
+        // A result belongs to this turn only if the turn called it; one that
+        // answers another turn cannot be paired on the wire, and a second
+        // result for one call is a duplicate.
+        let mut answered: Vec<ContentBlock> = Vec::new();
+        let mut strays: Vec<Message> = Vec::new();
+        let mut strayed = false;
+        for message in &messages[index + 1..end] {
+            let mut others: Vec<ContentBlock> = Vec::new();
+            for block in &message.blocks {
+                match block {
+                    ContentBlock::ToolResult { tool_use_id, .. }
+                        if pending.contains(tool_use_id)
+                            && !answered.iter().any(|block| {
+                                matches!(block, ContentBlock::ToolResult { tool_use_id: id, .. } if id == tool_use_id)
+                            }) =>
+                    {
+                        answered.push(block.clone());
+                    }
+                    ContentBlock::ToolResult { .. } => strayed = true,
+                    other => others.push(other.clone()),
+                }
+            }
+            if !others.is_empty() {
+                strays.push(Message {
+                    origin: message.origin.clone(),
+                    role: message.role,
+                    blocks: others,
+                    kind: message.kind,
+                });
+            }
+        }
+        let missing: Vec<ContentBlock> = pending
+            .iter()
+            .filter(|id| {
+                !answered.iter().any(|block| {
+                    matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == *id)
+                })
+            })
+            .map(|id| interrupted_result(id))
+            .collect();
+        // One message of role Tool holds a turn's results, and only those. A
+        // second message, a user role, or a block that is not a result splits
+        // the answers over two turns or drops them from the request, so the
+        // region is rebuilt whenever it is not already that shape.
+        let region = &messages[index + 1..end];
+        let canonical =
+            region.len() == 1 && region[0].role == Role::Tool && !strayed && strays.is_empty();
+        if missing.is_empty() && canonical {
+            index = end;
+            continue;
+        }
+        let mut rebuilt = Vec::new();
+        if !answered.is_empty() || !missing.is_empty() {
+            let mut blocks = answered;
+            blocks.extend(missing);
+            rebuilt.push(Message {
+                origin: region.first().and_then(|message| message.origin.clone()),
+                role: Role::Tool,
+                blocks,
+                kind: lofi_types::PromptKind::User,
+            });
+        }
+        rebuilt.extend(strays);
+        let rebuilt_count = rebuilt.len();
+        messages.splice(index + 1..end, rebuilt);
+        index += 1 + rebuilt_count;
+    }
+}
+
+/// Whether a message holds the results of the assistant message before it.
+/// The tool role carries them today, and a transcript written before that
+/// role existed kept them in a user message.
+fn carries_tool_results(message: &Message) -> bool {
+    message.role == Role::Tool
+        || (message.role == Role::User
+            && message
+                .blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. })))
 }
 
 /// Count attached images across the request history, for the omit notice.

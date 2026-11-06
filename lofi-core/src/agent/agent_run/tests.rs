@@ -2,8 +2,8 @@
 
 use super::super::tool_executor::upgrade_exec_image;
 use super::messages::{
-    close_orphaned_tool_uses, count_image_blocks, image_payload_bytes, strip_image_blocks,
-    MAX_REQUEST_IMAGE_BYTES,
+    close_orphaned_tool_uses, close_unanswered_tool_uses, count_image_blocks, image_payload_bytes,
+    strip_image_blocks, MAX_REQUEST_IMAGE_BYTES,
 };
 use super::*;
 use lofi_types::PromptKind;
@@ -18,6 +18,22 @@ fn assistant_with_tool_use(id: &str) -> Message {
             name: "exec".to_string(),
             input: json!({"code": "x"}),
         }],
+        kind: PromptKind::default(),
+    }
+}
+
+fn assistant_with_tool_uses(ids: &[&str]) -> Message {
+    Message {
+        origin: None,
+        role: Role::Assistant,
+        blocks: ids
+            .iter()
+            .map(|id| ContentBlock::ToolUse {
+                id: (*id).to_string(),
+                name: "exec".to_string(),
+                input: json!({"code": "x"}),
+            })
+            .collect(),
         kind: PromptKind::default(),
     }
 }
@@ -66,6 +82,281 @@ fn answered_tool_use_is_left_alone() {
         ContentBlock::ToolResult { content, .. } => assert_eq!(content, "ok"),
         other => panic!("expected ToolResult, got {other:?}"),
     }
+}
+
+fn tool_result(id: &str, content: &str) -> Message {
+    Message {
+        origin: None,
+        role: Role::Tool,
+        blocks: vec![ContentBlock::ToolResult {
+            tool_use_id: id.to_string(),
+            content: content.to_string(),
+            is_error: false,
+            images: Vec::new(),
+        }],
+        kind: PromptKind::default(),
+    }
+}
+
+#[test]
+fn a_region_of_several_result_messages_is_one_message() {
+    let mut messages = vec![
+        assistant_with_tool_uses(&["tool-1", "tool-2"]),
+        tool_result("tool-1", "a"),
+        tool_result("tool-2", "b"),
+    ];
+    close_unanswered_tool_uses(&mut messages);
+    assert_eq!(messages.len(), 2, "one result message for one turn");
+    let ids: Vec<&str> = messages[1]
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["tool-1", "tool-2"],
+        "the real answers survive once"
+    );
+}
+
+#[test]
+fn a_mixed_legacy_message_keeps_its_result_and_its_text() {
+    let mut messages = vec![
+        assistant_with_tool_uses(&["tool-1"]),
+        Message {
+            origin: None,
+            role: Role::User,
+            blocks: vec![
+                ContentBlock::Text {
+                    text: "note".to_string(),
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "tool-1".to_string(),
+                    content: "ok".to_string(),
+                    is_error: false,
+                    images: Vec::new(),
+                },
+            ],
+            kind: PromptKind::default(),
+        },
+    ];
+    close_unanswered_tool_uses(&mut messages);
+    assert_eq!(messages.len(), 3, "the results and the text part ways");
+    assert_eq!(messages[1].role, Role::Tool);
+    assert_eq!(messages[2].role, Role::User);
+    let results: Vec<String> = messages[1]
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results, vec!["ok"], "one answer, and it is the real one");
+    assert!(matches!(
+        &messages[2].blocks[0],
+        ContentBlock::Text { text } if text == "note"
+    ));
+}
+
+#[test]
+fn a_legacy_result_message_becomes_the_tool_role() {
+    let mut messages = vec![
+        assistant_with_tool_uses(&["tool-1"]),
+        Message {
+            origin: None,
+            role: Role::User,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool-1".to_string(),
+                content: "ok".to_string(),
+                is_error: false,
+                images: Vec::new(),
+            }],
+            kind: PromptKind::default(),
+        },
+    ];
+    close_unanswered_tool_uses(&mut messages);
+    assert_eq!(messages.len(), 2);
+    assert_eq!(
+        messages[1].role,
+        Role::Tool,
+        "the provider serializes results by role"
+    );
+    let mut repaired = messages.clone();
+    close_unanswered_tool_uses(&mut repaired);
+    assert_eq!(repaired, messages, "a second repair changes nothing");
+}
+
+#[test]
+fn a_result_for_another_turn_is_not_carried_into_this_one() {
+    // A region may hold a result whose call belongs to an earlier turn. It
+    // cannot be paired on the wire, so the repair drops it rather than send a
+    // duplicate under a call this turn never made.
+    let mut messages = vec![
+        assistant_with_tool_uses(&["tool-1"]),
+        tool_result("tool-1", "a"),
+        assistant_with_tool_uses(&["tool-2"]),
+        tool_result("tool-1", "a"),
+    ];
+    close_unanswered_tool_uses(&mut messages);
+    let ids: Vec<&str> = messages[3]
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids, vec!["tool-2"], "only this turn's call is answered");
+    let mut repaired = messages.clone();
+    close_unanswered_tool_uses(&mut repaired);
+    assert_eq!(repaired, messages, "a second repair changes nothing");
+}
+
+#[test]
+fn strays_keep_the_kind_and_origin_of_their_message() {
+    let origin = |model: &str| {
+        Some(lofi_types::ModelOrigin {
+            provider: "plexus".to_string(),
+            model: model.to_string(),
+            api: lofi_types::Api::AnthropicMessages,
+        })
+    };
+    let legacy = |kind: PromptKind,
+                  origin: Option<lofi_types::ModelOrigin>,
+                  result: &str,
+                  text: &str| Message {
+        origin,
+        role: Role::User,
+        blocks: vec![
+            ContentBlock::ToolResult {
+                tool_use_id: result.to_string(),
+                content: "ok".to_string(),
+                is_error: false,
+                images: Vec::new(),
+            },
+            ContentBlock::Text {
+                text: text.to_string(),
+            },
+        ],
+        kind,
+    };
+    let mut messages = vec![
+        assistant_with_tool_uses(&["tool-1", "tool-2"]),
+        legacy(PromptKind::User, origin("parent"), "tool-1", "typed"),
+        legacy(PromptKind::Notice, origin("job"), "tool-2", "job finished"),
+    ];
+    close_unanswered_tool_uses(&mut messages);
+    assert_eq!(messages.len(), 4, "one result message and two strays");
+    assert_eq!(messages[1].role, Role::Tool);
+    assert_eq!(messages[1].blocks.len(), 2);
+    let stray = |index: usize| {
+        (
+            messages[index].kind,
+            messages[index].origin.as_ref().map(|o| o.model.clone()),
+        )
+    };
+    assert_eq!(stray(2), (PromptKind::User, Some("parent".to_string())));
+    assert_eq!(stray(3), (PromptKind::Notice, Some("job".to_string())));
+    assert!(matches!(
+        &messages[3].blocks[0],
+        ContentBlock::Text { text } if text == "job finished"
+    ));
+}
+
+#[test]
+fn no_user_message_carries_a_result_after_the_repair() {
+    // The provider mappers serialize results only for the tool role, so a
+    // repaired history that leaves one in a user message sends a turn whose
+    // call has no answer on the wire.
+    let mut messages = vec![
+        assistant_with_tool_uses(&["tool-1"]),
+        tool_result("tool-1", "a"),
+        tool_result("tool-2", "b"),
+        assistant_with_tool_uses(&["tool-3"]),
+        Message {
+            origin: None,
+            role: Role::User,
+            blocks: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "tool-3".to_string(),
+                    content: "ok".to_string(),
+                    is_error: false,
+                    images: Vec::new(),
+                },
+                ContentBlock::Text {
+                    text: "note".to_string(),
+                },
+            ],
+            kind: PromptKind::default(),
+        },
+        assistant_with_tool_uses(&["tool-4"]),
+    ];
+    close_unanswered_tool_uses(&mut messages);
+    let strayed: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| {
+            message.role == Role::User
+                && message
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        })
+        .map(|(index, _)| index)
+        .collect();
+    assert!(
+        strayed.is_empty(),
+        "results left in user messages: {strayed:?}"
+    );
+}
+
+#[test]
+fn a_closed_call_joins_the_results_that_are_there() {
+    let mut messages = vec![
+        Message {
+            origin: None,
+            role: Role::Assistant,
+            blocks: vec![
+                ContentBlock::ToolUse {
+                    id: "tool-1".to_string(),
+                    name: "exec".to_string(),
+                    input: json!({"code": "a"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "tool-2".to_string(),
+                    name: "exec".to_string(),
+                    input: json!({"code": "b"}),
+                },
+            ],
+            kind: PromptKind::default(),
+        },
+        tool_result("tool-2", "ok"),
+    ];
+    close_unanswered_tool_uses(&mut messages);
+    assert_eq!(
+        messages.len(),
+        2,
+        "one result message for one assistant turn"
+    );
+    assert_eq!(messages[1].blocks.len(), 2);
+    let closed = messages[1].blocks.iter().find_map(|block| match block {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+            ..
+        } if tool_use_id == "tool-1" => Some((content.clone(), *is_error)),
+        _ => None,
+    });
+    let Some((content, is_error)) = closed else {
+        panic!("tool-1 gets a result");
+    };
+    assert!(is_error, "the missing call is closed as an error");
+    assert!(content.contains("cancelled"));
 }
 
 #[test]
