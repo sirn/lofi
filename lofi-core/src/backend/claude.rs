@@ -782,8 +782,9 @@ fn parse_usage(value: &Value) -> Option<lofi_types::Usage> {
 fn validate_init(message: &Value) -> Result<()> {
     if message["tools"] != json!([EXEC]) {
         return Err(Error::State(format!(
-            "Claude Code must expose only {EXEC}, but reported {}",
+            "Claude Code must expose only {EXEC}, but reported {} with the Lofi server {}",
             observed(&message["tools"]),
+            observed(&message["mcp_servers"]),
         )));
     }
     let servers = message["mcp_servers"].as_array();

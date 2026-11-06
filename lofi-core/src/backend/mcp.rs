@@ -19,6 +19,7 @@ pub(super) struct Bridge {
 
 impl Bridge {
     pub async fn start(executor: ToolExecutor, executable: &std::path::Path) -> Result<Self> {
+        ensure_bridge_executable(executable)?;
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let token = uuid::Uuid::new_v4().to_string();
@@ -67,6 +68,22 @@ impl Bridge {
     pub fn task_handle(&self) -> tokio::task::AbortHandle {
         self.task.abort_handle()
     }
+}
+
+/// Refuse a path that a rebuild took away. The kernel reports a replaced
+/// binary as `... (deleted)`, which no child can spawn: the agent backend
+/// would come up with no tools instead of a clear error.
+fn ensure_bridge_executable(executable: &std::path::Path) -> Result<()> {
+    if executable.exists() {
+        return Ok(());
+    }
+    let message = format!(
+        "the running lofi binary {} was replaced by a rebuild, so the agent \
+         backend cannot start its exec bridge; restart the session to run the \
+         new build",
+        executable.display()
+    );
+    Err(Error::State(message))
 }
 
 impl Drop for Bridge {
@@ -187,4 +204,41 @@ pub async fn run_stdio_proxy() -> Result<()> {
         result = tokio::io::copy(&mut reader, &mut stdout) => { result?; }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::{ensure_bridge_executable, Bridge};
+
+    #[tokio::test]
+    async fn start_refuses_a_replaced_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("lofi (deleted)");
+        let executor =
+            crate::agent::ToolExecutor::new(dir.path(), &lofi_types::Config::default(), &[])
+                .unwrap();
+        let error = match Bridge::start(executor, &gone).await {
+            Ok(_) => panic!("a replaced executable must be refused"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("was replaced by a rebuild"), "{error}");
+    }
+
+    #[test]
+    fn an_existing_executable_is_accepted() {
+        ensure_bridge_executable(&std::env::current_exe().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_replaced_executable_is_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        // What the kernel reports after a rebuild replaced the binary.
+        let gone = dir.path().join("lofi (deleted)");
+        let error = ensure_bridge_executable(&gone).unwrap_err().to_string();
+        assert!(error.contains("was replaced by a rebuild"), "{error}");
+        assert!(error.contains("lofi (deleted)"), "{error}");
+        assert!(error.contains("restart the session"), "{error}");
+    }
 }
