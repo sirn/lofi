@@ -2594,29 +2594,18 @@ pub(super) fn child_executor(
     executor.with_child_identity("", None, None, None)
 }
 
-/// The same child at another thinking level. Off is always allowed, and a
-/// session model that declares no levels still runs at Off.
+/// The same child at another thinking level. The target checks the level, so a
+/// session model that declares no levels still runs at Off, and a level it
+/// rejects fails with the same text an override gets. A level the child
+/// already runs at returns it unchanged, which keeps a CLI child alive.
 fn with_thinking(
     child: BackendRef,
     level: &ThinkingLevel,
 ) -> std::result::Result<BackendRef, RunRejection> {
-    if *level == ThinkingLevel::Off {
+    let selection = child.selection();
+    if selection.thinking == *level {
         return Ok(child);
     }
-    let levels = child.choice().thinking_levels;
-    if levels.is_empty() {
-        return Err(Error::Tool("the session model does not support thinking".into()).into());
-    }
-    if !levels.contains(level) {
-        let allowed: Vec<&str> = levels.iter().map(ThinkingLevel::as_str).collect();
-        return Err(Error::Tool(format!(
-            "thinking level {} not supported by the session model; allowed: {}",
-            level.as_str(),
-            allowed.join(", ")
-        ))
-        .into());
-    }
-    let selection = child.selection();
     Ok(child.with_selection(&format!(
         "{}/{}:{}",
         child.name(),

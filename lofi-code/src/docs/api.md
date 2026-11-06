@@ -447,7 +447,8 @@ log reads, mechanical edits).
   child starts with no effort flag.
 - `thinking` (string, optional) — a level the target model declares, for
   example `off`, `low`, `medium`, `high`, `xhigh`, or `max` on a CLI
-  backend. A level the target does not accept fails the run.
+  backend. A level the target does not accept fails the run. It always wins
+  over the parent's level, so `off` runs the child with no thinking.
 - `system` (string, optional) — system prompt override.
 - `timeout_ms` (number, optional) — wall-clock limit for the whole run.
 - `output_limit` (number, optional) — cap on the returned result bytes.

@@ -169,6 +169,23 @@ fn select_model_off_level_always_allowed() {
     assert_eq!(level, ThinkingLevel::Off);
 }
 
+/// A spawn no longer checks a level itself: the target rejects an explicit
+/// level on a model that declares none.
+#[test]
+fn select_model_rejects_an_explicit_level_on_a_model_without_levels() {
+    let (cfg, reg) = build(one_provider(provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[("gpt-4o", mc_levels(&[]))]),
+        None,
+    )));
+    let err = select_model(&reg, &cfg, Some("openai/gpt-4o:high")).unwrap_err();
+    assert!(
+        err.to_string().contains("does not support thinking"),
+        "{err}"
+    );
+}
+
 #[test]
 fn select_model_rejects_bare_model() {
     let (cfg, reg) = build(one_provider(provider(

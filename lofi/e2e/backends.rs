@@ -268,6 +268,9 @@ fn fake_claude_code(text: &str) -> &'static str {
         "subagent cli override" => {
             r#"const out = await lofi.subagent({prompt:"child task",model:"claude/child-model",timeoutMs:5000}); await lofi.write({path:"subagent-result",text:JSON.stringify(out)}); return out"#
         }
+        "subagent off effort" => {
+            r#"const out = await lofi.subagent({prompt:"child task",thinking:"off",timeoutMs:5000}); await lofi.write({path:"subagent-result",text:JSON.stringify(out)}); return out"#
+        }
         "subagent max effort" => {
             r#"const out = await lofi.subagent({prompt:"child task",model:"claude/child-model",thinking:"max",timeoutMs:5000}); await lofi.write({path:"subagent-result",text:JSON.stringify(out)}); return out"#
         }
@@ -1991,6 +1994,27 @@ fn claude_spawned_child_inherits_the_live_effort() {
         std::fs::read_to_string(fixture.workspace.join("selected-model")).unwrap(),
         "child-model"
     );
+    tui.submit("/quit");
+    tui.wait_exit();
+}
+
+/// A child asked for `off` runs at off, so it must not inherit the effort the
+/// parent thinks at.
+#[test]
+fn claude_child_thinking_off_clears_the_parent_effort() {
+    let fixture = claude_fixture();
+    let mut tui = fixture.spawn(&[]);
+    tui.submit("write");
+    fixture.wait_for_event_count("turn_end", 1);
+    tui.submit("/thinking");
+    tui.wait_for("Thinking level", WAIT);
+    // Rows are off / low / medium / high / xhigh / max, pre-selected at off.
+    tui.send(b"\x1b[B\x1b[B\r");
+    tui.submit("subagent off effort");
+    fixture.wait_for_event_count("turn_end", 2);
+    // The child launched last, so its argv is the one on disk.
+    let args = std::fs::read_to_string(fixture.workspace.join("claude-args")).unwrap();
+    assert!(!args.contains("--effort"), "{args}");
     tui.submit("/quit");
     tui.wait_exit();
 }

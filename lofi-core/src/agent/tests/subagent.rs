@@ -624,8 +624,11 @@ async fn completed_run_without_text_is_a_failure() {
     assert_eq!(out["result"], json!("fine"), "{out}");
 }
 
+// The target checks a level, so an override at the level the child already
+// runs at returns the child unchanged and needs no rebuild. The mock session
+// model declares no levels, and it runs at off.
 #[tokio::test]
-async fn thinking_override_requires_session_model_support() {
+async fn thinking_override_at_the_childs_level_keeps_the_child() {
     let _env = env_lock();
     let _state = StateEnv::new();
     let dir = tempdir().unwrap();
@@ -633,21 +636,6 @@ async fn thinking_override_requires_session_model_support() {
         agent_with(vec![text_round("ok")], dir.path()).with_subagent_support(support(dir.path()));
     let hook = agent.subagent_hook().unwrap();
 
-    // The mock session model declares no thinking levels.
-    let out = hook(
-        SubagentOp::Run,
-        json!({ "prompt": "a", "thinking": "high" }),
-    )
-    .await;
-    assert_eq!(out["status"], json!("failed"), "{out}");
-    assert!(
-        out["error"]
-            .as_str()
-            .unwrap()
-            .contains("does not support thinking"),
-        "{out}"
-    );
-    // `off` is always allowed.
     let out = hook(SubagentOp::Run, json!({ "prompt": "a", "thinking": "off" })).await;
     assert_eq!(out["status"], json!("completed"), "{out}");
 }
