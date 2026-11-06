@@ -59,6 +59,20 @@ fn list_lines_keep_their_markers() {
     assert_eq!(text, ["- Hello", "- World", "1. one", "2. two"]);
 }
 
+/// A source line may hold only its marker, mid-stream or hand-written. The
+/// block parser reads it as an empty list item and emits no text, so the
+/// renderer must keep it literal.
+#[test]
+fn a_line_that_holds_only_a_list_marker_renders() {
+    assert_eq!(rendered_text("-"), ["-"]);
+    assert_eq!(rendered_text("1."), ["1."]);
+    assert_eq!(rendered_text("2)"), ["2)"]);
+    assert_eq!(
+        rendered_text("1. one\n2.\n3. three"),
+        ["1. one", "2.", "3. three"]
+    );
+}
+
 #[test]
 fn analyze_paragraph_records_source_range() {
     let blocks = analyze_blocks("hello world");

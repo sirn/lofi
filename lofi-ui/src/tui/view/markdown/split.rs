@@ -59,10 +59,15 @@ pub(super) fn split_paragraph_lines(
 
 /// Byte length of the list marker (bullet or ordered) plus its trailing
 /// whitespace at the start of `line`, after any indentation. Returns 0 when
-/// the line does not open with a list marker.
+/// the line does not open with a list marker. A line that holds only its
+/// marker counts as a marker with an empty body: `pulldown` reads it as an
+/// empty list item and drops it, so it must stay literal.
 pub(super) fn list_marker_len(line: &str) -> usize {
     let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
     let rest = &line[indent..];
+    if matches!(rest, "-" | "*" | "+") {
+        return line.len();
+    }
     let after_bullet = rest
         .strip_prefix("- ")
         .or_else(|| rest.strip_prefix("* "))
@@ -70,13 +75,14 @@ pub(super) fn list_marker_len(line: &str) -> usize {
     if let Some(r) = after_bullet {
         return indent + (rest.len() - r.len());
     }
-    // Ordered list: `N.` or `N)` followed by a space.
+    // Ordered list: `N.` or `N)`, followed by a space or by nothing.
     let digit_len = rest.bytes().take_while(u8::is_ascii_digit).count();
     if digit_len > 0 {
-        if let Some(r) = rest[digit_len..]
-            .strip_prefix(". ")
-            .or_else(|| rest[digit_len..].strip_prefix(") "))
-        {
+        let tail = &rest[digit_len..];
+        if tail == "." || tail == ")" {
+            return line.len();
+        }
+        if let Some(r) = tail.strip_prefix(". ").or_else(|| tail.strip_prefix(") ")) {
             return indent + (rest.len() - r.len());
         }
     }
