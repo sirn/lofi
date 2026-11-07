@@ -15,8 +15,14 @@ fn choice_label(choice: ConfirmResponse) -> &'static str {
     match choice {
         ConfirmResponse::Allow => "Allow",
         ConfirmResponse::Deny => "Deny",
-        ConfirmResponse::Grant(lofi_types::Access::Read) => "Read only",
-        ConfirmResponse::Grant(lofi_types::Access::Write) => "Read & write",
+        ConfirmResponse::Grant {
+            access: lofi_types::Access::Read,
+            ..
+        } => "Read only",
+        ConfirmResponse::Grant {
+            access: lofi_types::Access::Write,
+            ..
+        } => "Read & write",
     }
 }
 
@@ -56,6 +62,7 @@ impl App {
         let new_front = self.pending_confirms.first().map(|req| req.id);
         if old_front != new_front {
             self.confirm_selected = 0;
+            self.confirm_narrow = false;
             self.confirm_scroll = 0;
             self.confirm_total = 0;
             self.confirm_view_h = 0;
@@ -133,6 +140,7 @@ impl App {
         {
             self.pending_confirms.remove(0);
             self.confirm_selected = 0;
+            self.confirm_narrow = false;
             self.confirm_scroll = 0;
             self.confirm_total = 0;
             self.confirm_view_h = 0;
@@ -188,6 +196,10 @@ impl App {
             KeyCode::Char('a' | 'A' | 'y' | 'Y') => choices.first().copied(),
             KeyCode::Char('w' | 'W') => choices.iter().find(|c| c.is_grant_write()).copied(),
             KeyCode::Char('r' | 'R') => choices.iter().find(|c| c.is_grant_read()).copied(),
+            KeyCode::Char('i' | 'I') => {
+                self.confirm_narrow = self.confirm_offers_narrow() && !self.confirm_narrow;
+                None
+            }
             KeyCode::Char('d' | 'D' | 'n' | 'N') | KeyCode::Esc => Some(ConfirmResponse::Deny),
             KeyCode::Char('c') if ctrl => Some(ConfirmResponse::Deny),
             _ => None,
@@ -198,6 +210,7 @@ impl App {
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             let _ = req.respond.send(choice);
             self.confirm_selected = 0;
+            self.confirm_narrow = false;
             self.confirm_scroll = 0;
             self.confirm_total = 0;
             self.confirm_view_h = 0;
@@ -230,6 +243,25 @@ impl App {
             .collect()
     }
 
+    /// Whether the front prompt offers the requested directory as a second,
+    /// narrower unit beside the project root.
+    fn confirm_offers_narrow(&self) -> bool {
+        let Some(req) = self.pending_confirms.first() else {
+            return false;
+        };
+        let reason = req
+            .reason
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        matches!(
+            *reason,
+            lofi_core::ConfirmReason::OutsideRoot {
+                narrow: Some(_),
+                ..
+            }
+        )
+    }
+
     /// The response choices the front confirmation offers, in button order.
     /// A directory grant for a read offers read-only first, because that is
     /// the least access the operation needs; a write offers only read and
@@ -245,14 +277,29 @@ impl App {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match *reason {
             lofi_core::ConfirmReason::OutsideRoot { requested, .. } => {
+                // The buttons choose the access; the scope the answer grants
+                // is the toggle the modal carries beside them.
+                let narrow = self.confirm_narrow;
                 if requested == Access::Read {
                     vec![
-                        ConfirmResponse::Grant(Access::Read),
-                        ConfirmResponse::Grant(Access::Write),
+                        ConfirmResponse::Grant {
+                            access: Access::Read,
+                            narrow,
+                        },
+                        ConfirmResponse::Grant {
+                            access: Access::Write,
+                            narrow,
+                        },
                         ConfirmResponse::Deny,
                     ]
                 } else {
-                    vec![ConfirmResponse::Grant(Access::Write), ConfirmResponse::Deny]
+                    vec![
+                        ConfirmResponse::Grant {
+                            access: Access::Write,
+                            narrow,
+                        },
+                        ConfirmResponse::Deny,
+                    ]
                 }
             }
             _ => vec![ConfirmResponse::Allow, ConfirmResponse::Deny],

@@ -384,6 +384,9 @@ pub(crate) struct App {
     /// approval that takes a moment never leaves a `blocked` record behind.
     confirm_waiting: Option<(u64, Instant)>,
     confirm_selected: usize,
+    /// Whether the front directory grant answers for the requested directory
+    /// instead of the project root the prompt offers by default.
+    confirm_narrow: bool,
     confirm_scroll: usize,
     confirm_total: usize,
     confirm_view_h: usize,

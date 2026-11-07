@@ -221,15 +221,29 @@ fn canonicalize_partial(p: &Path) -> PathBuf {
     resolved
 }
 
-/// The directory an outside-workspace request would use: the requested
-/// directory itself, or the directory that holds the requested file. This is
-/// the unit of approval. The full path is canonicalized first, so a symlink
-/// names the directory the retry will resolve into; the parent-chain walk
-/// below covers a not-yet-existing file. The candidate comes from the
-/// request instead of the nearest existing ancestor, so writing a new
-/// top-level directory never turns into a grant for its parent (or for
-/// `/`).
-pub(super) fn approval_candidate(p: &Path) -> Option<PathBuf> {
+/// The directory a grant for an outside-workspace request offers: the project
+/// root that holds the request, and the requested directory itself as a
+/// narrower choice when the two differ. A grant for the directory alone does
+/// not cover a sibling or the checkout root, so each of those would ask again;
+/// the project root answers the whole tree in one decision.
+pub(super) struct GrantCandidate {
+    /// The default unit: the project root, or the requested directory when no
+    /// marker names one.
+    pub dir: PathBuf,
+    /// The requested directory, when it sits below the default unit.
+    pub narrow: Option<PathBuf>,
+    /// The marker that named the project root, shown in the prompt.
+    pub marker: Option<&'static str>,
+}
+
+/// The directory an outside-workspace request names: the requested directory
+/// itself, or the directory that holds the requested file. The full path is
+/// canonicalized first, so a symlink names the directory the retry will
+/// resolve into; the parent-chain walk below covers a not-yet-existing file.
+/// The candidate comes from the request instead of the nearest existing
+/// ancestor, so writing a new top-level directory never turns into a grant
+/// for its parent (or for the filesystem root).
+fn requested_dir(p: &Path) -> Option<PathBuf> {
     let dir = if let Ok(canon) = p.canonicalize() {
         if canon.is_dir() {
             canon
@@ -249,6 +263,47 @@ pub(super) fn approval_candidate(p: &Path) -> Option<PathBuf> {
     // offered.
     dir.parent()?;
     Some(dir)
+}
+
+/// [`requested_dir`] widened to the project root when a marker names one
+/// below the home directory.
+pub(super) fn grant_candidate(p: &Path) -> Option<GrantCandidate> {
+    let home = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from);
+    Some(grant_candidate_in(requested_dir(p)?, home.as_deref()))
+}
+
+/// [`grant_candidate`] with the home directory passed in, so a test can pin
+/// the bound the walk stops at.
+pub(super) fn grant_candidate_in(dir: PathBuf, home: Option<&Path>) -> GrantCandidate {
+    // The request is canonical, so the bound has to be too: a home reached
+    // through a symlink does not contain its own physical path, which would
+    // let the walk reach the home directory itself. A bound that does not
+    // resolve is no bound that can be trusted, so nothing is widened.
+    let bound = match home {
+        Some(home) => match home.canonicalize() {
+            Ok(home) => Some(home),
+            Err(_) => return narrow_only(dir),
+        },
+        None => None,
+    };
+    match lofi_types::project::nearest_below(&dir, bound.as_deref()) {
+        Some(root) if root.dir != dir => GrantCandidate {
+            dir: root.dir,
+            narrow: Some(dir),
+            marker: Some(root.marker),
+        },
+        _ => narrow_only(dir),
+    }
+}
+
+fn narrow_only(dir: PathBuf) -> GrantCandidate {
+    GrantCandidate {
+        dir,
+        narrow: None,
+        marker: None,
+    }
 }
 
 pub(super) fn reject_non_regular(label: &str, path: &Path) -> Result<()> {

@@ -43,20 +43,37 @@ pub struct ConfirmRequest {
 pub enum ConfirmResponse {
     Allow,
     Deny,
-    Grant(lofi_types::Access),
+    Grant {
+        access: lofi_types::Access,
+        /// Grant the requested directory rather than the project root offered
+        /// as the default.
+        narrow: bool,
+    },
 }
 
 impl ConfirmResponse {
     /// Whether this answer grants write access to a directory.
     #[must_use]
     pub fn is_grant_write(self) -> bool {
-        matches!(self, Self::Grant(lofi_types::Access::Write))
+        matches!(
+            self,
+            Self::Grant {
+                access: lofi_types::Access::Write,
+                ..
+            }
+        )
     }
 
     /// Whether this answer grants read-only access to a directory.
     #[must_use]
     pub fn is_grant_read(self) -> bool {
-        matches!(self, Self::Grant(lofi_types::Access::Read))
+        matches!(
+            self,
+            Self::Grant {
+                access: lofi_types::Access::Read,
+                ..
+            }
+        )
     }
 }
 

@@ -83,12 +83,19 @@ pub enum ConfirmReason {
     Policy,
     /// A tool path outside the workspace root wants one directory granted.
     /// `requested` is the access the failing operation needs; `current` is
-    /// the access a read-only grant already covering the directory holds,
-    /// when the prompt is a widening request.
+    /// the strongest grant that already covers the requested directory, so a
+    /// prompt can say what is held instead of implying it covers `dir`.
     OutsideRoot {
+        /// The directory offered by default: the project root holding the
+        /// request, or the requested directory itself.
         dir: String,
+        /// The requested directory, when it sits below `dir` and can be
+        /// granted on its own.
+        narrow: Option<String>,
+        /// The project marker that named `dir`, for the prompt to say why.
+        marker: Option<&'static str>,
         requested: lofi_types::Access,
-        current: Option<lofi_types::Access>,
+        current: Option<lofi_types::GrantedDir>,
     },
     AutoEvaluating {
         started_at: std::time::Instant,
@@ -131,12 +138,19 @@ pub type ConfirmFn = Arc<
 
 pub use lofi_types::GrantedDir;
 
-/// A directory-grant request: the candidate directory and the access the
-/// failing operation needs. The host answers with a grant that must cover
-/// the directory and allow the requested access, or `None` when the user
-/// refuses.
+/// A directory-grant request: the directory offered by default, the narrower
+/// directory the request itself names, and the access the failing operation
+/// needs. The host answers with a grant that must cover one of the two and
+/// allow the requested access, or `None` when the user refuses.
 pub struct DirApproval {
+    /// The default unit: the project root that holds the request, or the
+    /// requested directory when no marker names one.
     pub dir: PathBuf,
+    /// The requested directory, offered as a narrower grant when it differs
+    /// from `dir`.
+    pub narrow: Option<PathBuf>,
+    /// The project marker that named `dir`, so the prompt can say why.
+    pub marker: Option<&'static str>,
     pub requested: lofi_types::Access,
 }
 

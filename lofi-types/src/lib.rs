@@ -7,6 +7,7 @@ mod decision;
 mod id;
 mod message;
 mod model;
+pub mod project;
 pub mod recall;
 mod session;
 mod stream;

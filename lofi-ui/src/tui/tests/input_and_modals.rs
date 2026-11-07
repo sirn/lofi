@@ -512,7 +512,10 @@ fn grant_dialog_offers_read_only_by_default_for_reads() {
     assert!(a.pending_confirms.is_empty());
     assert_eq!(
         response.try_recv(),
-        Ok(lofi_core::ConfirmResponse::Grant(lofi_types::Access::Read))
+        Ok(lofi_core::ConfirmResponse::Grant {
+            access: lofi_types::Access::Read,
+            narrow: false,
+        })
     );
 
     // The write hotkey grants read and write without moving the selection.
@@ -522,7 +525,88 @@ fn grant_dialog_offers_read_only_by_default_for_reads() {
     assert!(a.pending_confirms.is_empty());
     assert_eq!(
         response.try_recv(),
-        Ok(lofi_core::ConfirmResponse::Grant(lofi_types::Access::Write))
+        Ok(lofi_core::ConfirmResponse::Grant {
+            access: lofi_types::Access::Write,
+            narrow: false,
+        })
+    );
+}
+
+#[test]
+fn grant_dialog_offers_the_requested_directory_on_request() {
+    // The prompt offers the project root by default; 'i' aims the same answer
+    // at the directory the request named.
+    let mut a = app();
+    let (req, mut response) =
+        grant_request_with_narrow("/data/repo", "/data/repo/src", lofi_types::Access::Read);
+    a.pending_confirms.push(req);
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(a.pending_confirms.is_empty());
+    assert_eq!(
+        response.try_recv(),
+        Ok(lofi_core::ConfirmResponse::Grant {
+            access: lofi_types::Access::Read,
+            narrow: true,
+        })
+    );
+
+    // Without the toggle the same prompt grants the project root.
+    let (req, mut response) =
+        grant_request_with_narrow("/data/repo", "/data/repo/src", lofi_types::Access::Read);
+    a.pending_confirms.push(req);
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        response.try_recv(),
+        Ok(lofi_core::ConfirmResponse::Grant {
+            access: lofi_types::Access::Read,
+            narrow: false,
+        })
+    );
+}
+
+#[test]
+fn the_scope_toggle_only_exists_for_a_narrowed_grant() {
+    // A prompt that offers one directory has nothing to narrow, and a fresh
+    // prompt starts at the project root again.
+    let mut a = app();
+    let (req, mut response) = grant_request("/nix/store", lofi_types::Access::Read, None);
+    a.pending_confirms.push(req);
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        response.try_recv(),
+        Ok(lofi_core::ConfirmResponse::Grant {
+            access: lofi_types::Access::Read,
+            narrow: false,
+        })
+    );
+
+    // Answering a narrowed prompt leaves the next one at the project root.
+    let (req, mut response) =
+        grant_request_with_narrow("/data/repo", "/data/repo/src", lofi_types::Access::Read);
+    a.pending_confirms.push(req);
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        response.try_recv(),
+        Ok(lofi_core::ConfirmResponse::Grant {
+            access: lofi_types::Access::Read,
+            narrow: true,
+        })
+    );
+
+    let (req, mut response) =
+        grant_request_with_narrow("/data/repo", "/data/repo/src", lofi_types::Access::Read);
+    a.pending_confirms.push(req);
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        response.try_recv(),
+        Ok(lofi_core::ConfirmResponse::Grant {
+            access: lofi_types::Access::Read,
+            narrow: false,
+        }),
+        "the next prompt starts at the project root"
     );
 }
 
@@ -540,7 +624,10 @@ fn grant_dialog_offers_only_write_for_writes() {
     assert!(a.pending_confirms.is_empty());
     assert_eq!(
         response.try_recv(),
-        Ok(lofi_core::ConfirmResponse::Grant(lofi_types::Access::Write))
+        Ok(lofi_core::ConfirmResponse::Grant {
+            access: lofi_types::Access::Write,
+            narrow: false,
+        })
     );
 }
 
@@ -558,6 +645,94 @@ fn permission_dialog_action_keys_resolve_directly() {
         a.handle_confirm_key(&KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
         assert_eq!(response.try_recv(), Ok(expected), "key {key}");
     }
+}
+
+/// One rendered frame of the whole app, one line per terminal row.
+fn screen_of(a: &mut crate::tui::App) -> String {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let mut term = Terminal::new(TestBackend::new(100, 28)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, a)).unwrap();
+    (0..28)
+        .map(|y| {
+            (0..100)
+                .map(|x| term.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn grant_dialog_names_the_project_root_and_offers_the_toggle() {
+    let mut a = app();
+    let (req, _response) =
+        grant_request_with_narrow("/data/repo", "/data/repo/src", lofi_types::Access::Read);
+    a.pending_confirms.push(req);
+    let screen = screen_of(&mut a);
+    // The panel wraps, so the prose is asserted by its parts.
+    assert!(screen.contains("/data/repo and its"), "{screen}");
+    assert!(screen.contains("project root: .jj"), "{screen}");
+    assert!(
+        screen.contains("Read only") && screen.contains("Read & write"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("this dir"),
+        "the toggle is offered: {screen}"
+    );
+
+    // Narrowed, the same prompt names the directory it would grant.
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+    let screen = screen_of(&mut a);
+    assert!(screen.contains("/data/repo/src and its"), "{screen}");
+    assert!(
+        !screen.contains("project root: .jj"),
+        "the marker is not the unit now: {screen}"
+    );
+}
+
+#[test]
+fn a_read_grant_below_the_root_does_not_make_it_read_only() {
+    // The remembered read-only grant holds the requested directory, not the
+    // project root the prompt shows, so the ask is a new wider grant and not
+    // an upgrade of the tree the user already allowed.
+    let mut a = app();
+    let (req, _response) = grant_request_for(
+        "/data/repo",
+        Some("/data/repo/src"),
+        lofi_types::Access::Write,
+        Some(read_grant("/data/repo/src")),
+    );
+    a.pending_confirms.push(req);
+    let screen = screen_of(&mut a);
+    assert!(
+        screen.contains("lofi wants read and write access"),
+        "{screen}"
+    );
+    assert!(screen.contains("project root: .jj"), "{screen}");
+    assert!(!screen.contains("read-only"), "{screen}");
+}
+
+#[test]
+fn a_read_grant_on_the_root_offers_widening_it() {
+    let mut a = app();
+    let (req, _response) = grant_request_for(
+        "/data/repo",
+        Some("/data/repo/src"),
+        lofi_types::Access::Write,
+        Some(read_grant("/data/repo")),
+    );
+    a.pending_confirms.push(req);
+    let screen = screen_of(&mut a);
+    assert!(screen.contains("read-only"), "{screen}");
+    assert!(!screen.contains("lofi wants read and write"), "{screen}");
+
+    // Narrowed, the read-only grant still holds the shown unit.
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+    let screen = screen_of(&mut a);
+    assert!(screen.contains("read-only"), "{screen}");
+    assert!(!screen.contains("lofi wants read and write"), "{screen}");
 }
 
 #[test]

@@ -109,45 +109,8 @@ fn dir_agents_md(root: &std::path::Path) -> Vec<(String, String)> {
     found
 }
 
-const PROJECT_ROOT_MARKERS: &[&str] = &[
-    // Version-control metadata. `.git` may be either a directory or a file
-    // in linked worktrees, so marker detection deliberately uses `exists`.
-    ".git",
-    ".jj",
-    ".hg",
-    ".svn",
-    // High-signal language and build manifests.
-    "Cargo.toml",
-    "go.mod",
-    "go.work",
-    "package.json",
-    "deno.json",
-    "deno.jsonc",
-    "pyproject.toml",
-    "pom.xml",
-    "build.gradle",
-    "build.gradle.kts",
-    "settings.gradle",
-    "settings.gradle.kts",
-    "Gemfile",
-    "composer.json",
-    "mix.exs",
-    "pubspec.yaml",
-    "Package.swift",
-    "CMakeLists.txt",
-];
-
-fn is_project_root(path: &std::path::Path) -> bool {
-    PROJECT_ROOT_MARKERS
-        .iter()
-        .any(|marker| path.join(marker).exists())
-}
-
 fn project_boundary(start: &std::path::Path) -> Option<PathBuf> {
-    start
-        .ancestors()
-        .find(|path| is_project_root(path))
-        .map(std::path::Path::to_path_buf)
+    lofi_types::project::nearest_any(start).map(|root| root.dir)
 }
 
 /// The startup path passes `None` and gets a fresh agent (a new tmp dir).
@@ -606,21 +569,6 @@ mod tests {
         assert_eq!(prompt.matches(r#"<agents_md source="global">"#).count(), 1);
         assert_eq!(prompt.matches("</agents_md>").count(), 1);
         assert!(prompt.contains("Be terse."));
-    }
-
-    #[test]
-    fn recognizes_common_project_root_markers() {
-        let tmp = TempDir::new().unwrap();
-        let plain = tmp.path().join("plain");
-        fs::create_dir_all(&plain).unwrap();
-        assert!(!is_project_root(&plain));
-
-        for marker in PROJECT_ROOT_MARKERS {
-            let candidate = tmp.path().join(marker.replace('.', "_"));
-            fs::create_dir_all(&candidate).unwrap();
-            write(&candidate.join(marker), "marker");
-            assert!(is_project_root(&candidate), "did not recognize {marker}");
-        }
     }
 
     #[test]

@@ -851,19 +851,35 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
         lofi_core::ConfirmReason::Policy => "Shell wants to run this command".to_string(),
         lofi_core::ConfirmReason::OutsideRoot {
             dir,
+            narrow,
+            marker,
             requested,
             current,
         } => {
-            let dir =
-                crate::tui::text::abbreviate_path(std::path::Path::new(dir.as_str()), content_w);
+            let shown = confirm_grant_unit(dir, narrow.as_deref(), app.confirm_narrow);
+            // Only a grant that holds the shown unit is described as already
+            // covering it: a read-only grant for the requested directory does
+            // not make the project root read-only.
+            let widens = current.as_ref().is_some_and(|grant| {
+                grant.access == lofi_types::Access::Read
+                    && std::path::Path::new(shown).starts_with(&grant.dir)
+            });
+            let unit = crate::tui::text::abbreviate_path(std::path::Path::new(shown), content_w);
             let access = match requested {
                 lofi_types::Access::Read => "read",
                 lofi_types::Access::Write => "read and write",
             };
-            if *current == Some(lofi_types::Access::Read) {
-                format!("{dir} and its subdirectories are read-only; grant write access too?")
+            if widens {
+                format!("{unit} and its subdirectories are read-only; grant write access too?")
+            } else if app.confirm_narrow && narrow.is_some() {
+                let root = crate::tui::text::abbreviate_path(std::path::Path::new(dir), content_w);
+                format!("lofi wants {access} access to {unit} and its subdirectories, not {root}")
+            } else if let Some(marker) = marker {
+                format!(
+                    "lofi wants {access} access to {unit} and its subdirectories (project root: {marker})"
+                )
             } else {
-                format!("lofi wants {access} access to {dir} and its subdirectories")
+                format!("lofi wants {access} access to {unit} and its subdirectories")
             }
         }
         lofi_core::ConfirmReason::AutoEvaluating { started_at } => {
@@ -891,8 +907,9 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
     // A directory-grant request shows a path, not a command: abbreviate it
     // so it fits the panel instead of wrapping. Shell commands stay whole.
     let command = match &reason {
-        lofi_core::ConfirmReason::OutsideRoot { dir, .. } => {
-            crate::tui::text::abbreviate_path(std::path::Path::new(dir.as_str()), content_w)
+        lofi_core::ConfirmReason::OutsideRoot { dir, narrow, .. } => {
+            let unit = confirm_grant_unit(dir, narrow.as_deref(), app.confirm_narrow);
+            crate::tui::text::abbreviate_path(std::path::Path::new(unit), content_w)
         }
         _ => req.command.clone(),
     };
@@ -917,16 +934,29 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(Clear, popup);
 
     let key = t.key_hint_style();
-    let help = Line::from(vec![
+    let mut hints = vec![
         Span::styled("↑/↓", key),
         Span::styled(" scroll  ", t.subtle_style()),
         Span::styled("←/→", key),
         Span::styled(" choose  ", t.subtle_style()),
-        Span::styled("enter", key),
-        Span::styled(" confirm  ", t.subtle_style()),
-        Span::styled("esc", key),
-        Span::styled(" deny", t.subtle_style()),
-    ]);
+    ];
+    // Only a grant for a project root offers the request's own directory as a
+    // narrower unit, so only that prompt advertises the toggle.
+    if matches!(
+        &reason,
+        lofi_core::ConfirmReason::OutsideRoot {
+            narrow: Some(_),
+            ..
+        }
+    ) {
+        hints.push(Span::styled("i", key));
+        hints.push(Span::styled(" this dir  ", t.subtle_style()));
+    }
+    hints.push(Span::styled("enter", key));
+    hints.push(Span::styled(" confirm  ", t.subtle_style()));
+    hints.push(Span::styled("esc", key));
+    hints.push(Span::styled(" deny", t.subtle_style()));
+    let help = Line::from(hints);
 
     let queue_count = app.pending_confirms.len();
     let counter = if queue_count > 1 {
@@ -1025,6 +1055,15 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
     }
     let actions = Line::from(spans).alignment(Alignment::Right);
     f.render_widget(Paragraph::new(actions), rows[5]);
+}
+
+/// The directory a directory-grant prompt names: the project root it offers
+/// by default, or the requested directory once the scope is narrowed.
+fn confirm_grant_unit<'a>(dir: &'a str, narrow: Option<&'a str>, narrowed: bool) -> &'a str {
+    match (narrowed, narrow) {
+        (true, Some(narrow)) => narrow,
+        _ => dir,
+    }
 }
 
 /// Compact `mm:ss` for a job's running/elapsed wall time.

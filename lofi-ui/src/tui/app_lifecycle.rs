@@ -128,6 +128,7 @@ impl App {
             deferred_confirms: Vec::new(),
             confirm_waiting: None,
             confirm_selected: 0,
+            confirm_narrow: false,
             confirm_scroll: 0,
             confirm_total: 0,
             confirm_view_h: 0,

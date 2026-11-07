@@ -29,7 +29,7 @@ pub mod write;
 pub use bash_env::BashEnv;
 pub use bash_util::{read_capped, wait_for_cancel, PgrpKillGuard};
 use fs::{
-    approval_candidate, atomic_write, canonicalize_up, create_dir_with_mode, find_walk,
+    atomic_write, canonicalize_up, create_dir_with_mode, find_walk, grant_candidate,
     is_outside_error, parse_grep_args, reject_non_regular, reject_symlink_leaf, resolve_for_read,
     set_file_mode, walk_files_capped, WalkCeilings, WalkLimit, OUTSIDE_ROOT_ERROR,
 };
@@ -493,19 +493,26 @@ impl BuiltinTools {
                 let Some(approve) = &self.approve_dir else {
                     return Err(err);
                 };
-                let Some(candidate) = approval_candidate(Path::new(p)) else {
+                let Some(candidate) = grant_candidate(Path::new(p)) else {
                     return Err(err);
                 };
                 let Some(granted) = approve(crate::DirApproval {
-                    dir: candidate.clone(),
+                    dir: candidate.dir.clone(),
+                    narrow: candidate.narrow.clone(),
+                    marker: candidate.marker,
                     requested,
                 })
                 .await
-                .filter(|g| g.access.allows(requested) && candidate.starts_with(&g.dir)) else {
+                .filter(|g| {
+                    // narrow, when present, lies below the project root, so
+                    // one comparison covers both units the prompt offered.
+                    let unit = candidate.narrow.as_ref().unwrap_or(&candidate.dir);
+                    g.access.allows(requested) && unit.starts_with(&g.dir)
+                }) else {
                     return Err(Error::Tool(format!(
                         "{OUTSIDE_ROOT_ERROR}: {p} (user refused {} access to {})",
                         requested.as_str(),
-                        candidate.display()
+                        candidate.dir.display()
                     )));
                 };
                 roots.push(granted.dir);
@@ -1465,6 +1472,75 @@ mod tests {
             "x"
         );
         assert_eq!(*asked.lock().unwrap(), vec![candidate]);
+    }
+
+    #[test]
+    fn a_request_below_a_project_root_offers_the_root() {
+        // The grant unit is the checkout, not the requested directory: a grant
+        // for one directory leaves every sibling asking again.
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let src = repo.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(repo.join(".jj"), "").unwrap();
+
+        let candidate = fs::grant_candidate_in(src.canonicalize().unwrap(), None);
+        assert_eq!(candidate.dir, repo.canonicalize().unwrap());
+        assert_eq!(candidate.narrow, Some(src.canonicalize().unwrap()));
+        assert_eq!(candidate.marker, Some(".jj"));
+    }
+
+    #[test]
+    fn a_request_the_home_bound_rejects_is_granted_as_named() {
+        // A stray marker in the home directory must not become a home-wide
+        // grant, so the request keeps its own directory as the unit.
+        let home = tempdir().unwrap();
+        let dev = home.path().join("dev");
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(home.path().join("flake.nix"), "").unwrap();
+
+        let home = home.path().canonicalize().unwrap();
+        let candidate = fs::grant_candidate_in(dev.canonicalize().unwrap(), Some(&home));
+        assert_eq!(candidate.dir, dev.canonicalize().unwrap());
+        assert_eq!(candidate.narrow, None);
+        assert_eq!(candidate.marker, None);
+    }
+
+    #[test]
+    fn a_symlinked_home_still_bounds_the_walk() {
+        // The request is canonical, so the bound has to be: a home reached
+        // through a symlink does not contain its own physical path, and the
+        // walk would otherwise offer the home directory itself.
+        let tmp = tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let dev = home.join("dev");
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(home.join(".git"), "").unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&home, &link).unwrap();
+
+        let candidate = fs::grant_candidate_in(dev.canonicalize().unwrap(), Some(&link));
+        assert_eq!(candidate.dir, dev.canonicalize().unwrap());
+        assert_eq!(candidate.narrow, None);
+        assert_eq!(candidate.marker, None);
+    }
+
+    #[tokio::test]
+    async fn an_outside_read_asks_for_the_project_root() {
+        let (_dir, tools) = tools();
+        let outside = tempdir().unwrap();
+        let repo = outside.path().canonicalize().unwrap().join("repo");
+        let src = repo.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(repo.join(".jj"), "").unwrap();
+        std::fs::write(src.join("f.txt"), "hello").unwrap();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let tools = tools.with_approve_dir(Some(recording_hook(Some(repo.clone()), asked.clone())));
+
+        let path = src.join("f.txt").to_string_lossy().into_owned();
+        let out = tools.read(&path, None, None).await.unwrap();
+        assert_eq!(out["content"], json!("hello"));
+        assert_eq!(*asked.lock().unwrap(), vec![repo]);
     }
 
     #[tokio::test]

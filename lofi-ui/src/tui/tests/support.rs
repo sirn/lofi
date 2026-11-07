@@ -123,7 +123,40 @@ pub(super) fn msg(m: Message) -> SessionEventKind {
 pub(super) fn grant_request(
     dir: &str,
     requested: lofi_types::Access,
-    current: Option<lofi_types::Access>,
+    current: Option<lofi_types::GrantedDir>,
+) -> (
+    lofi_core::ConfirmRequest,
+    tokio::sync::oneshot::Receiver<lofi_core::ConfirmResponse>,
+) {
+    grant_request_for(dir, None, requested, current)
+}
+
+/// A grant request for a project root that offers the requested directory as
+/// the narrower unit.
+/// A read-only grant a prompt can name as the access it starts from.
+pub(super) fn read_grant(dir: &str) -> lofi_types::GrantedDir {
+    lofi_types::GrantedDir {
+        dir: std::path::PathBuf::from(dir),
+        access: lofi_types::Access::Read,
+    }
+}
+
+pub(super) fn grant_request_with_narrow(
+    dir: &str,
+    narrow: &str,
+    requested: lofi_types::Access,
+) -> (
+    lofi_core::ConfirmRequest,
+    tokio::sync::oneshot::Receiver<lofi_core::ConfirmResponse>,
+) {
+    grant_request_for(dir, Some(narrow), requested, None)
+}
+
+pub(super) fn grant_request_for(
+    dir: &str,
+    narrow: Option<&str>,
+    requested: lofi_types::Access,
+    current: Option<lofi_types::GrantedDir>,
 ) -> (
     lofi_core::ConfirmRequest,
     tokio::sync::oneshot::Receiver<lofi_core::ConfirmResponse>,
@@ -136,6 +169,8 @@ pub(super) fn grant_request(
             reason: std::sync::Arc::new(std::sync::Mutex::new(
                 lofi_core::ConfirmReason::OutsideRoot {
                     dir: dir.to_string(),
+                    narrow: narrow.map(str::to_string),
+                    marker: narrow.map(|_| ".jj"),
                     requested,
                     current,
                 },
